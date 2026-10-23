@@ -8,6 +8,8 @@ from backend.celery_dispatch import (
     apply_sender_bounds,
     restore_worker_result_retries,
 )
+from backend.services import research_worker
+from backend.services.research_worker import QUEUE as RESEARCH_QUEUE
 
 # Under memory pressure the kernel must kill THIS worker, never the desktop
 # (2026-08-04 client box lockups). Early, before any heavy allocation.
@@ -119,6 +121,14 @@ def create_celery_app():
             # to the unconsumed 'celery' queue, so "Generate character" in Cast
             # leaves every sample stuck at status=pending with no images.
             'character.*': {'queue': 'default'},
+            # Custom-named, so routed explicitly like google_indexing.* above.
+            'connections.*': {'queue': 'default'},
+            # A research run owns its worker for up to 13 hours, so it runs on
+            # the research worker, started when a run is queued
+            # (backend/services/research_worker.py). The nightly window check
+            # and the post-index check take moments and stay on main.
+            'autoresearch.execute_run': {'queue': RESEARCH_QUEUE},
+            'autoresearch.*': {'queue': 'default'},
         },
 
         beat_schedule={
@@ -176,9 +186,20 @@ def create_celery_app():
                 'schedule': 14400.0,  # 4 hours
                 'options': {'queue': 'default'},
             },
+            # Posts nothing: closes approved drafts nothing here will post.
+            # A Reddit/YouTube/Facebook post starts only from a person's
+            # "Post now" (social_outreach.post_watched_draft).
             'social-outreach-process-approved': {
                 'task': 'social_outreach.tick_process_approved_drafts',
                 'schedule': 60.0,  # 1 minute
+                'options': {'queue': 'default'},
+            },
+            # Sends approved publishes whose scheduled time has come, one at a
+            # time, and checks posts a platform holds for later. Held back by
+            # its gate while nothing is scheduled.
+            'connections-publish-due': {
+                'task': 'connections.publish_due_tick',
+                'schedule': 60.0,
                 'options': {'queue': 'default'},
             },
             # Reap Subjects stuck in training_status='training' past the train cap
@@ -190,7 +211,7 @@ def create_celery_app():
                 'options': {'queue': 'default'},
             },
             # YouTube reply-scrape recon is intentionally NOT scheduled until
-            # recon._fetch_recent_replies_to_guaardvark is implemented (stub
+            # recon._fetch_recent_replies_to_own_comments is implemented (stub
             # returns []). Fire on demand via /run-pass or hand-seed via
             # recon.enqueue_youtube_reply_candidate.
             # Reap outreach rows stuck at status=processing after worker kill.
@@ -436,6 +457,7 @@ def create_celery_app():
             tick_reddit_outreach,
             tick_self_share,
             tick_process_approved_drafts,
+            post_watched_draft,  # started by a person's "Post now", never scheduled
             tick_reap_stuck_processing,
             tick_recon_youtube_replies,  # on-demand only; not in beat until scrape lands
         )
@@ -453,6 +475,13 @@ def create_celery_app():
         'social-outreach-process-approved': 'social_outreach',
         'social-outreach-reap-stuck-processing': 'social_outreach',
     })
+
+    try:
+        from backend.tasks.publish_schedule_tasks import publish_due_tick  # noqa: F401
+        gate_beat_entries(celery_app, {'connections-publish-due': 'scheduled_publishes'})
+        logger.info("Scheduled publish task imported successfully")
+    except ImportError as e:
+        logger.warning(f"Could not import scheduled publish task: {e}")
 
     try:
         from backend.tasks.memory_maintenance_tasks import cleanup_old_session_memory  # noqa: F401
@@ -481,6 +510,8 @@ def create_celery_app():
         logger.info("RAG Autoresearch Celery tasks registered successfully")
     except ImportError as e:
         logger.warning(f"Could not import autoresearch tasks: {e}")
+    # Idle exit and CPU priority of the research worker; nothing in any other process.
+    research_worker.install(celery_app)
 
     try:
         from backend.tasks.video_render_tasks import create_video_render_tasks

@@ -1,4 +1,4 @@
-"""Settings → API key: GET /api/auth/status, signing a browser in and out with
+"""Settings → Access: GET /api/auth/status, signing a browser in and out with
 an HttpOnly cookie, and creating, replacing and removing the key.
 
 Drives the real auth blueprint and the tools blueprint behind the real auth
@@ -294,8 +294,9 @@ def test_the_cluster_proxy_does_not_pass_this_installs_key_or_sign_in_on():
         "Content-Type": "application/json",
         "Connection": "keep-alive",
     }
-    out = HttpProxyForwarder()._sanitize_headers(incoming, SimpleNamespace(api_key="node-key"), None)
+    out = HttpProxyForwarder()._sanitize_headers(incoming, SimpleNamespace(node_id="n2"), None)
     assert "X-API-Key" not in out and "Connection" not in out
     assert out["Cookie"] == "theme=dark"
     assert out["Content-Type"] == "application/json"
-    assert out["X-Guaardvark-API-Key"] == "node-key"
+    # The next node gets this machine's signature (forward()), not a key.
+    assert "X-Guaardvark-API-Key" not in out

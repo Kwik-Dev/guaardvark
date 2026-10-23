@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -164,6 +165,32 @@ class AudioFoundryClient:
         return self._generate("/generate/music", payload, output_path)
 
 
+# Loudness of a finished film, in LUFS. Each spoken line is compressed and
+# levelled to the speech target, the score sits 9 dB under it, and the whole
+# mix is brought to the speech target under a limiter. Measured on production 7:
+# - Kokoro lines came out between -17 and -22 LUFS with peaks 18-22 dB above
+#   that, and the ACE-Step score at -14; summed unlevelled (amix scaling each of
+#   10 inputs by 1/10) the film played at -32.6 LUFS.
+# - Levelled without compression the peaks reached +5 dBFS, and the limiter
+#   took the film down to -18 LUFS. The compressor below brings a line's peaks
+#   to 13-16 dB above its loudness, and the film lands at -16.6 LUFS.
+# - AAC adds about 1.5 dB between samples, so a -3 dBFS sample ceiling keeps
+#   the true peak under -1 dBTP.
+FILM_SPEECH_LUFS = -16.0
+FILM_MUSIC_LUFS = FILM_SPEECH_LUFS - 9.0
+FILM_SPEECH_COMPRESSOR = "acompressor=threshold=0.0631:ratio=4:attack=3:release=80"  # 4:1 above -24 dBFS
+FILM_PEAK_LIMIT = 0.71          # linear sample ceiling, -3 dBFS
+_MAX_GAIN_DB = 24.0             # a near-silent stem is not lifted into noise
+_SILENT_LUFS = -60.0
+
+
+def _gain_db(measured_lufs: float | None, target_lufs: float) -> float:
+    """Gain that brings a stem to the target, 0 when it is silent or unmeasured."""
+    if measured_lufs is None or measured_lufs <= _SILENT_LUFS:
+        return 0.0
+    return max(-_MAX_GAIN_DB, min(_MAX_GAIN_DB, target_lufs - measured_lufs))
+
+
 class FfmpegRunner:
     """Subprocess ffmpeg: concatenate shot clips and mix VO + music into a
     finished MP4. This is also the fallback final-render when the Shotcut/MLT
@@ -193,6 +220,24 @@ class FfmpegRunner:
         except (ValueError, AttributeError):
             return 0.0
 
+    def measure_loudness(self, path: str, pre_filter: str | None = None) -> float | None:
+        """Integrated loudness of the file's first audio stream in LUFS, after
+        `pre_filter` when one is given, or None when it has no audio stream or
+        ffmpeg cannot read it."""
+        chain = f"{pre_filter},ebur128=framelog=quiet" if pre_filter else "ebur128=framelog=quiet"
+        proc = subprocess.run(
+            [self.ffmpeg, "-hide_banner", "-nostats", "-i", path, "-map", "0:a:0",
+             "-af", chain, "-f", "null", "-"],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            return None
+        found = re.findall(r"^\s+I:\s+(-?[\d.]+|-inf) LUFS", proc.stderr, re.MULTILINE)
+        try:
+            return float(found[-1]) if found else None
+        except ValueError:
+            return None
+
     # -- public API (FFmpegRunner protocol) -------------------------------
     def concat_with_audio(
         self, *, video_clips: list[str], voiceovers: list[str | None],
@@ -216,8 +261,9 @@ class FfmpegRunner:
         self._run([*inputs, "-filter_complex", concat_filter, "-map", "[v]",
                    "-c:v", "libx264", "-pix_fmt", "yuv420p", silent_video])
 
-        # 2) Build the mixed audio bed: each VO delayed to its shot's start
-        #    offset, plus the music track at reduced volume.
+        # 2) Build the mixed audio bed: each VO levelled and delayed to its
+        #    shot's start offset (compressed first, so its peaks leave room
+        #    at speech level), plus the music track levelled under them.
         offsets: list[float] = []
         acc = 0.0
         for clip in video_clips:
@@ -234,20 +280,37 @@ class FfmpegRunner:
                 continue
             audio_inputs += ["-i", vo]
             delay_ms = int(off * 1000)
-            filters.append(f"[{idx}:a]adelay={delay_ms}|{delay_ms}[a{idx}]")
+            gain = _gain_db(self.measure_loudness(vo, FILM_SPEECH_COMPRESSOR), FILM_SPEECH_LUFS)
+            filters.append(f"[{idx}:a]{FILM_SPEECH_COMPRESSOR},volume={gain:.2f}dB,"
+                           f"adelay={delay_ms}|{delay_ms}[a{idx}]")
             labels.append(f"[a{idx}]")
             idx += 1
         if music_track:
             audio_inputs += ["-i", music_track]
-            filters.append(f"[{idx}:a]volume=0.35,atrim=0:{total:.3f}[a{idx}]")
+            gain = _gain_db(self.measure_loudness(music_track), FILM_MUSIC_LUFS)
+            filters.append(f"[{idx}:a]volume={gain:.2f}dB,atrim=0:{total:.3f}[a{idx}]")
             labels.append(f"[a{idx}]")
             idx += 1
 
         if labels:
+            mixed_raw = str(work / "_mixed_raw.wav")
             mixed_audio = str(work / "_mixed_audio.m4a")
-            amix = "".join(labels) + f"amix=inputs={len(labels)}:duration=longest:dropout_transition=0[aout]"
+            # Pad the bed to the film's length: -shortest below would otherwise
+            # cut the picture where the last line or the score ends. An apad
+            # without a length never ends when the output is WAV. The stems are
+            # already levelled, so amix sums them instead of dividing each by
+            # the input count.
+            amix = ("".join(labels)
+                    + f"amix=inputs={len(labels)}:duration=longest:dropout_transition=0:normalize=0,"
+                    + f"apad=whole_dur={total:.3f},atrim=0:{total:.3f}[aout]")
             self._run([*audio_inputs, "-filter_complex", ";".join(filters) + ";" + amix,
-                       "-map", "[aout]", "-c:a", "aac", mixed_audio])
+                       "-map", "[aout]", "-c:a", "pcm_f32le", mixed_raw])
+            # One static gain for the whole film keeps the balance set above;
+            # the limiter only catches peaks the gain pushes past its ceiling.
+            gain = _gain_db(self.measure_loudness(mixed_raw), FILM_SPEECH_LUFS)
+            self._run(["-i", mixed_raw, "-af",
+                       f"volume={gain:.2f}dB,alimiter=limit={FILM_PEAK_LIMIT}:level=0:latency=1",
+                       "-c:a", "aac", "-b:a", "192k", mixed_audio])
             # 3) Mux concatenated video + mixed audio.
             self._run(["-i", silent_video, "-i", mixed_audio, "-map", "0:v", "-map", "1:a",
                        "-c:v", "copy", "-c:a", "copy", "-shortest", str(out)])
@@ -255,7 +318,7 @@ class FfmpegRunner:
             # No audio at all — the silent concat IS the final render.
             shutil.move(silent_video, str(out))
 
-        for tmp in ("_concat_video.mp4", "_mixed_audio.m4a"):
+        for tmp in ("_concat_video.mp4", "_mixed_raw.wav", "_mixed_audio.m4a"):
             try:
                 (work / tmp).unlink(missing_ok=True)
             except OSError:
@@ -273,7 +336,7 @@ class VideoEditorComposeClient:
     """
 
     def __init__(self, backend_url: str):
-        # e.g. "http://localhost:5002/api"
+        # e.g. "http://127.0.0.1:5000/api"
         self.backend_url = backend_url.rstrip("/")
 
     def compose_arrangement(

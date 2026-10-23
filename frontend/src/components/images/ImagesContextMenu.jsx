@@ -21,9 +21,16 @@ import {
   IosShare as ShareIcon,
 } from '@mui/icons-material';
 
+// The stored value is the hex; the name is what the swatch tooltip says.
 const FOLDER_COLORS = [
-  '#90CAF9', '#A5D6A7', '#FFCC80', '#EF9A9A',
-  '#CE93D8', '#80DEEA', '#FFAB91', '#B0BEC5',
+  { hex: '#90CAF9', name: 'Blue' },
+  { hex: '#A5D6A7', name: 'Green' },
+  { hex: '#FFCC80', name: 'Orange' },
+  { hex: '#EF9A9A', name: 'Red' },
+  { hex: '#CE93D8', name: 'Purple' },
+  { hex: '#80DEEA', name: 'Cyan' },
+  { hex: '#FFAB91', name: 'Coral' },
+  { hex: '#B0BEC5', name: 'Grey' },
 ];
 
 const ImagesContextMenu = ({
@@ -45,6 +52,7 @@ const ImagesContextMenu = ({
   onArrangeIcons,
   onArrangeWindows,
   hasClipboard = false,
+  hasOpenWindows = false,
   _hasSelection = false,
   contextType = 'desktop',
   _selectedItem = null,
@@ -93,10 +101,12 @@ const ImagesContextMenu = ({
           <ListItemIcon><ArrangeIcon fontSize="small" /></ListItemIcon>
           <ListItemText>Arrange Icons</ListItemText>
         </MenuItem>,
-        <MenuItem key="arrange-windows" onClick={() => { onArrangeWindows?.(); onClose(); }}>
-          <ListItemIcon><ArrangeIcon fontSize="small" /></ListItemIcon>
-          <ListItemText>Arrange Windows</ListItemText>
-        </MenuItem>,
+        hasOpenWindows && (
+          <MenuItem key="arrange-windows" onClick={() => { onArrangeWindows?.(); onClose(); }}>
+            <ListItemIcon><ArrangeIcon fontSize="small" /></ListItemIcon>
+            <ListItemText>Arrange Windows</ListItemText>
+          </MenuItem>
+        ),
         hasClipboard ? [
           <Divider key="paste-div" />,
           <MenuItem key="paste" onClick={() => { onPaste?.(); onClose(); }}>
@@ -157,19 +167,19 @@ const ImagesContextMenu = ({
         <MenuItem key="color" disableRipple disableGutters sx={{ px: 1.5, py: 0.6 }}>
           <ListItemText sx={{ mr: 1 }}>Color</ListItemText>
           <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
-            {FOLDER_COLORS.map((color) => (
-              <Tooltip key={color} title={color}>
+            {FOLDER_COLORS.map(({ hex, name }) => (
+              <Tooltip key={hex} title={name}>
                 <Box
-                  onClick={(e) => { e.stopPropagation(); onColorChange?.(color); onClose(); }}
+                  onClick={(e) => { e.stopPropagation(); onColorChange?.(hex); onClose(); }}
                   sx={{
                     width: 20, height: 20, borderRadius: '50%',
-                    backgroundColor: color, cursor: 'pointer',
-                    border: folderColor === color ? '2px solid white' : '1px solid rgba(255,255,255,0.3)',
+                    backgroundColor: hex, cursor: 'pointer',
+                    border: folderColor === hex ? '2px solid white' : '1px solid rgba(255,255,255,0.3)',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     '&:hover': { transform: 'scale(1.2)' },
                   }}
                 >
-                  {folderColor === color && <CheckIcon sx={{ fontSize: 12, color: 'white' }} />}
+                  {folderColor === hex && <CheckIcon sx={{ fontSize: 12, color: 'white' }} />}
                 </Box>
               </Tooltip>
             ))}

@@ -131,7 +131,9 @@ const GpuStatusCard = React.forwardRef(
       }
     };
 
-    const vram = status?.vram;
+    // vram numbers are null when the GPU query failed (no GPU, driver down):
+    // nothing here may divide by them or print them as 0.
+    const vram = status?.vram?.total_mb > 0 ? status.vram : null;
     const models = status?.models || [];
     const usedPct = vram ? Math.round((vram.used_mb / vram.total_mb) * 100) : 0;
     const usedGb = vram ? (vram.used_mb / 1024).toFixed(1) : "?";
@@ -228,7 +230,7 @@ const GpuStatusCard = React.forwardRef(
                       );
                     })}
                   {/* Untracked / system */}
-                  {status?.untracked_vram_mb > 0 && (
+                  {vram && status?.untracked_vram_mb > 0 && (
                     <Tooltip title={`System/Other: ${(status.untracked_vram_mb / 1024).toFixed(1)} GB`}>
                       <Box
                         sx={{

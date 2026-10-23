@@ -13,6 +13,8 @@ from pathlib import Path
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 from backend.utils.backend_http import is_mcp_caller, is_mcp_transport, run_tool_in_backend
+from backend.utils.request_phrases import HOW_TO_QUESTION_RE, VIDEO_SOFTWARE_PATTERN, declines_media
+from backend.services.pipeline_status import status_id
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,10 @@ _MUSIC_VIDEO_RE = re.compile(
     r"\b(generate|create|make|produce)\b.{0,40}\bmusic[\s-]?video\b",
     re.IGNORECASE,
 )
+# The video gate's exclusions: asking how to make one, or making one in video
+# software, is a question for the chat model ("how do I make a music video in
+# Premiere?", "can you make a music video in After Effects for me").
+_VIDEO_SOFTWARE_RE = re.compile(VIDEO_SOFTWARE_PATTERN, re.IGNORECASE)
 # A Film Crew request opens the message, as in cli/llx/intent_router.py: "run the
 # film crew on this: ...", "produce this script: INT. ...". The same words later in a
 # sentence ("can you produce a python script that ...", "I want to film a script
@@ -39,7 +45,10 @@ _SCRIPT_LEAD_RE = re.compile(r"^\s*(?:with\b)?\s*:?\s*")
 
 
 def wants_music_video(message: str) -> bool:
-    return bool(message and _MUSIC_VIDEO_RE.search(message))
+    if not (message and _MUSIC_VIDEO_RE.search(message)):
+        return False
+    return not (HOW_TO_QUESTION_RE.search(message) or _VIDEO_SOFTWARE_RE.search(message)
+                or declines_media(message))
 
 
 def wants_film_crew(message: str) -> bool:
@@ -181,8 +190,9 @@ def _comfyui_note(model_id: str):
     if job_service_start_enabled():
         return ("ComfyUI is not running now; it is started when the clips render, the last "
                 "stage, which you start from Film Crew.")
-    return ("ComfyUI is not running now. Nothing needs it until the clips render, the last stage, "
-            "which you start from Film Crew: start the ComfyUI plugin (Plugins) before then.")
+    from backend.services.plugin_bridge import service_down_message
+    return ("Nothing needs ComfyUI until the clips render, the last stage, which you start from "
+            "Film Crew. " + service_down_message("comfyui", context="film-crew"))
 
 
 def _dispatch_first_stage(svc, row_id: int, agent: str):
@@ -326,6 +336,20 @@ def _document_from_song_ref(song: str, *, mcp: bool = False):
     return _library_song(Path(found.path))
 
 
+def _resolve_project(ref) -> tuple[int | None, str | None]:
+    """A Project id or exact name → (id, None); nothing given → (None, None)."""
+    ref = str(ref or "").strip()
+    if not ref:
+        return None, None
+    from backend.models import Project, db
+    row = db.session.get(Project, int(ref)) if ref.isdigit() else None
+    if row is None:
+        row = Project.query.filter(Project.name == ref).first()
+    if row is None:
+        return None, f"no project with id or name '{ref}'"
+    return row.id, None
+
+
 class MusicVideoTool(BaseTool):
     """Start a beat-synced music-video plan. Does not approve or render clips."""
 
@@ -372,16 +396,26 @@ class MusicVideoTool(BaseTool):
             description="Optional I2V model id. Default: the active video model.",
             required=False,
         ),
+        "project": ToolParameter(
+            name="project",
+            type="string",
+            description=(
+                "Optional Guaardvark Project to file the music video under: its id or exact name. "
+                "The finished video then shows in that project's Videos and Documents."
+            ),
+            required=False,
+        ),
     }
 
     def execute(self, song: str, style_prompt: str, name: str | None = None,
-                i2v_model: str | None = None, **kwargs) -> ToolResult:
+                i2v_model: str | None = None, project: str | None = None, **kwargs) -> ToolResult:
         style_prompt = (style_prompt or "").strip()
         if not style_prompt:
             return ToolResult(success=False, error="style_prompt is required")
         if is_mcp_transport(self):
             # Document rows, the Director and Celery dispatch belong to the backend process.
-            arguments = {"song": song, "style_prompt": style_prompt, "name": name, "i2v_model": i2v_model}
+            arguments = {"song": song, "style_prompt": style_prompt, "name": name,
+                         "i2v_model": i2v_model, "project": project}
             return run_tool_in_backend(self.name, {k: v for k, v in arguments.items() if v is not None})
         try:
             from backend.models import db
@@ -405,12 +439,17 @@ class MusicVideoTool(BaseTool):
             if (i2v_model or "").strip():
                 settings["i2v_model"] = i2v_model.strip()
             from backend.services.video_model_registry import resolve_active_video_model
+            # Analysis needs no GPU; the storyboard and render stages start ComfyUI themselves.
             picked, resolve_err = resolve_active_video_model(
-                "i2v", settings.get("i2v_model"), surface="music-video",
+                "i2v", settings.get("i2v_model"), surface="music-video", comfyui_down_ok=True,
             )
             if resolve_err:
                 return ToolResult(success=False, error=resolve_err)
             settings["i2v_model"] = picked
+
+            project_id, project_err = _resolve_project(project)
+            if project_err:
+                return ToolResult(success=False, error=project_err)
 
             title = (name or "").strip() or Path(doc.filename).stem
             svc = MusicVideoService(db.session)
@@ -419,7 +458,7 @@ class MusicVideoTool(BaseTool):
                 song_document_id=doc.id,
                 song_path=song_path,
                 style_prompt=style_prompt,
-                project_id=None,
+                project_id=project_id,
                 settings=settings,
             )
             started, dispatch_err = _dispatch_first_stage(svc, mv.id, "analyzer")
@@ -439,10 +478,13 @@ class MusicVideoTool(BaseTool):
                 output="\n".join([
                     f"Music video '{mv.name}' created (id {mv.id}, stage: {mv.current_stage}).",
                     next_line,
+                    f"Follow it with get_generation_status(batch_id=\"{status_id('music_video', mv.id)}\").",
                     f"Open Music Video: {studio}",
                 ]),
                 metadata={
                     "music_video_id": mv.id,
+                    "status_id": status_id("music_video", mv.id),
+                    "project_id": project_id,
                     "stage": mv.current_stage,
                     "studio_url": studio,
                     "i2v_model": settings.get("i2v_model"),
@@ -495,13 +537,22 @@ class FilmCrewTool(BaseTool):
             description="Optional I2V / scene model id. Default: the active video model.",
             required=False,
         ),
+        "aspect_ratio": ToolParameter(
+            name="aspect_ratio",
+            type="string",
+            description="Optional frame shape for storyboard stills and clips: 16:9, 9:16 or 1:1. "
+                        "Default: 16:9.",
+            required=False,
+        ),
     }
 
     def execute(self, script_text: str, name: str | None = None,
-                video_model: str | None = None, **kwargs) -> ToolResult:
+                video_model: str | None = None, aspect_ratio: str | None = None,
+                **kwargs) -> ToolResult:
         if is_mcp_transport(self):
             # The production row, model resolution and screenwriter dispatch belong to the backend process.
-            arguments = {"script_text": script_text, "name": name, "video_model": video_model}
+            arguments = {"script_text": script_text, "name": name, "video_model": video_model,
+                         "aspect_ratio": aspect_ratio}
             return run_tool_in_backend(self.name, {k: v for k, v in arguments.items() if v is not None})
         script_text, script_err = _script_body(script_text, mcp=is_mcp_caller(self))
         if script_err:
@@ -513,7 +564,13 @@ class FilmCrewTool(BaseTool):
                 resolve_active_video_model, VIDEO_MODEL_REGISTRY, model_capabilities,
             )
 
+            from backend.services.production_service import FILM_ASPECT_RATIOS
             settings = {}
+            aspect = (aspect_ratio or "").strip() or None
+            if aspect:
+                if aspect not in FILM_ASPECT_RATIOS:
+                    return ToolResult(success=False, error=f"aspect_ratio must be one of {', '.join(FILM_ASPECT_RATIOS)}")
+                settings["aspect_ratio"] = aspect
             explicit = (video_model or "").strip() or None
             if explicit:
                 if explicit not in VIDEO_MODEL_REGISTRY or not model_capabilities(explicit):
@@ -554,10 +611,12 @@ class FilmCrewTool(BaseTool):
                 output="\n".join([
                     f"Film Crew '{prod.name}' created (id {prod.id}, stage: {prod.current_stage}).",
                     *lines,
+                    f"Follow it with get_generation_status(batch_id=\"{status_id('production', prod.id)}\").",
                     f"Open Film Crew: {studio}",
                 ]),
                 metadata={
                     "production_id": prod.id,
+                    "status_id": status_id("production", prod.id),
                     "stage": prod.current_stage,
                     "studio_url": studio,
                     "video_model": picked,

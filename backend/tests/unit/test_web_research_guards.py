@@ -148,7 +148,13 @@ def test_combined_research_reads_only_public_results_and_says_which_it_skipped(a
     assert not any(url.startswith("http://127.") for url in outbound["sent"])
 
 
-def test_the_youtube_recon_searches_only_with_web_access_on(app, outbound):
+def test_the_youtube_recon_searches_only_with_web_access_on(app, outbound, tmp_path, monkeypatch):
+    # Recon reports no_features_configured before it reaches the web-access
+    # check, so the profile needs a feature with keywords.
+    from backend.services.social_outreach import profile
+    monkeypatch.setenv(profile.PROFILE_PATH_ENV, str(tmp_path / "profile.json"))
+    profile.save({"name": "Example App",
+                  "features": [{"key": "local_ai", "blurb": "", "keywords": ["local llm"]}]})
     with patch("backend.services.social_outreach.recon.kill_switch.is_enabled", return_value=True), \
             patch("backend.services.social_outreach.recon.external_grader.score_thread_relevance",
                   return_value={"grade": 0.0, "skipped": True, "reason": "test"}):

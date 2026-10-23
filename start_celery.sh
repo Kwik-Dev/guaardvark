@@ -1,22 +1,7 @@
 #!/bin/bash
 
-VADER_RED="\033[38;5;196m"
-VADER_RED_DARK="\033[38;5;88m"
-VADER_RED_LIGHT="\033[38;5;203m"
-VADER_GRAY="\033[38;5;244m"
-VADER_GRAY_DARK="\033[38;5;238m"
-VADER_WHITE="\033[38;5;255m"
-VADER_WHITE_DIM="\033[38;5;250m"
-VADER_RESET="\033[0m"
-VADER_BOLD="\033[1m"
-
-vader_header() { echo -e "\n${VADER_RED}${VADER_BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${VADER_RESET}\n${VADER_WHITE}${VADER_BOLD}  $1${VADER_RESET}\n${VADER_RED}${VADER_BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${VADER_RESET}"; }
-vader_info() { echo -e "  ${VADER_GRAY}·${VADER_RESET} ${VADER_WHITE_DIM}$1${VADER_RESET}"; }
-vader_success() { echo -e "  ${VADER_RED}✔${VADER_RESET} ${VADER_WHITE}$1${VADER_RESET}"; }
-vader_warn() { echo -e "  ${VADER_RED_LIGHT}⚠${VADER_RESET} ${VADER_RED_LIGHT}$1${VADER_RESET}"; }
-vader_error() { echo -e "  ${VADER_RED_DARK}✖${VADER_RESET} ${VADER_RED}$1${VADER_RESET}"; }
-vader_detail() { echo -e "    ${VADER_GRAY}·${VADER_RESET} ${VADER_WHITE_DIM}$1${VADER_RESET}"; }
-vader_section() { echo -e "\n${VADER_RED}${VADER_BOLD}► $1${VADER_RESET}"; }
+# shellcheck source=scripts/lib/terminal_ui.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/lib/terminal_ui.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$SCRIPT_DIR/backend"
@@ -42,8 +27,20 @@ own_celery_pids() {  # $1 = worker | beat
   done
 }
 
+# The research worker (backend/services/research_worker.py) is started by the
+# backend when an autoresearch run is queued and stops itself once idle. It is
+# not one of the workers this script starts, so it never counts as "already
+# running" here: that would skip starting main and training.
+own_started_worker_pids() {
+  local pid
+  for pid in $(own_celery_pids worker); do
+    ps -p "$pid" -o args= 2>/dev/null | grep -q -- "--queues=research" && continue
+    echo "$pid"
+  done
+}
+
 check_workers() {
-  own_celery_pids worker | wc -l
+  own_started_worker_pids | wc -l
 }
 
 check_beat() {
@@ -186,7 +183,7 @@ worker_count=$(check_workers)
 if [ $worker_count -gt 0 ]; then
   vader_info "Celery workers already running ($worker_count processes)."
   vader_detail "Use ./stop.sh first to stop them, or kill them manually:"
-  own_celery_pids worker | while read pid; do
+  own_started_worker_pids | while read pid; do
     vader_detail "PID $pid: $(ps -p $pid -o command= | cut -c1-80)"
   done
   exit 0
@@ -220,6 +217,11 @@ export GUAARDVARK_ROOT="$SCRIPT_DIR"
 export CELERY_WORKER_MODE=true
 # Must match start.sh: both processes share the card and the allocator policy.
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512,garbage_collection_threshold:0.8"
+# Same quiet-library settings as start.sh, for workers started on their own.
+export HF_HUB_DISABLE_TELEMETRY="${HF_HUB_DISABLE_TELEMETRY:-1}"
+export DO_NOT_TRACK="${DO_NOT_TRACK:-1}"
+export UNSLOTH_DISABLE_STATISTICS="${UNSLOTH_DISABLE_STATISTICS:-1}"
+export PIP_DISABLE_PIP_VERSION_CHECK="${PIP_DISABLE_PIP_VERSION_CHECK:-1}"
 
 ulimit -n 65535
 vader_info "File descriptor limit set to: $(ulimit -n)"
@@ -261,9 +263,10 @@ else
   vader_success "$worker_count Celery workers running (concurrency=1 for race condition test)"
   
   vader_info "Worker processes:"
-  own_celery_pids worker | while read pid; do
+  own_started_worker_pids | while read pid; do
     vader_detail "PID $pid: $(ps -p $pid -o command= | cut -c1-100)"
   done
+  vader_detail "Autoresearch runs start their own worker (queue: research) and stop it when done"
   
   vader_info "Log files:"
   for logfile in "$LOGS_DIR"/celery_*.log; do

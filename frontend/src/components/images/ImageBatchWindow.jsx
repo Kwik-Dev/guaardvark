@@ -18,7 +18,7 @@ import ImageBatchContents from './ImageBatchContents';
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
 const ImageBatchWindow = ({
-  _id,
+  id: _id,
   batch,
   windowColor,
   onWindowColorChange,

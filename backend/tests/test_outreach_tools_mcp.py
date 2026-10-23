@@ -14,7 +14,7 @@ from backend.tests._mcp_sdk import use_mcp_sdk
 use_mcp_sdk()  # the adapter imports mcp.types; see backend/tests/_mcp_sdk.py
 
 from backend.mcp.tools_adapter import _tool_input_schema  # noqa: E402
-from backend.services.social_outreach import kill_switch, transitions  # noqa: E402
+from backend.services.social_outreach import kill_switch, persona, transitions  # noqa: E402
 from backend.tools import outreach_tools as ot  # noqa: E402
 from backend.utils.backend_http import BackendError, BackendResponse  # noqa: E402
 
@@ -109,6 +109,16 @@ def test_draft_mode_is_published_as_an_enum():
     assert schema["properties"]["mode"]["enum"] == ["comment", "share"]
 
 
+def test_draft_platform_and_tone_are_published_as_the_enforced_sets():
+    """The enums are the values execute() and the persona accept, so an MCP
+    client rejects 'x.com' or 'witty' before the call instead of after it."""
+    schema = _tool_input_schema(ot.OutreachDraftPostTool())
+
+    assert schema["properties"]["platform"]["enum"] == list(ot._KNOWN_PLATFORMS)
+    assert schema["properties"]["tone"]["enum"] == list(persona.TONE_GUIDES)
+    assert "default" in schema["properties"]["tone"]["enum"]
+
+
 # ---- outreach_draft_post: feature_hint ---------------------------------------------
 
 def test_draft_feature_hint_is_the_persons_requested_feature(backend, monkeypatch):
@@ -196,7 +206,7 @@ def _status_backend(monkeypatch, answer):
         raise AssertionError("the MCP process must not read the database or Redis itself")
 
     monkeypatch.setattr(ot, "request_json", request)
-    for name in ("is_enabled", "is_supervised", "cadence_status", "status_snapshot"):
+    for name in ("is_enabled", "cadence_status", "status_snapshot"):
         monkeypatch.setattr(ot.kill_switch, name, local)
     return calls
 
@@ -246,24 +256,21 @@ def test_status_from_a_backend_without_the_readable_flag_is_accepted(monkeypatch
 # ---- what the backend reports (kill_switch) ---------------------------------------------
 
 def test_snapshot_reads_the_stored_settings(monkeypatch):
-    stored = {"social_outreach_enabled": "true"}  # supervised never set
+    stored = {"social_outreach_enabled": "true"}
     monkeypatch.setattr(kill_switch, "_lookup_setting", stored.get)
     monkeypatch.setattr(kill_switch, "cadence_status", lambda: {})
 
     snapshot = kill_switch.status_snapshot()
 
-    # Never set means supervised: posting without a person has to be chosen.
     assert (snapshot["enabled"], snapshot["supervised"], snapshot["settings_readable"]) == (True, True, True)
     assert kill_switch.is_enabled() is True
-    assert kill_switch.is_supervised() is True
 
 
-def test_supervised_off_only_when_switched_off(monkeypatch):
+def test_supervised_whatever_an_old_setting_says(monkeypatch):
     stored = {"social_outreach_enabled": "true", "social_outreach_supervised": "false"}
     monkeypatch.setattr(kill_switch, "_lookup_setting", stored.get)
     monkeypatch.setattr(kill_switch, "cadence_status", lambda: {})
-    assert kill_switch.is_supervised() is False
-    assert kill_switch.status_snapshot()["supervised"] is False
+    assert kill_switch.status_snapshot()["supervised"] is True
 
 
 def test_unreadable_settings_fail_closed_and_are_flagged(monkeypatch):
@@ -276,7 +283,6 @@ def test_unreadable_settings_fail_closed_and_are_flagged(monkeypatch):
     snapshot = kill_switch.status_snapshot()
 
     assert snapshot["settings_readable"] is False
-    # The posting paths see "off" and "supervised": nothing posts on a guess.
+    # The posting paths see "off": nothing posts on a guess.
     assert kill_switch.is_enabled() is False
-    assert kill_switch.is_supervised() is True
     assert (snapshot["enabled"], snapshot["supervised"]) == (False, True)

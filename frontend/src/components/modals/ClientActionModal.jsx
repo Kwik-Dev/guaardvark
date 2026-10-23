@@ -816,15 +816,17 @@ const ClientActionModal = ({
           {isEditMode && (
             // MODIFIED: Changed IconButton to Button for Delete
             <Tooltip title="Delete this client">
-              <Button
-                variant="text"
-                color="inherit"
-                onClick={handleDeleteClick}
-                disabled={isSaving}
-                size="small"
-              >
-                Delete
-              </Button>
+              <span>
+                <Button
+                  variant="text"
+                  color="inherit"
+                  onClick={handleDeleteClick}
+                  disabled={isSaving}
+                  size="small"
+                >
+                  Delete
+                </Button>
+              </span>
             </Tooltip>
           )}
           {isEditMode &&
@@ -853,7 +855,7 @@ const ClientActionModal = ({
             disabled={
               isSaving ||
               !formData.name?.trim() ||
-              (formData.email && !/\S+@\S+\.\S+/.test(formData.email))
+              Boolean(formData.email && !/\S+@\S+\.\S+/.test(formData.email))
             }
           >
             {isSaving ? (

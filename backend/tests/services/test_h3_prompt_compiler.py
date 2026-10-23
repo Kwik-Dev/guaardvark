@@ -169,3 +169,55 @@ def test_languages_and_bundle_files_exist():
     assert "English" in c.load_languages() and len(c.load_languages()) == 11
     assert c.normalize_language("ja") == "Japanese" and c.normalize_language("klingon") == "English"
     assert (c.BUNDLE_DIR / "presets.json").exists() and (c.BUNDLE_DIR / "NOTICE.md").exists()
+
+
+def test_reference_board_compiles_to_subjects_frames_and_numbered_audio():
+    refs = {
+        "images": [{"role": "keep", "name": "Maya"}, {"role": "loose", "name": "maya"},
+                   {"role": "first_frame"}, {"role": "detail", "name": "the jacket", "note": "only its colour"}],
+        "videos": [{"role": "motion", "soundtrack": True}, {"role": "continue", "soundtrack": False}],
+        "audios": [{"role": "voice", "speaker": "Maya"}, {"role": "music"}],
+    }
+    intent = c.intent_from_references('Maya walks into the scene and says "Hi."', 5, refs, style="cinematic")
+    assert intent.mode == "ref2va"
+    maya, jacket, motion, scene = intent.subjects
+    assert (maya.pictures, maya.retention) == ([1, 2], "fully_preserved")
+    assert (jacket.pictures, jacket.retention, jacket.note) == ([4], "attribute_transfer", "only its colour")
+    assert motion.videos == [1] and motion.retention == "attribute_transfer"
+    assert scene.videos == [2] and "<Video 2> ends" in scene.note
+    assert intent.picture_frames == [3]
+    # Clip 1's soundtrack is <Audio 1>; the standalone tracks follow it.
+    assert [(a.index, a.role) for a in intent.audio_refs] == [(1, "reference"), (2, "reference"), (3, "fully_copy")]
+    assert intent.audio_refs[1].speaker == "<Subject 1> (S1)"  # the id her tagged line speaks under
+    assert intent.music == "<Audio 3> is reused as the complete score."
+    # A typed name becomes its tag; a default label ("the scene") does not rewrite the prompt.
+    assert intent.shots[0].description == "<Subject 1> walks into the scene"
+    # The quoted line leaves the description as tagged dialogue under the speaker's id.
+    assert [(d.speaker, d.text) for d in intent.shots[0].dialogue] == [("Maya", "Hi.")]
+    prompt, diag = c.compile(intent)
+    assert "<Subject 1> Maya (S1) says: <d>[English] Hi.</d>" in prompt
+    assert "<Audio 2> is the voice-timbre reference for <Subject 1> (S1)." in prompt
+    assert diag["warnings"] == []
+    assert ("summary:\n[keyframe completion + reference generation + video continuation + audio reference"
+            " + audio reuse]") in prompt
+    assert "<Picture 3> is the first frame of [Shot 1]." in prompt
+    assert '"Hi."' not in prompt
+
+
+def test_reference_board_without_roles_keeps_pictures_as_shown():
+    intent = c.intent_from_references("<Picture 1> waves", 5, {"images": [{}], "videos": [], "audios": []})
+    assert intent.subjects[0].retention == "fully_preserved"
+    assert intent.subjects[0].description == "the subject"
+    assert intent.task_types == ["reference generation"]
+
+
+def test_quoted_lines_become_dialogue_only_after_a_speech_verb():
+    names = ["Maya", "Tom", "the cabin", "the chef", "the apple"]
+    assert c._split_dialogue('The sign reads "OPEN".', names) == ('The sign reads "OPEN".', [])
+    assert c._split_dialogue('Maya waves. Tom replies, "Hi there." Maya says: "Hello."', names) == (
+        "Maya waves.", [("Tom", "Hi there."), ("Maya", "Hello.")])
+    # The voice reference's speaker wins over a nearer name in the same sentence.
+    desc, lines = c._split_dialogue(
+        'Inside the cabin, the chef sets the apple down and says: "Dessert tonight is an apple."', names, ["the chef"])
+    assert desc == "Inside the cabin, the chef sets the apple down"
+    assert lines == [("the chef", "Dessert tonight is an apple.")]

@@ -10,7 +10,7 @@ import StopCircleIcon from "@mui/icons-material/StopCircle";
 import LessonPearlsFloater from "../components/agent/LessonPearlsFloater";
 import LessonSummaryModal from "../components/modals/LessonSummaryModal";
 import { useAppStore } from "../stores/useAppStore";
-import { BASE_URL } from "../api/apiClient";
+import { BASE_URL, handleResponse } from "../api/apiClient";
 import ChatSessionDrawer from "../components/chat/ChatSessionDrawer";
 // AgentScreenViewer is now global in Sidebar — available on all pages
 import React, { useCallback, useEffect, useRef, useState } from "react";
@@ -47,16 +47,19 @@ import {
 import { useAgentRouter } from "../hooks/useAgentRouter";
 import { routeAndExecute } from "../api/toolsService";
 import UnifiedChatService, { steerAgent } from "../api/unifiedChatService";
+import { stopChatTurn } from "../api/chatStopService";
+import { formatUiError } from "../utils/uiError";
 import StreamingMessage from "../components/chat/StreamingMessage";
 import { webSearchSend } from "../components/chat/webSearchOffer";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import extractSpeakableText from "../utils/extractSpeakableText";
 import useVoiceSink from "../hooks/useVoiceSink";
-import { chatErrorMessage } from "../utils/chatAttachment";
+import { attachedPictures, chatErrorMessage } from "../utils/chatAttachment";
 
 import { createPlan } from "../api/orchestratorService";
 import { mergeActivePlanIntoMessages, hydrateOrchestratorFields } from "../utils/orchestratorChat";
 import { debugLog } from "../utils/debugLog";
+import { directToolOptions } from "../utils/slashCommandRegistry";
 
 const USE_AGENT_ROUTING = () => {
   try {
@@ -94,7 +97,8 @@ const ChatPage = () => {
       );
 
     if (existingProcesses.length > 0) {
-      console.warn(`DUPLICATE PREVENTION: Reusing existing process: ${existingProcesses[0][0]}`);
+      // Normal on a remount: this project's chat process already exists.
+      console.debug(`DUPLICATE PREVENTION: Reusing existing process: ${existingProcesses[0][0]}`);
       return existingProcesses[0][0];
     }
 
@@ -485,6 +489,7 @@ const ChatPage = () => {
         // Graceful degradation — surface but don't crash. Most common reason:
         // backend restart orphaned the in-memory ACTIVE_LESSONS entry.
         console.warn("End lesson:", data?.error || `HTTP ${res.status}`);
+        setError(`The lesson ended but was not saved: ${formatUiError(data?.error) || `the backend answered HTTP ${res.status}`}.`);
         setActiveLessonId(null);
         clearLessonPearls();
         return;
@@ -499,6 +504,7 @@ const ChatPage = () => {
       clearLessonPearls();
     } catch (err) {
       console.error("End lesson error:", err);
+      setError(`The lesson ended but was not saved: ${formatUiError(err) || "the request failed"}.`);
       setActiveLessonId(null);
       clearLessonPearls();
     } finally {
@@ -519,7 +525,13 @@ const ChatPage = () => {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode: "agent" }),
-      }).catch(() => {});
+      })
+        .then((res) => handleResponse(res, { quiet: true }))
+        .catch((e) => {
+          // The badge says agent mode; without the saved mode the backend
+          // treats the new chat as chat mode, so say it did not stick.
+          setError(`Agent mode was not saved for the new chat: ${formatUiError(e) || "the request failed"}. Send /agent to try again.`);
+        });
     }
 
     setMessages([]);
@@ -777,6 +789,9 @@ const ChatPage = () => {
                   agentThinkingSteps: msg.agentThinkingSteps ?? msg.extra_data?.agentThinkingSteps,
                   agentNote: msg.agentNote ?? msg.extra_data?.agentNote,
                   generatedImages: msg.generatedImages ?? msg.extra_data?.generatedImages,
+                  // The pictures the user attached, saved by the HTTP route.
+                  imageUrl: msg.imageUrl ?? msg.extra_data?.imageUrl,
+                  imageUrls: msg.imageUrls ?? msg.extra_data?.imageUrls,
                   thinking: msg.thinking ?? msg.extra_data?.thinking,
                   truncated: msg.truncated ?? msg.extra_data?.truncated,
                   verified: msg.verified ?? msg.extra_data?.verified,
@@ -880,8 +895,15 @@ const ChatPage = () => {
     setAgentWorking(false);
     streamingServiceRef.current = null;
     // Abort the backend chat + kill any running agent task
-    fetch(`/api/chat/unified/${sessionId}/abort`, { method: 'POST' }).catch(() => {});
-    fetch('/api/agent-control/kill', { method: 'POST' }).catch(() => {});
+    stopChatTurn(sessionId).then((result) => {
+      if (result.ok) return;
+      setMessages((prev) => [...prev, {
+        id: `stop_err_${Date.now()}`,
+        role: "system",
+        content: `Error: ${result.error}`,
+        timestamp: new Date().toISOString(),
+      }]);
+    });
   }, [resourceManager, processId, sessionId, isStreamingMessage, unifiedChatService]);
 
   // Writes the file a chat request asked for: from the card's Create, or at
@@ -1731,11 +1753,20 @@ const ChatPage = () => {
       ) {
         debugLog("Image analysis: routing through unified chat with base64 image");
         // Upgrade existing user message with image data instead of adding a duplicate
-        const imageContent = inputText || `Describe this image: ${voiceOptions.imageFileName}`;
+        const previews = Array.isArray(voiceOptions.imagePreviews) ? voiceOptions.imagePreviews : [];
+        const imageContent = inputText || (previews.length > 1
+          ? `Describe these ${previews.length} images: ${(voiceOptions.imageFileNames || []).join(", ")}`
+          : `Describe this image: ${voiceOptions.imageFileName}`);
+        const imageFields = {
+          imageUrl: voiceOptions.imagePreview,
+          imageFileName: voiceOptions.imageFileName,
+          ...(previews.length > 1 ? { imageUrls: previews, imageFileNames: voiceOptions.imageFileNames } : {}),
+          messageType: "image_upload",
+        };
         if (userMessageTempId) {
           setMessages((prev) => prev.map((m) =>
             m.tempId === userMessageTempId
-              ? { ...m, content: imageContent, imageUrl: voiceOptions.imagePreview, imageFileName: voiceOptions.imageFileName, messageType: "image_upload" }
+              ? { ...m, content: imageContent, ...imageFields }
               : m
           ));
         } else {
@@ -1743,9 +1774,7 @@ const ChatPage = () => {
             id: `user_${Date.now()}`,
             role: "user",
             content: imageContent,
-            imageUrl: voiceOptions.imagePreview,
-            imageFileName: voiceOptions.imageFileName,
-            messageType: "image_upload",
+            ...imageFields,
           }]);
         }
         // Don't return — fall through to unified chat flow which sends imageBase64
@@ -1822,8 +1851,8 @@ const ChatPage = () => {
 
         try {
           const modifiedInputText = inputText;
-          // Pass image data through unified chat if present
-          const imageBase64 = voiceOptions?.imageBase64 || null;
+          // Pass the attached pictures through unified chat if present
+          const imageBase64 = attachedPictures(voiceOptions);
           const isVoice = !!(voiceOptions?.isVoiceMessage);
 
           // Lazily ensure a service wrapper exists so listeners (thinking/tool/stream) get attached
@@ -1860,18 +1889,6 @@ const ChatPage = () => {
             } catch { resolve(); }
           });
 
-          const directToolOptions = {};
-          if (voiceOptions?.direct_tool) {
-            directToolOptions.direct_tool = voiceOptions.direct_tool;
-            directToolOptions.direct_tool_params = voiceOptions.direct_tool_params || {};
-            if (voiceOptions.slash_command) {
-              directToolOptions.slash_command = voiceOptions.slash_command;
-            }
-            if (voiceOptions.slash_args) {
-              directToolOptions.slash_args = voiceOptions.slash_args;
-            }
-          }
-
           // Support for project folder analysis (e.g. "analyze /path/to/site and suggest CSS improvements")
           // Send project_root so backend auto-loads GUAARDVARK.md and injects rich context.
           // This makes the feature (project analysis, build.py review, CSS suggestions, initiative)
@@ -1880,8 +1897,11 @@ const ChatPage = () => {
             use_rag: true,
             chat_mode: chatMode,
             project_id: projectId,
-            ...directToolOptions,
+            ...directToolOptions(voiceOptions),
           };
+          // An upload notice only acknowledges the file: no search is possible
+          // on that turn, so the engine's "no search ran" nudge and note stay off.
+          if (voiceOptions?.documentNotice) sendOptions.skip_nudges = true;
           if (fileGenerationState) {
             sendOptions.file_generation = fileGenerationState;
             sendOptions.file_generation_filename = fileDetection.filename || "";
@@ -1955,7 +1975,7 @@ const ChatPage = () => {
           // One more attempt through the unified path.
           try {
             const modifiedInputText = inputText;
-            const imageBase64 = voiceOptions?.imageBase64 || null;
+            const imageBase64 = attachedPictures(voiceOptions);
             const isVoice = !!(voiceOptions?.isVoiceMessage);
 
             debugLog('[ChatPage] AGENT RECOVERY PRE-SEND (CRITICAL): await sendMessage *before* setIsStreamingMessage(true). Agent backend may start emitting chat:thinking (source=agent_loop) immediately after HTTP ack.');
@@ -1995,6 +2015,7 @@ const ChatPage = () => {
               use_rag: true,
               chat_mode: chatMode,
               project_id: projectId,
+              ...(voiceOptions?.documentNotice ? { skip_nudges: true } : {}),
               ...(fileGenerationState
                 ? {
                     file_generation: fileGenerationState,
@@ -2133,6 +2154,8 @@ const ChatPage = () => {
                 ? {
                   ...m,
                   content: result.content,
+                  // The browser never searches by itself; the reply offers it.
+                  web_search_offer: result.webSearchOffer || null,
                   claudeFix: {
                     responseReceived: true,
                     enhanced: result.enhanced,
@@ -2529,7 +2552,7 @@ const ChatPage = () => {
       )}
       {showBudget && (
         <Box sx={{ p: 1, bgcolor: 'warning.light', fontSize: '0.8em', border: '1px solid #ff9800' }}>
-          [Phase 2.1] Agent Budget Surface: {budgetTelemetry.remaining || '?'} / {budgetTelemetry.total || 20} remaining (from TierTelemetry) — using ENTITY patterns from queryClassifier for richer context to tighten budget awareness.
+          Agent mode is on: each message is a task the assistant carries out with its tools, up to {budgetTelemetry.total || 20} steps per message; the last task had {budgetTelemetry.remaining ?? '?'} steps left.
         </Box>
       )}
       <ChatInput
@@ -2548,7 +2571,7 @@ const ChatPage = () => {
         onUpdateMessage={(tempId, updates) => setMessages((prev) =>
           prev.map((m) => (m.tempId === tempId || m.id === tempId) ? { ...m, ...updates } : m)
         )}
-        onClearMessages={() => setMessages([])}
+        onClearMessages={handleNewChat}
         onPlanCreated={(plan, planId) => {
           const assistantId = `asst_plan_${planId}`;
           setMessages((prev) => [...prev, {

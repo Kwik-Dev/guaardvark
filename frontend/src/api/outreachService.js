@@ -45,6 +45,18 @@ export function fetchSnippets() {
   return request("/snippets");
 }
 
+// The local "what you promote" profile behind drafts, links and snippets.
+export function fetchProfile() {
+  return request("/profile");
+}
+
+export function saveProfile(profile) {
+  return request("/profile", {
+    method: "PUT",
+    body: JSON.stringify({ profile }),
+  });
+}
+
 export function enableOutreach() {
   return request("/enable", { method: "POST" });
 }
@@ -63,13 +75,6 @@ export function resumePosting() {
   return request("/resume-posting", { method: "POST" });
 }
 
-export function setSupervised(on) {
-  return request("/supervised", {
-    method: "POST",
-    body: JSON.stringify({ on: !!on }),
-  });
-}
-
 export function approveDraft(id, draftText) {
   const body = {};
   if (draftText != null) body.draft_text = draftText;
@@ -81,6 +86,19 @@ export function approveDraft(id, draftText) {
 
 export function rejectDraft(id) {
   return request(`/reject/${id}`, { method: "POST", body: "{}" });
+}
+
+// Reddit, YouTube and Facebook drafts post one at a time, each started by a
+// person watching the Agent Screen. This reads whether the viewer is
+// streaming, the post running now, how the last one ended, and the approved
+// drafts waiting to be started.
+export function fetchWatchedPost() {
+  return request("/post-now");
+}
+
+// "Post now, I'm watching": starts the one browser post for an approved draft.
+export function postNow(id) {
+  return request(`/post-now/${id}`, { method: "POST", body: "{}" });
 }
 
 export function patchDraft(id, payload) {
@@ -139,13 +157,16 @@ export default {
   fetchApproved,
   fetchAudit,
   fetchSnippets,
+  fetchProfile,
+  saveProfile,
   enableOutreach,
   killOutreach,
   stopAllPosting,
   resumePosting,
-  setSupervised,
   approveDraft,
   rejectDraft,
+  fetchWatchedPost,
+  postNow,
   patchDraft,
   createDraft,
   draftComment,

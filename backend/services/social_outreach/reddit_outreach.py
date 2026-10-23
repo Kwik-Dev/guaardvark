@@ -30,11 +30,22 @@ import requests
 
 from backend.services.social_outreach import audit, external_grader, kill_switch, persona
 from backend.services.social_outreach.transitions import WITHDRAWN_BEFORE_SUBMIT
+from backend.utils.settings_utils import web_access_block_reason
 
 logger = logging.getLogger(__name__)
 
 
-REDDIT_USER_AGENT = "guaardvark-outreach/0.1 (by /u/guaardvark) - local AI workstation"
+
+def reddit_user_agent() -> str:
+    """Reddit asks for a UA that names the software and the account behind it;
+    the account comes from the outreach profile and is left out when unset."""
+    from backend.services.social_outreach import profile
+    from backend.utils.update_state import read_disk_version
+    by = profile.load().account_handle
+    by_part = f" (by /u/{by})" if by else ""
+    return f"guaardvark-outreach/{read_disk_version() or '0'}{by_part} - local AI workstation"
+
+
 # Browser UA used when attaching the agent Firefox session cookies. Reddit's
 # datacenter IP block (403 HTML interstitial) often still allows cookie-authed
 # requests that look like a real logged-in browser.
@@ -445,7 +456,7 @@ def _http_get_json(url: str, retries: int = 1) -> Optional[dict]:
     """
     cookie_jar = _load_reddit_cookies_from_firefox()
     headers = {
-        "User-Agent": REDDIT_BROWSER_USER_AGENT if cookie_jar else REDDIT_USER_AGENT,
+        "User-Agent": REDDIT_BROWSER_USER_AGENT if cookie_jar else reddit_user_agent(),
         "Accept": "application/json",
     }
     try:
@@ -559,9 +570,8 @@ def backend_url() -> str:
     """Resolve the local Flask API base URL. Public (no underscore) because
     self_share imports it and we don't want cross-module private-name coupling
     to silently break on rename."""
-    import os
-    port = os.environ.get("FLASK_PORT", "5002")
-    return f"http://localhost:{port}/api"
+    from backend.utils.backend_http import backend_base_url
+    return f"{backend_base_url()}/api"
 
 
 # Backwards-compat alias so any in-flight callers still work.
@@ -578,7 +588,7 @@ def draft_via_backend(
     """Calls the social-outreach draft endpoint synchronously.
 
     ``relevance_unchecked`` says the thread-fit judge could not run on this
-    thread; the endpoint then holds an unsupervised draft for approval.
+    thread; the endpoint notes that on the draft for the person reviewing it.
     The thread's keyword label is not sent: a feature_hint on /draft-comment
     is a person asking the draft to lead with that feature, and this loop
     leaves the angle to the pitch sheet.
@@ -896,6 +906,24 @@ def post_comment_via_servo(
     return True, "ok"
 
 
+def web_access_refused(subreddit: str, report: dict, task_id: Optional[int] = None) -> bool:
+    """True, with the pass reported as skipped, when web access (Settings, off
+    by default) is off. Reading a subreddit is an outside request, gated the
+    way the YouTube scout and posting are."""
+    blocked = web_access_block_reason("scout Reddit for outreach")
+    if not blocked:
+        return False
+    logger.info("reddit outreach: r/%s pass skipped: %s", subreddit, blocked)
+    report["reason"] = "web_access_off"
+    audit.log_outreach_event(
+        platform="reddit", action="abort",
+        target_url=f"{REDDIT_BASE}/r/{subreddit}",
+        status="aborted", abort_reason="web_access_off",
+        task_id=task_id,
+    )
+    return True
+
+
 class RedditOutreachLoop:
     """One pass = visit one subreddit, find up to MAX_THREADS_PER_PASS candidates, draft + maybe post."""
 
@@ -921,6 +949,8 @@ class RedditOutreachLoop:
                 status="aborted", abort_reason="kill_switch_off",
                 task_id=task_id,
             )
+            return report
+        if web_access_refused(subreddit, report, task_id):
             return report
 
         rules_list = fetch_subreddit_rules(subreddit)
@@ -974,7 +1004,7 @@ class RedditOutreachLoop:
             # match cannot tell a setup question from a rant against local AI.
             # A thread it grades below the bar, or says "skip" to, gets no
             # draft. When the judge cannot run, the thread is drafted marked
-            # relevance unchecked, and an unsupervised draft is then held.
+            # relevance unchecked for the person who reviews the draft.
             relevance = external_grader.score_thread_relevance(
                 title=thread.title,
                 selftext=thread.selftext,
@@ -1001,9 +1031,8 @@ class RedditOutreachLoop:
                 continue
             report["drafted"] += 1
 
-            # Draft-only: posting is exclusively via tick_process_approved_drafts
-            # (cadence + claim). When unsupervised, /draft-comment already set
-            # status=approved for would_post drafts so the next beat posts them.
+            # Draft-only: a person approves each draft and starts its post
+            # (watched_post), which checks cadence and claims the row.
             if draft_result.get("would_post"):
                 report["queued_for_post"] = report.get("queued_for_post", 0) + 1
 

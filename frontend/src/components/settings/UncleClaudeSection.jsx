@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
+  Alert,
   Box,
   LinearProgress,
   Select,
@@ -9,33 +10,31 @@ import {
   CircularProgress,
 } from "@mui/material";
 import { PlayArrow as PlayIcon } from "@mui/icons-material";
+import { useNavigate } from "react-router-dom";
 import CollapsibleAlert from "../common/CollapsibleAlert";
-import FixesModal from "./FixesModal";
-import ScanProgressModal from "./ScanProgressModal";
 import { UNCLE_GOLD } from "../../utils/familyColors";
 import { ActionButton, Cluster, Hint, Line, Sep, SettingChip, StatusPill } from "./ui";
 import { claudeAdvisorService } from "../../api/claudeAdvisorService";
-import { selfImprovementService } from "../../api/selfImprovementService";
+import { formatUiError } from "../../utils/uiError";
 
 export default function UncleClaudeSection() {
+  const navigate = useNavigate();
   const [status, setStatus] = useState(null);
-  const [siStatus, setSiStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [testResult, setTestResult] = useState(null);
   const [testing, setTesting] = useState(false);
-  const [scanOpen, setScanOpen] = useState(false);
-  const [scanInBackground, setScanInBackground] = useState(false);
-  const [scanCancelled, setScanCancelled] = useState(false);
-  const [fixesOpen, setFixesOpen] = useState(false);
+  // A failed status read or config save, said under the controls. Without it
+  // a failed read showed "Not configured" and a failed save did nothing.
+  const [failure, setFailure] = useState(null);
 
   const fetchStatus = useCallback(async () => {
     try {
-      const [claudeRes, siRes] = await Promise.allSettled([
-        claudeAdvisorService.getStatus(),
-        selfImprovementService.getStatus(),
-      ]);
-      if (claudeRes.status === "fulfilled") setStatus(claudeRes.value?.data);
-      if (siRes.status === "fulfilled") setSiStatus(siRes.value?.data);
+      const [claudeRes] = await Promise.allSettled([claudeAdvisorService.getStatus()]);
+      if (claudeRes.status === "fulfilled") {
+        setStatus(claudeRes.value?.data);
+      } else {
+        setFailure(`Uncle Claude's status could not be read: ${formatUiError(claudeRes.reason) || "the request failed"}.`);
+      }
     } catch (err) {
       console.error("Failed to fetch Uncle Claude status:", err);
     } finally {
@@ -62,63 +61,25 @@ export default function UncleClaudeSection() {
 
   const handleEscalationModeChange = async (e) => {
     try {
+      setFailure(null);
       await claudeAdvisorService.updateConfig({ escalation_mode: e.target.value });
       fetchStatus();
     } catch (err) {
       console.error("Failed to update escalation mode:", err);
+      setFailure(`Escalation was not changed: ${formatUiError(err) || "the request failed"}.`);
     }
   };
 
   const handleToggleScheduledSends = async (next) => {
     try {
+      setFailure(null);
       await claudeAdvisorService.updateConfig({ scheduled_sends: next });
       fetchStatus();
     } catch (err) {
       console.error("Failed to update scheduled sends:", err);
+      setFailure(`Scheduled sends were not changed: ${formatUiError(err) || "the request failed"}.`);
     }
   };
-
-  const handleToggleSelfImprovement = async () => {
-    try {
-      await selfImprovementService.toggle(!siStatus?.enabled);
-      fetchStatus();
-    } catch (err) {
-      console.error("Failed to toggle self-improvement:", err);
-    }
-  };
-
-  const handleToggleCodebaseLock = async () => {
-    try {
-      await selfImprovementService.lockCodebase(!siStatus?.codebase_locked);
-      fetchStatus();
-    } catch (err) {
-      console.error("Failed to toggle codebase lock:", err);
-    }
-  };
-
-  const handleOpenScan = () => {
-    setScanInBackground(false);
-    setScanCancelled(false);
-    setScanOpen(true);
-  };
-
-  // Stable reference — the modal depends on this in its main effect, and a
-  // fresh closure on every render would re-dispatch the scan.
-  const handleScanComplete = useCallback((run) => {
-    fetchStatus();
-    setScanInBackground(false);
-    if (run?.status === "cancelled") {
-      setScanCancelled(true);
-      return;
-    }
-    const proposedAnything =
-      (run?.changes_made && run.changes_made.length > 0) ||
-      run?.status === "success";
-    if (proposedAnything) {
-      setScanOpen(false);
-      setFixesOpen(true);
-    }
-  }, [fetchStatus]);
 
   if (loading) {
     return <CircularProgress size={16} />;
@@ -126,8 +87,9 @@ export default function UncleClaudeSection() {
 
   const usage = status?.usage || {};
   const budgetPercent = usage.budget_used_percent || 0;
-  const runs = siStatus?.total_fixes || 0;
-  const connection = !status?.available
+  const connection = !status && failure
+    ? { tone: "error", label: "Status unknown" }
+    : !status?.available
     ? { tone: "warn", label: "Not configured" }
     : testResult === null
       ? { tone: "ok", label: "API key set" }
@@ -175,6 +137,11 @@ export default function UncleClaudeSection() {
             tooltip="On: Uncle Claude contacts Anthropic on its own schedule — advice twice a day (time and GPU details) and reviews of servo changes (a source excerpt and the diff). Off: it only runs when you start it here."
           />
         </Line>
+        {failure && (
+          <Alert severity="error" sx={{ py: 0.25 }} onClose={() => setFailure(null)}>
+            {failure}
+          </Alert>
+        )}
         {testResult && (
           <CollapsibleAlert severity={testResult.success ? "success" : "error"} sx={{ py: 0.25 }} onClose={() => setTestResult(null)}>
             {testResult.message}
@@ -203,65 +170,14 @@ export default function UncleClaudeSection() {
 
       <Cluster
         label="Self-improvement"
-        help="Guaardvark checks its own code and proposes fixes for you to review. Codebase locked blocks every automatic edit."
+        help="Guaardvark checks its own code and proposes fixes for you to review. Its switches, the self-check, pending fixes and the run log have their own page."
       >
         <Line>
-          <SettingChip
-            label="Self-improvement"
-            on={!!siStatus?.enabled}
-            onToggle={handleToggleSelfImprovement}
-            tooltip="Lets the mentor scan the codebase and propose fixes for review."
-          />
-          <SettingChip
-            label="Codebase locked"
-            on={!!siStatus?.codebase_locked}
-            onToggle={handleToggleCodebaseLock}
-            tooltip={siStatus?.codebase_locked ? "Autonomous edits are blocked. Turn off to allow them." : "Turn on to block every autonomous edit to the source tree."}
-          />
-          <Sep />
-          <ActionButton
-            onClick={handleOpenScan}
-            loading={scanOpen}
-            disabled={!siStatus?.enabled || !!siStatus?.codebase_locked}
-            startIcon={<PlayIcon />}
-            tooltip={
-              !siStatus?.enabled
-                ? "Turn on self-improvement first"
-                : siStatus?.codebase_locked
-                  ? "Unlock the codebase first"
-                  : "Runs the checks now. Cancel asks the server to stop; closing the view leaves the scan running."
-            }
-          >
-            Run self-check
-          </ActionButton>
-          <ActionButton kind="link" onClick={() => setFixesOpen(true)}>
-            Review fixes
+          <ActionButton onClick={() => navigate("/self-improvement")}>
+            Open Self-improvement
           </ActionButton>
         </Line>
-        <Hint>
-          {siStatus?.last_run
-            ? `Last run ${new Date(siStatus.last_run.timestamp).toLocaleString()} (${siStatus.last_run.status}) · ${runs} successful run${runs === 1 ? "" : "s"}.`
-            : "No runs yet."}
-          {siStatus?.codebase_locked ? " Codebase is locked: autonomous edits are blocked." : ""}
-        </Hint>
-        {scanCancelled && (
-          <StatusPill tone="neutral" label="Cancelled" />
-        )}
-        {scanInBackground && !scanCancelled && (
-          <StatusPill tone="info" label="Scan continues in the background" />
-        )}
       </Cluster>
-
-      <ScanProgressModal
-        open={scanOpen}
-        onClose={() => setScanOpen(false)}
-        onBackground={() => setScanInBackground(true)}
-        onComplete={handleScanComplete}
-      />
-      <FixesModal
-        open={fixesOpen}
-        onClose={() => setFixesOpen(false)}
-      />
     </Box>
   );
 }

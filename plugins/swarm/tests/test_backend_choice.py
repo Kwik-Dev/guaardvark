@@ -1,5 +1,6 @@
 """A task that names a backend runs on that backend or fails; it is never
-moved to the priority list, whose first entry is the cloud CLI."""
+moved to another. A task that names none runs locally: the hosted CLI only
+runs a task that names it."""
 
 import pytest
 
@@ -84,9 +85,21 @@ def test_installed_preferred_backend_is_used(only_claude_installed):
     assert reason == ""
 
 
-def test_no_preference_uses_priority_list(only_claude_installed):
-    backend, _ = _config().select_backend(None, online=True)
-    assert backend.name == "claude"
+def test_no_preference_runs_on_the_local_backend(both_installed):
+    backend, reason = _config().select_backend(None, online=True)
+    assert backend.name == "cline" and reason == ""
+
+
+def test_no_preference_never_reaches_the_hosted_backend(only_claude_installed):
+    backend, reason = _config().select_backend(None, online=True)
+    assert backend is None
+    assert "[Backend: claude]" in reason
+
+
+def test_an_unnamed_task_with_only_the_hosted_cli_says_how_to_use_it(tmp_path, only_claude_installed):
+    orch = _orchestrator(tmp_path, _config())
+    with pytest.raises(RuntimeError, match=r"no local agent CLI is installed.*\[Backend: claude\]"):
+        orch._launch_task(_task(), online=True)
 
 
 def test_launch_error_names_the_missing_backend(tmp_path, only_claude_installed):
@@ -139,7 +152,7 @@ def test_model_tag_offline_does_not_reach_an_online_backend(both_installed):
 
 
 @pytest.mark.parametrize("value", ["any", "Auto", "none"])
-def test_model_tag_no_preference_keeps_priority_choice(tmp_path, only_claude_installed, value):
+def test_model_tag_no_preference_keeps_the_default_choice(tmp_path, both_installed, value):
     orch = _orchestrator(tmp_path, _config())
     with pytest.raises(_StopAtWorktree):
         orch._launch_task(_task(tags={"Model": value}), online=True)
@@ -151,7 +164,7 @@ def test_model_tag_no_preference_leaves_backend_tag_in_force(tmp_path, only_clau
         orch._launch_task(_task(tags={"Model": "any", "Backend": "nonexistent"}), online=True)
 
 
-def test_backend_tag_any_keeps_priority_choice(tmp_path, only_claude_installed):
+def test_backend_tag_any_keeps_the_default_choice(tmp_path, both_installed):
     orch = _orchestrator(tmp_path, _config())
     with pytest.raises(_StopAtWorktree):
         orch._launch_task(_task(tags={"Backend": "any"}), online=True)

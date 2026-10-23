@@ -23,8 +23,11 @@ const DocumentsContextMenu = ({
   onColorChange,
   onIndex,
   onOpenWindow,
+  onToggleMinimize,
+  onCloseWindow,
   onOpenInCodeEditor,
   onReviewWithAgent,
+  onBulkImportHere,
   hasClipboard = false,
   _hasSelection = false,
   contextType = 'desktop', // 'desktop', 'folder', 'file'
@@ -34,6 +37,7 @@ const DocumentsContextMenu = ({
   isCode = false,
   isPdf = false,
   openLabel = 'Open in Window',
+  minimizeLabel = 'Minimize',
 }) => {
   const theme = useTheme();
   const open = Boolean(anchorPosition);
@@ -98,8 +102,10 @@ const DocumentsContextMenu = ({
     );
   }
 
-  // Folder context menu
+  // Folder context menu: a folder icon, or the title bar of the folder's open
+  // window, which adds the window's own Minimize and Close.
   if (contextType === 'folder') {
+    const hasWindowActions = Boolean(onOpenWindow || onToggleMinimize || onCloseWindow);
     return (
       <Menu
         open={open}
@@ -111,8 +117,10 @@ const DocumentsContextMenu = ({
         sx={menuStyles}
       >
         {onOpenWindow && <MenuItem onClick={select(onOpenWindow)}>{openLabel}</MenuItem>}
+        {onToggleMinimize && <MenuItem onClick={select(onToggleMinimize)}>{minimizeLabel}</MenuItem>}
+        {onCloseWindow && <MenuItem onClick={select(onCloseWindow)}>Close Window</MenuItem>}
         {onReviewWithAgent && <MenuItem onClick={select(onReviewWithAgent)}>Review with Agent</MenuItem>}
-        {onOpenWindow && <Divider />}
+        {hasWindowActions && <Divider />}
         {onCut && <MenuItem onClick={select(onCut)}>Cut</MenuItem>}
         {onCopy && <MenuItem onClick={select(onCopy)}>Copy</MenuItem>}
         <MenuItem onClick={select(onPaste)} disabled={!hasClipboard}>Paste</MenuItem>
@@ -148,6 +156,7 @@ const DocumentsContextMenu = ({
         )}
         {onRename && <MenuItem onClick={select(onRename)}>Rename</MenuItem>}
         {onProperties && <MenuItem onClick={select(onProperties)}>Properties</MenuItem>}
+        {onBulkImportHere && <MenuItem onClick={select(onBulkImportHere)}>Bulk import into this folder…</MenuItem>}
         {onIndex && (
           <>
             <Divider />

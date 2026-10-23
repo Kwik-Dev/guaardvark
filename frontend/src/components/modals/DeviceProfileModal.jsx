@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import {
+  Alert,
   Dialog,
   DialogTitle,
   DialogContent,
@@ -16,10 +17,51 @@ import {
 } from "@mui/material";
 import CollapsibleAlert from "../common/CollapsibleAlert";
 
+/**
+ * Form values for a new profile from GET /api/training/hardware: the card and
+ * memory this machine reports, and the batch size, sequence length and 4-bit
+ * setting HardwareService recommends for that much GPU memory. `takenNames`
+ * keeps the name unique, which the create route requires.
+ */
+export function profileFromHardware(hw, takenNames = []) {
+  const rec = hw?.recommended_config || {};
+  const hasGpu = Boolean(hw?.device_type) && hw.device_type !== "cpu";
+  const base = hasGpu && hw.gpu_name ? hw.gpu_name : "This machine (CPU)";
+  let name = base;
+  for (let n = 2; takenNames.includes(name); n += 1) name = `${base} (${n})`;
+  return {
+    name,
+    device_type: hasGpu ? "gpu" : "cpu",
+    gpu_vram_mb: hasGpu && hw.vram_total_mb ? hw.vram_total_mb : "",
+    system_ram_mb: hw?.ram_total_mb || "",
+    max_batch_size: rec.batch_size || 1,
+    max_seq_length: rec.max_seq_length || 512,
+    supports_4bit: Boolean(rec.use_4bit),
+  };
+}
+
+/** The line above a form filled from this machine: what was read, and that nothing is saved yet. */
+export function hardwareNote(hw) {
+  const hasGpu = Boolean(hw?.device_type) && hw.device_type !== "cpu";
+  const gpu = hasGpu
+    ? `${hw.gpu_name || "GPU"} with ${hw.vram_total_mb ? `${hw.vram_total_mb} MB usable GPU memory` : "GPU memory not detected (enter it below)"}`
+    : "no GPU";
+  return (
+    `Filled in from this machine: ${gpu}, ${hw?.ram_total_mb || "unknown"} MB system RAM, and the batch size and ` +
+    "sequence length recommended for that card. Check them, then Create; nothing is saved until you do."
+  );
+}
+
+/**
+ * @param {object} [prefill]      form values for a new profile (see profileFromHardware)
+ * @param {string} [prefillNote]  shown above a prefilled form
+ */
 const DeviceProfileModal = ({
   open,
   onClose,
   profileData,
+  prefill,
+  prefillNote,
   onSave,
   isSaving,
 }) => {
@@ -64,11 +106,12 @@ const DeviceProfileModal = ({
           requires_cpu_offload: false,
           is_default: false,
           is_active: true,
+          ...(prefill || {}),
         });
       }
       setFormError(null);
     }
-  }, [open, profileData]);
+  }, [open, profileData, prefill]);
 
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -118,9 +161,18 @@ const DeviceProfileModal = ({
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
       <DialogTitle>
-        {profileData ? `Edit Device Profile: ${profileData.name}` : "Add New Device Profile"}
+        {profileData
+          ? `Edit Device Profile: ${profileData.name}`
+          : prefill
+            ? "New Device Profile from This Machine"
+            : "Add New Device Profile"}
       </DialogTitle>
       <DialogContent dividers>
+        {!profileData && prefill && prefillNote && (
+          <Alert severity="info" sx={{ mb: 2 }} data-testid="device-profile-prefill-note">
+            {prefillNote}
+          </Alert>
+        )}
         {formError && (
           <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {formError}

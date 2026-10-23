@@ -1,6 +1,8 @@
 // frontend/src/components/settings/ui/ConfirmActionDialog.jsx
 // The one confirmation every destructive action goes through. Says what will be
 // removed, shows real counts when the caller has them, and names what is kept.
+// `reversible` is for an action that switches back on its own or can be put
+// back (an update with rollback): neutral styling and no "cannot be undone".
 
 import React from "react";
 import { Box, Dialog, DialogActions, DialogContent, DialogTitle, Typography } from "@mui/material";
@@ -17,6 +19,7 @@ import ActionButton from "./ActionButton";
  * @param {ReactNode} [extra]      optional extra control (e.g. keep-vs-delete chip)
  * @param {string}   [confirmLabel]
  * @param {boolean}  [busy]
+ * @param {boolean}  [reversible]  neutral styling, no "cannot be undone"
  * @param {function} onConfirm
  * @param {function} onClose
  */
@@ -29,12 +32,15 @@ const ConfirmActionDialog = ({
   extra,
   confirmLabel = "Confirm",
   busy = false,
+  reversible = false,
   onConfirm,
   onClose,
 }) => (
   <Dialog open={open} onClose={busy ? undefined : onClose} maxWidth="sm" fullWidth>
-    <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1, color: "error.main", fontSize: "1rem" }}>
-      <WarningAmberIcon fontSize="small" />
+    <DialogTitle
+      sx={{ display: "flex", alignItems: "center", gap: 1, color: reversible ? "text.primary" : "error.main", fontSize: "1rem" }}
+    >
+      {!reversible && <WarningAmberIcon fontSize="small" />}
       {title}
     </DialogTitle>
     <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
@@ -52,8 +58,8 @@ const ConfirmActionDialog = ({
             rowGap: 0.5,
             p: 1.25,
             borderRadius: "6px",
-            bgcolor: alpha(theme.palette.error.main, 0.06),
-            border: `1px solid ${alpha(theme.palette.error.main, 0.2)}`,
+            bgcolor: alpha(reversible ? theme.palette.text.primary : theme.palette.error.main, 0.06),
+            border: `1px solid ${alpha(reversible ? theme.palette.text.primary : theme.palette.error.main, 0.2)}`,
           })}
         >
           {facts.map((f) => (
@@ -74,15 +80,17 @@ const ConfirmActionDialog = ({
           Not touched: {keeps}
         </Typography>
       )}
-      <Typography variant="caption" sx={{ color: "error.main" }}>
-        This cannot be undone.
-      </Typography>
+      {!reversible && (
+        <Typography variant="caption" sx={{ color: "error.main" }}>
+          This cannot be undone.
+        </Typography>
+      )}
     </DialogContent>
     <DialogActions>
       <ActionButton onClick={onClose} disabled={busy}>
         Cancel
       </ActionButton>
-      <ActionButton kind="destructive" onClick={onConfirm} loading={busy}>
+      <ActionButton kind={reversible ? "neutral" : "destructive"} onClick={onConfirm} loading={busy}>
         {confirmLabel}
       </ActionButton>
     </DialogActions>

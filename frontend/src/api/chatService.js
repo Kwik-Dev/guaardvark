@@ -5,6 +5,12 @@ import { validateChatInput, checkRateLimit, ValidationError } from "../utils/inp
 import { RATE_LIMIT_MAX_REQUESTS, RATE_LIMIT_WINDOW_MS } from "../config/constants";
 import { debugLog } from "../utils/debugLog";
 
+// The Code Editor's AI Assistant keeps its own chat session. Its prompts carry
+// whole files, and without a session id the backend files them under its
+// default session next to ordinary chat traffic. Alphanumeric only: that is
+// what validateChatInput accepts for a session id.
+export const CODE_EDITOR_SESSION_ID = "codeEditorAssistant";
+
 export const sendQuery = async (
   inputText,
   tags = [],
@@ -118,19 +124,20 @@ export const sendCommandToQueryApi = async (
 class EnhancedChatService {
   constructor() {
     this.sessionContexts = new Map(); // Local session context cache
-    this.webSearchEnabled = true; // Default enabled
     this.activeRequests = new Set(); // Track active requests to prevent duplicates
     this.requestResults = new Map(); // Cache recent results
   }
 
   /**
-   * Send enhanced message with web search and context management
+   * Send a message through enhanced chat with context management. The browser
+   * never searches the web by itself: a reply whose question looked like it
+   * needed current information carries the backend's web_search_offer, and
+   * the search runs only when the person clicks it.
    */
   async sendEnhancedMessage(sessionId, message, options = {}) {
     const {
       useRag = true,
       debugMode = false,
-      autoWebSearch = true,
       projectId = null,
       rulesCutoff = false,
       requestId = `${sessionId}_${Date.now()}_${Math.random()}`,
@@ -166,27 +173,6 @@ class EnhancedChatService {
     debugLog('chatService: Marked request as active', { sessionId });
 
     try {
-      // Check if we should use web search for this query
-      const shouldUseWebSearch = autoWebSearch && this.webSearchEnabled && 
-        this._shouldUseWebSearch(message);
-
-      let enhancedMessage = message;
-      let webSearchContext = null;
-
-      // Perform web search if needed
-      if (shouldUseWebSearch) {
-        debugLog('chatService: Using web search for query');
-        try {
-          const searchResult = await this.performWebSearch(message);
-          if (searchResult.success && searchResult.data.has_result) {
-            webSearchContext = searchResult.data;
-            enhancedMessage = `${message}\n\n[Web Search Context: ${searchResult.data.snippet}]`;
-          }
-        } catch (error) {
-          debugLog('chatService: Web search failed, continuing without', error);
-        }
-      }
-
       let result = null;
       let enhancedSuccess = false;
 
@@ -198,7 +184,7 @@ class EnhancedChatService {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             session_id: sessionId,
-            message: enhancedMessage,
+            message: message,
             use_rag: useRag,
             debug: debugMode,
             project_id: projectId,
@@ -221,8 +207,8 @@ class EnhancedChatService {
             success: true,
             content: data.data.response,
             userMessageId: data.data.user_message_id, // Pass through user message ID
-            webSearchUsed: !!webSearchContext,
-            webSearchContext: webSearchContext,
+            webSearchUsed: data.data.web_search_used === true,
+            webSearchOffer: data.data.web_search_offer || null,
             context_info: data.data.context_info,
             rag_info: data.data.rag_info,
             enhanced: true,
@@ -243,7 +229,7 @@ class EnhancedChatService {
       // Only use fallback if enhanced API completely failed
       if (!enhancedSuccess) {
         debugLog('chatService: Using fallback to basic chat API');
-        result = await this._fallbackToBasicChat(sessionId, enhancedMessage, projectId);
+        result = await this._fallbackToBasicChat(sessionId, message, projectId);
         result.requestId = requestId;
       }
 
@@ -383,29 +369,6 @@ class EnhancedChatService {
   }
 
   /**
-   * Check if a message should trigger web search
-   */
-  _shouldUseWebSearch(message) {
-    const webSearchTriggers = [
-      /what.*happening/i,
-      /current.*news/i,
-      /latest.*information/i,
-      /today.*weather/i,
-      /stock.*price/i,
-      /recent.*events/i,
-      /tell me about.*[0-9]{4}/i, // Years
-      /what.*year/i,
-      /when.*did/i,
-      /who.*is.*currently/i,
-      /what.*company/i,
-      /current.*status/i,
-      /real.*time/i
-    ];
-
-    return webSearchTriggers.some(pattern => pattern.test(message));
-  }
-
-  /**
    * Fallback to basic chat API
    */
   async _fallbackToBasicChat(sessionId, message, projectId) {
@@ -512,7 +475,6 @@ export const sendChatMessage = async (
   const result = await enhancedChatService.sendEnhancedMessage(sessionId, userMessage, {
     useRag: true,
     debugMode: false,
-    autoWebSearch: true,
     projectId: projectId,
     requestId: requestId,
     rulesCutoff: rulesCutoff,

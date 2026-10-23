@@ -63,13 +63,16 @@ def _execution_error(exception_type, message, node_type="KSampler", node_id="10"
 def test_every_kind_has_a_policy():
     assert set(RENDER_ERROR_POLICY) == set(K)
     for kind, policy in RENDER_ERROR_POLICY.items():
-        assert set(policy) == {"label", "retryable", "retry_after_s", "action"}, kind
+        required = {"label", "retryable", "retry_after_s", "action"}
+        optional = {"label_by_surface", "action_by_surface"}  # wording for image/audio/voice jobs
+        assert required <= set(policy) <= required | optional, kind
         assert policy["retryable"] == bool(policy["retry_after_s"]), kind
         assert policy["label"], kind
 
 
 def test_retryable_kinds_are_the_transient_ones():
-    assert {k for k in K if retry_waits(k)} == {K.COMFYUI_DOWN, K.VRAM_BUSY, K.RENDER_TIMEOUT, K.OUTPUT_MISSING}
+    assert {k for k in K if retry_waits(k)} == {
+        K.COMFYUI_DOWN, K.SERVICE_DOWN, K.VRAM_BUSY, K.RENDER_TIMEOUT, K.OUTPUT_MISSING}
 
 
 def test_a_failure_message_carries_its_kind_through_string_handling():
@@ -442,3 +445,19 @@ def test_pipeline_failures_keep_the_kind():
     assert classify_render_exception(RuntimeError("CUDA out of memory. Tried to allocate")) is K.OOM
     assert classify_render_exception(ValueError("x")) is K.UNKNOWN
     assert describe_failure(None, "x")["kind"] == "unknown"
+
+
+def test_a_connection_error_is_comfyui_only_on_comfyuis_port():
+    import requests
+
+    from backend.config import COMFYUI_URL
+    from backend.services.job_operation_gate import classify_render_exception
+
+    def refused(url):
+        return requests.ConnectionError("refused", request=requests.Request("POST", url).prepare())
+
+    assert classify_render_exception(refused(f"{COMFYUI_URL}/prompt")) is K.COMFYUI_DOWN
+    # The video editor a music video assembles in is another service.
+    assert classify_render_exception(refused("http://127.0.0.1:8207/analyze")) is K.SERVICE_DOWN
+    # Without the URL, ComfyUI stays the likely one.
+    assert classify_render_exception(requests.ConnectionError("refused")) is K.COMFYUI_DOWN

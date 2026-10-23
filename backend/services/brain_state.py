@@ -12,6 +12,7 @@ compiled reflex table.
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -447,14 +448,24 @@ class BrainState:
             self.model_caps = ModelCapabilities()
 
     def _build_system_prompts(self):
-        """Pre-render system prompt prefix templates (live blocks filled at request time)."""
+        """Pre-render system prompt prefix templates (live blocks filled at request time).
+
+        The persona and the rules block come from the Rules page and are both
+        gated by the Settings "Rules" switch; ``refresh_prompts`` re-renders
+        them when a rule changes.
+        """
 
         persona = ""
+        rules_block = ""
         self.persona_rule_id = None
         try:
-            from backend.utils import chat_utils
-            persona = chat_utils.get_active_system_prompt() or ""
-            self.persona_rule_id = chat_utils.LAST_PERSONA_RULE_ID if persona else None
+            from backend.utils.settings_utils import get_rules_enabled
+            if get_rules_enabled():
+                from backend import rule_utils
+                from backend.utils import chat_utils
+                persona = chat_utils.get_active_system_prompt() or ""
+                self.persona_rule_id = chat_utils.LAST_PERSONA_RULE_ID if persona else None
+                rules_block = rule_utils.get_chat_rules_block(self.active_model or None)
         except Exception:
             pass
 
@@ -473,6 +484,8 @@ class BrainState:
             prefix = honesty + "\n\n"
         if persona:
             prefix += persona + "\n\n"
+        if rules_block:
+            prefix += rules_block.strip() + "\n\n"
         prefix += "{MEMORY_BLOCK}{DESKTOP_STATE}"
 
         # Prefix-only templates; role tails assembled in get_system_prompt()
@@ -704,6 +717,12 @@ class BrainState:
 
     def _start_warmup(self):
         """Send a throwaway prompt to force model into VRAM."""
+        if os.environ.get("CELERY_WORKER_MODE", "false").lower() == "true":
+            # A Celery worker never serves chat, and it builds the app inside
+            # its first task, often a render that has just evicted Ollama.
+            logger.info("BrainState: skipping warm-up in the Celery worker")
+            self.health.warm_up_status = WarmUpStatus.READY
+            return
         self.health.warm_up_status = WarmUpStatus.WARMING
 
         def _ping():
@@ -771,11 +790,7 @@ class BrainState:
         except Exception as e:
             logger.error(f"Tool schema refresh failed: {e}")
 
-        # Re-render system prompts
-        try:
-            self._build_system_prompts()
-        except Exception as e:
-            logger.error(f"System prompt refresh failed: {e}")
+        self.refresh_prompts()
 
         # Rebuild reflexes (tools may have changed)
         try:
@@ -797,6 +812,28 @@ class BrainState:
 
         elapsed = (time.monotonic() - start) * 1000
         logger.info(f"BrainState refreshed in {elapsed:.0f}ms")
+
+    def refresh_prompts(self):
+        """Re-render the system prompt prefixes only.
+
+        The persona and rules block are baked into the prefix, so a Rules page
+        save or a flip of the Rules switch calls this; the full ``refresh``
+        also re-detects the model and warms it up, which a text edit does not
+        warrant. Runs under the captured app context when none is active.
+        """
+        try:
+            from flask import has_app_context
+            needs_ctx = self._app is not None and not has_app_context()
+        except Exception:
+            needs_ctx = False
+        try:
+            if needs_ctx:
+                with self._app.app_context():
+                    self._build_system_prompts()
+            else:
+                self._build_system_prompts()
+        except Exception as e:
+            logger.error(f"System prompt refresh failed: {e}")
 
     # -- Reflex matching ----------------------------------------------------
 
@@ -825,3 +862,31 @@ class BrainState:
     def is_ready(self) -> bool:
         """True if at least reflexes are loaded (minimum viable state)."""
         return self._initialized and self.health.reflexes_loaded
+
+
+def refresh_chat_prompts() -> bool:
+    """Make a rule, prompt or Rules-switch change reach the next chat turn.
+
+    Clears the rule lookup caches, then re-renders the brain's prompt prefix
+    when the running app has an initialized BrainState. Returns True when the
+    prefix was rebuilt. Never raises: a failed refresh must not fail the save
+    that triggered it.
+    """
+    try:
+        from backend import rule_utils
+        rule_utils.clear_rule_caches()
+    except Exception as e:
+        logger.warning(f"Rule cache clear failed: {e}")
+    try:
+        from flask import current_app
+        brain_state = getattr(current_app, "brain_state", None)
+    except Exception:
+        brain_state = None
+    if brain_state is None or not getattr(brain_state, "_initialized", False):
+        return False
+    try:
+        brain_state.refresh_prompts()
+        return True
+    except Exception as e:
+        logger.warning(f"Chat prompt refresh failed: {e}")
+        return False

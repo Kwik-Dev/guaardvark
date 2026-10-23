@@ -137,7 +137,11 @@ class SongAnalyzeRequest(BaseModel):
     """Read-only audio analysis: tempo + beats + energy-labeled sections."""
 
     audio_path: str = Field(..., description="Absolute path to the song file.")
-    section_count: int = Field(4, ge=1, description="Number of energy sections to segment.")
+    section_count: Optional[int] = Field(
+        4, ge=1,
+        description="Equal-time energy sections to cut the song into; null reads the song "
+                    "instead (bar grid, per-bar loudness, sections where the music changes).",
+    )
     tightness: int = Field(100, ge=1, description="librosa beat_track rigidity.")
 
 
@@ -260,6 +264,10 @@ def status() -> dict[str, Any]:
         "ffmpeg": {"found": bool(shutil.which("ffmpeg"))},
         "ffprobe": {"found": bool(shutil.which("ffprobe"))},
         "shotcut": {"found": bool(shutil.which("shotcut"))},
+        "auto_editor": {
+            "found": bool(shutil.which(_runtime.get("auto_editor", {}).get("path") or "auto-editor")),
+            "suggestion": "pip install -r plugins/video_editor/requirements.txt into the plugin venv",
+        },
     }
     return {
         "service": "video_editor",
@@ -355,7 +363,7 @@ def auto_editor_trim(req: AutoEditorRequest) -> dict[str, Any]:
     if req.register_result:
         doc = register_output(
             result.output_path,
-            backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+            backend_url=_runtime.get("registration", {}).get("backend_url"),
             folder=_runtime.get("registration", {}).get("folder", "Videos"),
             file_metadata={"kind": f"auto_editor_{result.mode}", "threshold": result.threshold},
         )
@@ -398,7 +406,7 @@ def shotcut_compose(req: ShotcutComposeRequest) -> dict[str, Any]:
     if req.register_result:
         doc = register_output(
             mlt_path,
-            backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+            backend_url=_runtime.get("registration", {}).get("backend_url"),
             folder=_runtime.get("registration", {}).get("folder", "Videos"),
             file_metadata={"kind": "mlt_timeline", "text_overlays": len(timeline.text_elements)},
         )
@@ -424,7 +432,7 @@ def shotcut_compose(req: ShotcutComposeRequest) -> dict[str, Any]:
         if req.register_result:
             doc = register_output(
                 render.output_path,
-                backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+                backend_url=_runtime.get("registration", {}).get("backend_url"),
                 folder=_runtime.get("registration", {}).get("folder", "Videos"),
                 file_metadata={"kind": "mlt_render", "text_overlays": len(timeline.text_elements)},
             )
@@ -487,7 +495,7 @@ def _do_beat_sync_render(job: Job, req: BeatSyncRequest) -> dict[str, Any]:
     if req.register_result:
         doc = register_output(
             mlt_path,
-            backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+            backend_url=_runtime.get("registration", {}).get("backend_url"),
             folder=_runtime.get("registration", {}).get("folder", "Videos"),
             file_metadata={"kind": "mlt_project", "cut_count": len(cuts)},
         )
@@ -516,7 +524,7 @@ def _do_beat_sync_render(job: Job, req: BeatSyncRequest) -> dict[str, Any]:
         if req.register_result:
             doc = register_output(
                 render.output_path,
-                backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+                backend_url=_runtime.get("registration", {}).get("backend_url"),
                 folder=_runtime.get("registration", {}).get("folder", "Videos"),
                 file_metadata={
                     "kind": "beat_sync_render",
@@ -719,7 +727,7 @@ def shotcut_compose_arrangement(body: ComposeArrangementBody) -> dict[str, Any]:
     if body.register_result:
         doc = register_output(
             mlt_path,
-            backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+            backend_url=_runtime.get("registration", {}).get("backend_url"),
             folder=_runtime.get("registration", {}).get("folder", "Videos"),
             file_metadata={
                 "kind": "mlt_arrangement",
@@ -819,7 +827,7 @@ def shotcut_compose_arrangement(body: ComposeArrangementBody) -> dict[str, Any]:
         if body.register_result:
             doc = register_output(
                 render.output_path,
-                backend_url=_runtime.get("registration", {}).get("backend_url", "http://localhost:5002"),
+                backend_url=_runtime.get("registration", {}).get("backend_url"),
                 folder=_runtime.get("registration", {}).get("folder", "Videos"),
                 file_metadata={
                     "kind": "arrangement_render",

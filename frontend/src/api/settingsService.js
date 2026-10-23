@@ -722,6 +722,31 @@ export const setConfineToolPaths = async (enabled) => {
   }
 };
 
+// Job order (backend/services/job_arbiter.py): off keeps every queue's own order.
+export const getJobPriority = async () => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/job_priority`);
+    return await handleResponse(response);
+  } catch (err) {
+    console.error("settingsService: Error getting job order:", err.message);
+    return { error: err.message };
+  }
+};
+
+export const setJobPriority = async (enabled) => {
+  try {
+    const response = await fetch(`${BASE_URL}/settings/job_priority`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_priority_enabled: !!enabled }),
+    });
+    return await handleResponse(response);
+  } catch (err) {
+    console.error("settingsService: Error setting job order:", err.message);
+    return { error: err.message };
+  }
+};
+
 export const getLlmDebug = async () => {
   try {
     const response = await fetch(`${BASE_URL}/settings/llm_debug`);
@@ -810,4 +835,22 @@ export const setMusicDirectory = async (path) => {
     console.error("settingsService: Error setting music directory:", err.message);
     return { error: err.message };
   }
+};
+
+/** Keep ready: { enabled, state, detail, model, env_writable }. */
+export const getChatKeepReady = async () => {
+  const response = await fetch(`${BASE_URL}/settings/chat_keep_ready`);
+  return await handleResponse(response);
+};
+
+/** Turn Keep ready on or off for this machine; applies at once. */
+export const setChatKeepReady = async (enabled) => {
+  const response = await fetch(`${BASE_URL}/settings/chat_keep_ready`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  const data = await handleResponse(response);
+  if (typeof data === "object" && data !== null && data.error) throw new Error(data.error);
+  return data;
 };

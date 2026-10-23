@@ -3,6 +3,7 @@
 
 import collections
 import logging
+import re
 import subprocess
 from pathlib import Path
 
@@ -33,6 +34,9 @@ PLUGIN_LOG_CANDIDATES: dict[str, list[str]] = {
     "vision_pipeline": ["vision_pipeline.log"],
     "upscaling": ["upscaling.log"],
     "audio_foundry": ["audio_foundry.log"],
+    # The trainer daemon's stderr (plugins/lora_trainer/real_trainer.py),
+    # then the plain name as a fallback.
+    "lora_trainer": ["lora_trainer_daemon.log", "lora_trainer.log"],
 }
 
 
@@ -41,6 +45,18 @@ def _tail_text_file(path: Path, lines: int) -> tuple[str, int]:
         tail = collections.deque(f, maxlen=lines)
     log_text = "".join(tail)
     return log_text, len(tail)
+
+
+# journalctl -o short-iso: "<iso time> <hostname> <unit>[<pid>]: <message>".
+# The Logs panel shows every line in the browser, so the hostname goes; the
+# time stays, since Ollama's own lines do not all carry one.
+_JOURNAL_PREFIX = re.compile(r"^(\S+) \S+ \S+?\[\d+\]: ")
+
+
+def _strip_journal_host(text: str) -> str:
+    """``2026-10-10T18:43:33-04:00 box ollama[1840771]: msg`` becomes
+    ``2026-10-10T18:43:33-04:00 msg``; other lines are left as they are."""
+    return "\n".join(_JOURNAL_PREFIX.sub(r"\1 ", line) for line in text.splitlines())
 
 
 def _read_plugin_log_text(plugin_id: str, lines: int) -> tuple[str, int, str]:
@@ -71,8 +87,8 @@ def _read_plugin_log_text(plugin_id: str, lines: int) -> tuple[str, int, str]:
                 check=False,
             )
             if result.returncode == 0 and result.stdout.strip():
-                rows = result.stdout.splitlines()
-                return result.stdout, len(rows), "journalctl:ollama"
+                text = _strip_journal_host(result.stdout)
+                return text + "\n", len(text.splitlines()), "journalctl:ollama"
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             pass
 
@@ -174,6 +190,11 @@ def start_plugin(plugin_id):
 def stop_plugin(plugin_id):
     """Stop a plugin."""
     try:
+        from backend.services.plugin_bridge import manual_stop_blocked_reason
+
+        blocked = manual_stop_blocked_reason(plugin_id)
+        if blocked:
+            return error_response(blocked, 409, "PLUGIN_STOP_BLOCKED")
         manager = get_plugin_manager()
         result = manager.stop_plugin(plugin_id)
 
@@ -206,6 +227,11 @@ def stop_plugin(plugin_id):
 def restart_plugin(plugin_id):
     """Restart a plugin."""
     try:
+        from backend.services.plugin_bridge import manual_stop_blocked_reason
+
+        blocked = manual_stop_blocked_reason(plugin_id)
+        if blocked:
+            return error_response(blocked, 409, "PLUGIN_RESTART_BLOCKED")
         manager = get_plugin_manager()
         result = manager.restart_plugin(plugin_id)
         
@@ -252,6 +278,11 @@ def enable_plugin(plugin_id):
 def disable_plugin(plugin_id):
     """Disable a plugin (stops it first if running)."""
     try:
+        from backend.services.plugin_bridge import manual_stop_blocked_reason
+
+        blocked = manual_stop_blocked_reason(plugin_id)
+        if blocked:
+            return error_response(blocked, 409, "PLUGIN_DISABLE_BLOCKED")
         manager = get_plugin_manager()
         result = manager.disable_plugin(plugin_id)
         
@@ -392,12 +423,18 @@ def update_plugin_config(plugin_id):
 
 @plugins_bp.route("/refresh", methods=["POST"])
 def refresh_plugins():
-    """Refresh plugin registry by rescanning plugins directory."""
+    """Refresh plugin registry by rescanning plugins directory.
+
+    Kills nothing and starts nothing. The boot-time path
+    (PluginManager._init_plugin_status) also kills processes found on
+    disabled plugins' ports and restores the last running set; a refresh the
+    user clicked must do neither. The only write is to the persisted running
+    set, which may gain an answering service and never loses one.
+    """
     try:
         manager = get_plugin_manager()
-        discovered = manager.registry.refresh()
-        manager._init_plugin_status()  # Reinitialize status
-        
+        discovered = manager.reload()
+
         return success_response(
             data={
                 "discovered": discovered,
@@ -460,6 +497,82 @@ def get_plugin_logs(plugin_id):
     except Exception as e:
         logger.error(f"Error reading plugin logs: {e}", exc_info=True)
         return error_response(str(e), 500, "PLUGIN_LOGS_ERROR")
+
+
+# ── ComfyUI update (plugins/comfyui/releases.json declares the target) ──────
+# The only routes here that reach the network, and only on the POST: a clone
+# from GitHub and a pip install from PyPI, both named in the check payload.
+
+@plugins_bp.route("/comfyui/update/check", methods=["GET"])
+def comfyui_update_check():
+    """What an update would do: versions, busy reason, disk, package changes."""
+    from backend.services.comfyui_update_service import UpdateRefused, get_update_service
+
+    try:
+        return success_response(data=get_update_service().check(request.args.get("target")))
+    except UpdateRefused as e:
+        return error_response(str(e), 409, "COMFYUI_UPDATE_REFUSED")
+    except Exception as e:
+        logger.error(f"ComfyUI update check failed: {e}", exc_info=True)
+        return error_response(str(e), 500, "COMFYUI_UPDATE_CHECK_ERROR")
+
+
+@plugins_bp.route("/comfyui/update", methods=["POST"])
+def comfyui_update_start():
+    """Start the update job; 202 with its status, 409 with the refusal."""
+    from backend.services.comfyui_update_service import UpdateRefused, get_update_service
+
+    data = request.get_json(silent=True) or {}
+    try:
+        status = get_update_service().start(data.get("target"))
+        return success_response(data=status, message="ComfyUI update started", status_code=202)
+    except UpdateRefused as e:
+        return error_response(str(e), 409, "COMFYUI_UPDATE_REFUSED")
+    except Exception as e:
+        logger.error(f"ComfyUI update failed to start: {e}", exc_info=True)
+        return error_response(str(e), 500, "COMFYUI_UPDATE_ERROR")
+
+
+@plugins_bp.route("/comfyui/update/status", methods=["GET"])
+def comfyui_update_status():
+    """The current or last update job; ``needs_repair`` when one was interrupted."""
+    from backend.services.comfyui_update_service import get_update_service
+
+    try:
+        return success_response(data=get_update_service().status())
+    except Exception as e:
+        logger.error(f"ComfyUI update status failed: {e}", exc_info=True)
+        return error_response(str(e), 500, "COMFYUI_UPDATE_STATUS_ERROR")
+
+
+@plugins_bp.route("/comfyui/update/repair", methods=["POST"])
+def comfyui_update_repair():
+    """Walk an interrupted update back to the old tree; 202 with status, 409 with the refusal."""
+    from backend.services.comfyui_update_service import UpdateRefused, get_update_service
+
+    try:
+        status = get_update_service().repair()
+        return success_response(data=status, message="ComfyUI repair started", status_code=202)
+    except UpdateRefused as e:
+        return error_response(str(e), 409, "COMFYUI_UPDATE_REFUSED")
+    except Exception as e:
+        logger.error(f"ComfyUI repair failed to start: {e}", exc_info=True)
+        return error_response(str(e), 500, "COMFYUI_UPDATE_ERROR")
+
+
+@plugins_bp.route("/comfyui/update/restore-previous", methods=["POST"])
+def comfyui_update_restore_previous():
+    """Swap back to the kept previous tree; 202 with status, 409 with the refusal."""
+    from backend.services.comfyui_update_service import UpdateRefused, get_update_service
+
+    try:
+        status = get_update_service().restore_previous()
+        return success_response(data=status, message="ComfyUI restore started", status_code=202)
+    except UpdateRefused as e:
+        return error_response(str(e), 409, "COMFYUI_UPDATE_REFUSED")
+    except Exception as e:
+        logger.error(f"ComfyUI restore failed to start: {e}", exc_info=True)
+        return error_response(str(e), 500, "COMFYUI_UPDATE_ERROR")
 
 
 @plugins_bp.route("/stats/gpu", methods=["GET"])

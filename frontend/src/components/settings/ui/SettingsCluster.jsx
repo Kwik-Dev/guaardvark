@@ -35,7 +35,9 @@ export const Line = ({ children, nowrap = false, sx }) => (
     sx={{
       display: "flex",
       alignItems: "center",
-      flexWrap: nowrap ? "nowrap" : "wrap",
+      // nowrap keeps a field and its buttons on one line, except on a phone
+      // where they would run off the panel.
+      flexWrap: nowrap ? { xs: "wrap", sm: "nowrap" } : "wrap",
       gap: 0.75,
       minWidth: 0,
       "& > .grow": { flex: 1, minWidth: 140 },

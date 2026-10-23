@@ -210,22 +210,87 @@ def _resolve_model(preferred: str) -> str:
     return _director_candidates(preferred)[0]
 
 
-def _cut_brief(cut_plan: list[dict[str, Any]], *, max_stretch: float | None = None, fill_method: str | None = None) -> list[dict[str, Any]]:
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+_STORY_BEAT_MAX_CHARS = 300
+
+
+def _story_beats(treatment: str | None) -> list[str]:
+    """Split a user's story into its sentences, in order: the beats spread across the song."""
+    if not treatment or not treatment.strip():
+        return []
+    return [b.strip() for b in _SENTENCE_END.split(" ".join(treatment.split())) if b.strip()]
+
+
+def _beat_for_span(beats: list[str], start_s: float, end_s: float, song_s: float) -> str:
+    """The beats that fall in a cut's span when they are spread evenly over the song: beat i
+    owns [i/B, (i+1)/B) of it. A cut longer than one beat gets each beat it spans."""
+    if not beats or song_s <= 0:
+        return ""
+    first, last = _beat_range(len(beats), start_s, end_s, song_s)
+    text = " ".join(beats[first:last + 1])
+    if len(text) > _STORY_BEAT_MAX_CHARS:
+        text = text[:_STORY_BEAT_MAX_CHARS].rsplit(" ", 1)[0] + " ..."
+    return text
+
+
+def _beat_range(n: int, start_s: float, end_s: float, song_s: float) -> tuple[int, int]:
+    first = min(n - 1, int(n * max(0.0, start_s) / song_s))
+    return first, min(n - 1, max(first, int(n * max(0.0, end_s - 1e-6) / song_s)))
+
+
+def _batch_story_block(cut_subset: list[dict[str, Any]], song_s: float, beats: list[str]) -> str:
+    """Where one batch of cuts sits in the user's story: what earlier cuts already showed and
+    the only beats these cuts show. Placed right before the task, so a small model asked for
+    the last cuts of a video continues the story instead of telling it again from the start."""
+    if not beats or not cut_subset or song_s <= 0:
+        return ""
+    start = float(cut_subset[0]["start_s"])
+    end = float(cut_subset[-1]["end_s"])
+    first, last = _beat_range(len(beats), start, end, song_s)
+    block = (
+        f"\n\nTHESE CUTS IN THE STORY: they run from {start / song_s:.0%} to {end / song_s:.0%} of the song."
+    )
+    if first > 0:
+        shown = " ".join(beats[:first])
+        if len(shown) > 2 * _STORY_BEAT_MAX_CHARS:
+            shown = "... " + shown[-2 * _STORY_BEAT_MAX_CHARS:].split(" ", 1)[-1]
+        block += f" Earlier cuts already showed: {shown} Do not show those events again."
+    block += (
+        f" These cuts show only: {' '.join(beats[first:last + 1])} "
+        "Each shots[].prompt shows its own cut's story_beat."
+    )
+    return block
+
+
+def _cut_brief(
+    cut_plan: list[dict[str, Any]], *, max_stretch: float | None = None, fill_method: str | None = None,
+    song_s: float | None = None, story_beats: list[str] | None = None,
+) -> list[dict[str, Any]]:
     """Build the compact CUTS list sent to the Director LLM.
 
     P1 (story-arc plan): optionally include the per-video Clip Stretch settings so the
     model can intelligently suggest `duration_seconds` (the *pre-stretch* source motion
     length) that will produce the desired final pacing after `fill_clip_to_duration`
     applies k = min(..., max_stretch).
+
+    ``song_s`` is the whole song's length, so a batch of cuts sees where it sits in the song
+    rather than within the batch; ``story_beats`` adds the part of the user's story each cut shows.
     """
+    if not song_s:
+        song_s = max((float(c["end_s"]) for c in cut_plan), default=0.0)
     out = []
     for c in cut_plan:
         item = {
             "index": c["index"],
+            "starts_at_s": round(float(c["start_s"]), 1),
+            # 0 = the first moment of the song, 1 = its end; a batch of cuts sees where it sits
+            "song_position": round(float(c["start_s"]) / song_s, 2) if song_s else 0.0,
             "seconds": round(float(c["end_s"]) - float(c["start_s"]), 2),
             "section": c.get("section_label", ""),
             "energy": round(float(c.get("energy", 0.0)), 3),
         }
+        if story_beats:
+            item["story_beat"] = _beat_for_span(story_beats, float(c["start_s"]), float(c["end_s"]), song_s)
         if max_stretch is not None:
             item["max_stretch"] = round(float(max_stretch), 2)
         if fill_method:
@@ -350,21 +415,21 @@ def generate_scene_prompts(
 
 def _build_rich_user(
     style_prompt: str, cuts_json: str, b: int, n_total: int,
-    mode_instruction: str, guidance_block: str, treatment_block: str,
+    mode_instruction: str, guidance_block: str, treatment_block: str, story_block: str = "",
 ) -> str:
     """The full TASK prompt: treatment + distinct per-cut shots for the first batch."""
     return (
         f"STYLE: {style_prompt}\n\n"
         f"CUTS ({b} of {n_total} total):\n{cuts_json}\n\n"
-        f"{mode_instruction}{guidance_block}{treatment_block}\n\n"
+        f"{mode_instruction}{guidance_block}{treatment_block}{story_block}\n\n"
         "TASK:\n"
         "1. Produce (or lightly refine) the top-level 'treatment' field using the provided user treatment as the main source. This field can contain the full dreamlike story and artistic directives. The treatment covers the WHOLE video, not just these cuts.\n"
         "2. For the 'shots' array: Create **one completely unique visual prompt for each individual cut** in the CUTS list above.\n"
         "   - The prompts MUST be different from each other.\n"
         "   - **NEVER copy or echo the STYLE text (or large parts of it) into any shots[].prompt** — the STYLE is the global aesthetic and will be appended automatically by the caller after your prompt. Your shots[].prompt must be the *varying part only* (subject appearance, specific framing/composition, camera move, lighting for this exact moment, texture, atmosphere).\n"
         "   - Vary them according to each cut's 'section' label and 'energy' value.\n"
-        "   - Low energy cuts (intro/build): calmer, more atmospheric, wider framing, slower implied motion, using the 'loss' and 'searching' visual language from the treatment.\n"
-        "   - High energy cuts (drop): more intense, dynamic compositions, tighter framing, stronger contrast, using the 'convergence' and 'intensity' language.\n"
+        "   - Low energy cuts: calmer, more atmospheric, wider framing, slower implied motion.\n"
+        "   - High energy cuts: more intense, dynamic compositions, tighter framing, stronger contrast.\n"
         "   - Keep every prompt short and tight (aim <25 words / one comma phrase) so the full JSON fits in the model output window.\n"
         "   - Every shots[].prompt must be a PURE VISUAL PROMPT ONLY — no character names, no backstory, no plot points. Use only visual descriptors for consistency (e.g. recurring visual motifs like 'fractured silver moonlight on still water').\n"
         "   - Focus exclusively on: subject visuals, setting, framing, camera angle/motion, lighting, color palette, texture, atmosphere, mood as pure image, style elements from the treatment.\n"
@@ -375,7 +440,7 @@ def _build_rich_user(
 def _build_shots_only_user(
     style_prompt: str, cuts_json: str, b: int, n_total: int,
     mode_instruction: str, guidance_block: str, treatment_block: str,
-    treatment_context: str | None,
+    treatment_context: str | None, story_block: str = "",
 ) -> str:
     """The lean TASK prompt: distinct per-cut shots only, fed the already-written treatment
     as read-only continuity context. Used for every batch after the first and for recovery."""
@@ -389,7 +454,7 @@ def _build_shots_only_user(
     return (
         f"STYLE: {style_prompt}\n\n"
         f"CUTS ({b} of {n_total} total):\n{cuts_json}\n\n"
-        f"{mode_instruction}{guidance_block}{treatment_block}{tctx}\n\n"
+        f"{mode_instruction}{guidance_block}{treatment_block}{tctx}{story_block}\n\n"
         "TASK: Return ONLY this exact JSON shape (one entry per cut). Use the EXACT 'index' value from each CUTS entry above — DO NOT renumber from zero:\n"
         '{"shots": [{"index": <the cut index from the CUTS list>, "prompt": "pure visual for that cut ..."}, ...]}\n'
         "CRITICAL: Every shots[].prompt MUST be visually DISTINCT from all others AND MUST NOT BE A COPY (or near-copy) OF THE STYLE TEXT. "
@@ -473,6 +538,8 @@ def _generate_shots_for_batch(
     rich: bool,
     sampling: dict | None = None,
     num_ctx: int | None = None,
+    song_s: float | None = None,
+    story_beats: list[str] | None = None,
 ) -> dict:
     """Generate per-shot prompts for ONE batch of cuts.
 
@@ -487,14 +554,17 @@ def _generate_shots_for_batch(
     b = len(cut_subset)
     if b == 0:
         return {"prompts": {}, "shots": [], "treatment": None, "raw_head": None}
-    cuts_json = json.dumps(_cut_brief(cut_subset, max_stretch=max_stretch, fill_method=fill_method))
+    cuts_json = json.dumps(_cut_brief(
+        cut_subset, max_stretch=max_stretch, fill_method=fill_method, song_s=song_s, story_beats=story_beats,
+    ))
+    story_block = _batch_story_block(cut_subset, song_s or 0.0, story_beats or [])
     try:
         if rich:
             system = _SYSTEM
-            user = _build_rich_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block)
+            user = _build_rich_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, story_block)
         else:
             system = _SHOTS_ONLY_SYSTEM
-            user = _build_shots_only_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, treatment_context)
+            user = _build_shots_only_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, treatment_context, story_block)
         data, content = _director_chat(ollama=ollama, model=model, system=system, user=user, batch_len=b, rich=rich, sampling=sampling, num_ctx=num_ctx)
         prompts_map = data.get("prompts", {}) or {}
         treatment = data.get("treatment")
@@ -503,7 +573,7 @@ def _generate_shots_for_batch(
         # Recovery: nothing parsed — try once more with the lean shots-only contract.
         if not prompts_map:
             try:
-                rec_user = _build_shots_only_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, treatment_context)
+                rec_user = _build_shots_only_user(style_prompt, cuts_json, b, n_total, mode_instruction, guidance_block, treatment_block, treatment_context, story_block)
                 data2, _ = _director_chat(ollama=ollama, model=model, system=_SHOTS_ONLY_SYSTEM, user=rec_user, batch_len=b, rich=False, sampling=sampling, num_ctx=num_ctx)
                 if data2.get("prompts"):
                     prompts_map = data2.get("prompts", {})
@@ -574,6 +644,11 @@ def _generate_storyline_and_prompts(
             f"Map its beats and progression to the specific song sections and energy values in the CUTS list below):\n"
             f"{user_treatment.strip()}\n\n"
             "Respect this treatment exactly. Do not invent a different story. Adapt the pacing and visuals to the CUTS. "
+            "Tell its events in the order written, across the whole song. Each cut's story_beat is the part of the "
+            "story that cut shows: show that moment in that cut, not an earlier or later one, and never start the "
+            "story over. song_position (0 = start of the song, 1 = its end) says where the cut falls. "
+            "Keep every person, their gender, and every vehicle, "
+            "creature and object the story names, and describe each the same way in every shot. "
             "The treatment may contain narrative elements — those belong ONLY in the top-level treatment field."
         )
 
@@ -600,6 +675,8 @@ def _generate_storyline_and_prompts(
         # separate, small-enough ollama.chat. The first (rich) batch writes the whole-video
         # treatment; later (shots-only) batches reuse it as continuity context.
         batches = [cut_plan[i:i + DIRECTOR_BATCH_SIZE] for i in range(0, n, DIRECTOR_BATCH_SIZE)]
+        song_s = max((float(c["end_s"]) for c in cut_plan), default=0.0)
+        story_beats = _story_beats(user_treatment)
         log.info(
             "music video director using ollama model=%s for %d cuts in %d batch(es) of <=%d (has_user_treatment=%s)",
             model, n, len(batches), DIRECTOR_BATCH_SIZE, bool(user_treatment),
@@ -627,6 +704,8 @@ def _generate_storyline_and_prompts(
                 rich=(bi == 0),
                 sampling=sampling,
                 num_ctx=_director_num_ctx,
+                song_s=song_s,
+                story_beats=story_beats,
             )
             if bi == 0 and res.get("treatment"):
                 treatment = res.get("treatment")
@@ -686,17 +765,6 @@ def _generate_storyline_and_prompts(
             )
         except Exception:  # noqa: BLE001 — guard must never break the Director
             log.warning("director post-distinctness guard failed (safe no-op); using raw LLM output")
-
-        # P2: lightly inject arc/motif context from the treatment so per-shot prompts (used
-        # for storyboards and as i2v text conditioning) visibly illustrate progression
-        # through the story/mood arc, not just distinct variations on the global style.
-        # Keeps prompts "pure visual" by prefixing descriptive position-in-arc language
-        # drawn from the treatment (first sentence as motif) + index/energy.
-        if treatment:
-            try:
-                out = _augment_prompts_with_arc(out, cut_plan, treatment)
-            except Exception:  # noqa: BLE001
-                log.warning("director arc injection failed (safe no-op)")
 
         if treatment:
             log.info("director produced visual treatment for music video (len=%d): %s",
@@ -965,32 +1033,4 @@ def _ensure_distinct_and_energy_aware(
     if cued:
         log.info("director post-guard cued %d/%d repeated cuts", cued, len(out))
 
-    return out
-
-
-
-
-def _augment_prompts_with_arc(prompts: list[str], cut_plan: list[dict[str, Any]], treatment: str) -> list[str]:
-    """P2: lightly prefix each (pure visual) prompt with position-in-arc language drawn from
-    the treatment. This makes the storyboard stills and i2v clips visibly illustrate
-    progression through the single cohesive story/mood arc, rather than just being
-    distinct variations on the global style.
-
-    Example output prefix: "opening moment in the fractured silver moonlight arc: [visual prompt]"
-    Keeps prompts suitable for image generators (no plot/names in the visual part).
-    """
-    if not treatment or not prompts:
-        return prompts
-    # Derive a short motif from the treatment (first sentence or 60 chars).
-    motif = treatment.split(".")[0][:60].strip() or "the visual arc"
-    n = len(prompts)
-    positions = ["opening", "rising", "peak", "resolution", "closing"]
-    out = []
-    for i, p in enumerate(prompts):
-        pos = positions[min(i, len(positions)-1)]
-        frac = (i + 1) / max(1, n)
-        # Light augmentation only if not already present; keeps "pure visual".
-        if "arc:" not in p.lower() and "moment in" not in p.lower() and len(p) > 5:
-            p = f"{pos} moment in {motif} (energy {frac:.1f}): {p}"
-        out.append(p)
     return out

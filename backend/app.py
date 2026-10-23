@@ -844,6 +844,14 @@ def _initialize_app_components(app):
                                     socketio.emit('job_progress', event_data, to='global_progress', namespace='/')
                                 except (json.JSONDecodeError, KeyError) as e:
                                     app.logger.warning(f"Bad progress message from Redis: {e}")
+                                    continue
+                                # A job created here and continued in a worker (an
+                                # upload's indexing) is updated here too, so
+                                # /api/jobs/active shows where it really is.
+                                try:
+                                    get_unified_progress().apply_relayed_event(event_data)
+                                except Exception as e:
+                                    app.logger.warning(f"Could not apply relayed progress: {e}")
                     except Exception as e:
                         app._redis_healthy = False
                         app.logger.warning(f"Redis progress relay lost (will reconnect): {e}")
@@ -1016,7 +1024,7 @@ def _initialize_app_components(app):
                 symbol_id, "route", endpoint, module, MODE_FLASK_ROUTE,
             )
         except Exception:  # never fail a request over an audit record
-            logger.warning("Failed to record route liveness (non-fatal)", exc_info=True)
+            logger_module.warning("Failed to record route liveness (non-fatal)", exc_info=True)
             pass
         return response
 
@@ -1176,8 +1184,10 @@ def _initialize_app_components(app):
         app.logger.warning("Cluster proxy middleware unavailable (sync backend/middleware/): %s", e)
 
     try:
-        from backend.services.browser_automation_service import register_browser_shutdown
+        from backend.services.browser_automation_service import get_browser_service, register_browser_shutdown
         register_browser_shutdown(app)
+        # The browser's request gate reads the web-access setting through this app.
+        get_browser_service().bind_app(app)
     except Exception as e:
         app.logger.debug(f"Browser shutdown registration skipped: {e}")
 
@@ -1243,6 +1253,16 @@ def _initialize_app_components(app):
         install_proxy_sync()
     except Exception as e:
         app.logger.warning(f"MCP proxy tool sync unavailable: {e}")
+
+    # Keep ready loads the chat model from the GPU orchestrator's loop, which
+    # otherwise starts with the first request that needs it.
+    try:
+        from backend.services.chat_keep_ready import keep_ready_on
+        if keep_ready_on() and os.environ.get("CELERY_WORKER_MODE", "false").lower() != "true":
+            from backend.services.gpu_memory_orchestrator import get_orchestrator
+            get_orchestrator()
+    except Exception as e:
+        app.logger.warning(f"Keep ready could not start: {e}")
 
     return app
 
@@ -1396,6 +1416,19 @@ try:
                 ("experiment_runs", "judge_model", "ALTER TABLE experiment_runs ADD COLUMN IF NOT EXISTS judge_model VARCHAR(100)"),
                 ("experiment_runs", "retrieval_metrics", "ALTER TABLE experiment_runs ADD COLUMN IF NOT EXISTS retrieval_metrics JSON"),
                 ("research_configs", "status", "ALTER TABLE research_configs ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'promoted'"),
+                # Scheduled publishing, AI disclosure and Delete on platform.
+                ("publish_records", "scheduled_at", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMP"),
+                ("publish_records", "scheduled_natively", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS scheduled_natively BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("publish_records", "approved_at", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP"),
+                ("publish_records", "ai_disclosure", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS ai_disclosure BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("publish_records", "deleted_at", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP"),
+                # Per-post fields a provider declares (the subreddit of a Reddit post).
+                ("publish_records", "post_options", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS post_options TEXT"),
+                # Edits to a held publish before approval, and the revision an approval names.
+                ("publish_records", "revision", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 0"),
+                ("publish_records", "edited_at", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS edited_at TIMESTAMP"),
+                ("publish_records", "edited_by", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS edited_by VARCHAR(64)"),
+                ("publish_records", "edited_fields", "ALTER TABLE publish_records ADD COLUMN IF NOT EXISTS edited_fields TEXT"),
             ):
                 try:
                     from sqlalchemy import text as _sa_text
@@ -1413,6 +1446,20 @@ try:
                         db.session.rollback()
                     except Exception:
                         pass
+
+            try:
+                from sqlalchemy import text as _sa_text
+                db.session.execute(_sa_text(
+                    "CREATE INDEX IF NOT EXISTS ix_publish_records_scheduled_at "
+                    "ON publish_records (scheduled_at)"
+                ))
+                db.session.commit()
+            except Exception as idx_err:
+                app.logger.warning(f"publish_records.scheduled_at index skipped: {idx_err}")
+                try:
+                    db.session.rollback()
+                except Exception:
+                    pass
 
             # Feedback rows learned to name a reply and carry what they taught
             # (2026-09-22). Additive, nullable; legacy rows keep working.
@@ -1561,6 +1608,49 @@ try:
                 except Exception as e:
                     app.logger.warning("[CLUSTER] startup recompute failed: %s", e)
 
+            # ---- Self-improvement runs a dead worker left "running" ----------------
+            try:
+                from backend.services.self_improvement_service import get_self_improvement_service
+                _stale_runs = get_self_improvement_service().recover_stale_runs()
+                if _stale_runs:
+                    app.logger.warning(
+                        "[SELF-IMPROVEMENT] closed %d run(s) left running by a dead worker",
+                        _stale_runs)
+            except Exception as e:
+                app.logger.warning("[SELF-IMPROVEMENT] stale run recovery failed: %s", e)
+
+            # ---- Documents left INDEXING with nothing indexing them ---------------
+            # Server only: Celery workers build this app too, and the worker
+            # that starts is the one about to take the queued INDEXING rows.
+            if os.environ.get("CELERY_WORKER_MODE", "false").lower() != "true":
+                try:
+                    from backend.tasks.index_resume_tasks import reconcile_stuck_indexing
+                    _stuck = reconcile_stuck_indexing()
+                    if _stuck.get("pending") or _stuck.get("not_indexed"):
+                        app.logger.warning(
+                            "[INDEXING] reset %d document(s) left INDEXING with no task: %d to PENDING, %d to NOT_INDEXED",
+                            _stuck["pending"] + _stuck["not_indexed"], _stuck["pending"], _stuck["not_indexed"])
+                except Exception as e:
+                    app.logger.warning("[INDEXING] stuck row reconcile failed: %s", e)
+
+            # ---- WordPress site keys still in the database ---------------------
+            # Older installs kept them in wordpress_sites.api_key in clear text.
+            # Server only, so one process writes the credential file.
+            if os.environ.get("CELERY_WORKER_MODE", "false").lower() != "true":
+                try:
+                    from backend.services.wordpress_credentials import migrate_database_keys
+                    _wp_keys = migrate_database_keys()
+                    if any(_wp_keys.values()):
+                        (app.logger.warning if _wp_keys["failed"] else app.logger.info)(
+                            "[WORDPRESS] site keys: %d moved to the credential store, %d already there, %d left in the database",
+                            _wp_keys["moved"], _wp_keys["already_stored"], _wp_keys["failed"])
+                except Exception as e:
+                    app.logger.warning("[WORDPRESS] moving site keys to the credential store failed: %s", e)
+                    try:
+                        db.session.rollback()
+                    except Exception:
+                        pass
+
         except OperationalError as op_err:
             app.logger.error(f"Database operation error during create_all: {op_err}")
             app.logger.error("Check database connection and configuration.")
@@ -1645,7 +1735,12 @@ def initialize_llm_and_index_async():
                 _cloud_chat = False
                 app.logger.debug(f"[LLM-Init] cloud consent check failed ({_e}); warming locally")
 
-            if _ollama_enabled and llm_service.is_local_ollama_llm(llm) and not _cloud_chat:
+            if os.environ.get("CELERY_WORKER_MODE", "false").lower() == "true":
+                # The worker builds the app inside its first task, often a GPU
+                # render that has just evicted Ollama; a warm-up here takes
+                # the card back mid-render. The web process warms chat.
+                app.logger.info("[LLM-Init] Step 5/6: Skipping model warmup in the Celery worker")
+            elif _ollama_enabled and llm_service.is_local_ollama_llm(llm) and not _cloud_chat:
                 app.logger.info("[LLM-Init] Step 5/6: Warming up model...")
                 try:
                     model_name = getattr(llm, "model", "unknown")
@@ -2494,6 +2589,8 @@ def load_rules_cli(bundle_file, enable):
     from backend.models import Setting
     from backend.seed_data import load_rule_bundle
 
+    from backend.utils.settings_utils import get_rules_enabled
+
     with app.app_context():
         counts = load_rule_bundle(bundle_file)
         if enable:
@@ -2503,11 +2600,17 @@ def load_rules_cli(bundle_file, enable):
             else:
                 row.value = "true"
             db.session.commit()
+        rules_on = get_rules_enabled()
     click.echo(
         f"{bundle_file}: inserted {counts['inserted']}, updated {counts['updated']}, "
         f"deactivated {counts['deactivated']}"
         + ("; rules_enabled=true" if enable else "")
     )
+    if not rules_on:
+        # The Rules switch gates the persona and the rules block in chat.
+        click.echo("Rules are off in Settings, so chat will not use this bundle's persona or "
+                   "rules until the switch is on (Settings → A.I. Features → Rules, or rerun "
+                   "with --enable).")
     click.echo("If the server is running: curl -X POST <host>/api/brain/refresh")
 
 

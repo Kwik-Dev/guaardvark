@@ -5,8 +5,10 @@
  */
 
 import { useAppStore } from "../stores/useAppStore";
-import { BASE_URL } from "../api/apiClient";
+import { BASE_URL, handleResponse } from "../api/apiClient";
+import { stopChatTurn } from "../api/chatStopService";
 import { getChatImageModel, setChatImageModel as persistChatImageModel } from "../api/settingsService";
+import { getPlugin } from "../api/pluginsService";
 
 // ============================================================
 // Dispatcher
@@ -106,7 +108,10 @@ function handleHelp(args, { addMessage, allCommands }) {
 // ============================================================
 
 function handleClear(args, { chatState }) {
-  // chatState.clearMessages is expected to be passed by the parent
+  // chatState.clearMessages is passed by the parent. Emptying the screen alone
+  // is not a clear: the session's stored messages come back on reload, so the
+  // Chat page passes its "new chat" action and the floating chat starts a new
+  // session id. The old chat stays listed under All chats.
   if (chatState?.clearMessages) {
     chatState.clearMessages();
   }
@@ -142,10 +147,25 @@ function handleVoice(args, { addMessage, chatState }) {
 // /vision
 // ============================================================
 
-function handleVision(args, { addMessage }) {
+async function handleVision(args, { addMessage }) {
+  // Same plugin record the Plugins page shows (GET /api/plugins/vision_pipeline).
+  let content;
+  try {
+    const res = await getPlugin("vision_pipeline");
+    const info = res?.data || res || {};
+    const name = info.name || "Vision Pipeline";
+    const lines = [`**${name}:** ${info.status || "unknown"}`];
+    if (info.status_message) lines.push(info.status_message);
+    lines.push("Start or stop it from the Plugins page.");
+    content = lines.join("\n\n");
+  } catch (err) {
+    content = err?.status === 404
+      ? "The Vision Pipeline plugin is not installed."
+      : `Could not read the Vision Pipeline status: ${err.message}`;
+  }
   addMessage({
     role: "system",
-    content: "Vision pipeline coming soon. Use the Plugins page to start the Vision Pipeline service.",
+    content,
     tempId: `vision-${Date.now()}`,
     type: "command",
   });
@@ -164,8 +184,10 @@ async function handleModel(args, { addMessage }) {
         fetch("/api/model/active"),
         fetch("/api/model/list"),
       ]);
-      const active = await activeRes.json();
-      const list = await listRes.json();
+      // handleResponse: a 4xx/5xx or an offline backend becomes an error with
+      // the server's message, instead of a JSON parse failure or "Unknown".
+      const active = await handleResponse(activeRes);
+      const list = await handleResponse(listRes);
       const models = list?.data?.models || list?.message?.models || list?.data || [];
       const modelNames = models.map((m) => m.name || m).slice(0, 20);
       addMessage({
@@ -187,7 +209,7 @@ async function handleModel(args, { addMessage }) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model: args.trim() }),
     });
-    const data = await res.json();
+    const data = await handleResponse(res);
     addMessage({
       role: "system",
       content: data.success !== false ? `Model switched to **${args.trim()}**.` : `Failed: ${data.error || data.message}`,
@@ -227,7 +249,7 @@ async function handleImageModel(args, { addMessage }) {
         fetch("/api/batch-image/models"),
         resolveCurrentImageModel("auto"),
       ]);
-      const data = await modelsRes.json();
+      const data = await handleResponse(modelsRes);
       const models = data?.data?.models || data?.models || [];
       const editBackends = data?.data?.editing || data?.editing || [];
       const downloaded = [
@@ -295,7 +317,7 @@ async function handleImageModel(args, { addMessage }) {
 
   try {
     const res = await fetch("/api/batch-image/models");
-    const data = await res.json();
+    const data = await handleResponse(res);
     const models = data?.data?.models || data?.models || [];
     const match = models.find((m) => m.id === modelName || m.id.startsWith(modelName));
     if (match) {
@@ -819,7 +841,14 @@ async function handleTraining(args, { addMessage }) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ task: args, training_mode: true }),
     });
-    const data = await res.json();
+    // A refusal (409 "Agent already active") carries JSON the branch below
+    // explains; a body that is not JSON (backend offline) still says why.
+    const data = await res.json().catch(() => ({
+      success: false,
+      error: res.status === 502 || res.status === 504
+        ? "the backend is not reachable"
+        : `the backend answered HTTP ${res.status}`,
+    }));
     if (data.success) {
       addMessage({
         role: "system",
@@ -850,25 +879,65 @@ async function handleTraining(args, { addMessage }) {
 // DB rule commands
 // ============================================================
 
+/**
+ * The file a Rules-page command writes. /api/generate/from_command requires
+ * output_filename; take output_file="name.ext" from the arguments the way
+ * /createfile does, else <command>_<timestamp>.csv|txt (csv when the command
+ * is a CSV one, which is also how the backend picks its CSV prompt).
+ */
+export function commandOutputFilename(name, args, now = new Date()) {
+  const given = /\boutput_?file\s*=\s*(?:"([^"]+)"|(\S+))/i.exec(args || "");
+  const fromArgs = given && (given[1] || given[2]);
+  if (fromArgs) return fromArgs.trim();
+  const stem =
+    String(name || "")
+      .replace(/^\//, "")
+      .replace(/[^a-z0-9_-]+/gi, "_")
+      .replace(/^_+|_+$/g, "") || "command";
+  const ext = /csv/i.test(name) ? "csv" : "txt";
+  const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "");
+  return `${stem}_${stamp}.${ext}`;
+}
+
 async function handleDbRule(name, args, { addMessage }) {
-  addMessage({ role: "user", content: `${name} ${args}`, tempId: `rule-user-${Date.now()}` });
+  addMessage({ role: "user", content: `${name} ${args}`.trim(), tempId: `rule-user-${Date.now()}` });
+  const outputFilename = commandOutputFilename(name, args);
   try {
     const res = await fetch("/api/generate/from_command", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         command_label: name,
-        generation_parameters: { args },
+        output_filename: outputFilename,
+        // The rule text's {{args}}, {{USER_INPUT}} and {{filename}} are filled.
+        generation_parameters: { args, USER_INPUT: args, filename: outputFilename },
       }),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.error) {
+      const detail = data?.details ? ` (${data.details})` : "";
+      addMessage({
+        role: "system",
+        content: `${name} failed: ${data?.error || `HTTP ${res.status}`}${detail}`,
+        tempId: `rule-err-${Date.now()}`,
+        type: "command",
+      });
+      return { handled: true };
+    }
+    const file = data.output_file || outputFilename;
+    const size = Number.isFinite(data.file_size) ? ` (${data.file_size} bytes)` : "";
     addMessage({
       role: "assistant",
-      content: data?.data?.content || data?.content || data?.message || "Command executed.",
+      content: `${name} wrote ${file}${size} to the outputs folder.`,
       tempId: `rule-asst-${Date.now()}`,
     });
   } catch (err) {
-    addMessage({ role: "system", content: `Command failed: ${err.message}`, tempId: `rule-err-${Date.now()}` });
+    addMessage({
+      role: "system",
+      content: `${name} failed: ${err.message}`,
+      tempId: `rule-err-${Date.now()}`,
+      type: "command",
+    });
   }
   return { handled: true };
 }
@@ -1023,16 +1092,15 @@ async function handleChatMode(_args, { addMessage, chatState }) {
   const previousMode = useAppStore.getState().getSessionMode(sessionId);
 
   try {
-    await fetch(`/api/chat/unified/${encodeURIComponent(sessionId)}/abort`, {
-      method: "POST"
-    }).catch((err) => {
-      console.warn("Failed to send abort signal:", err);
-    });
-    await fetch("/api/agent-control/kill", {
-      method: "POST"
-    }).catch((err) => {
-      console.warn("Failed to kill agent task:", err);
-    });
+    const stopped = await stopChatTurn(sessionId);
+    if (!stopped.ok) {
+      addMessage({
+        role: "system",
+        content: stopped.error,
+        tempId: `chat-stop-${Date.now()}`,
+        type: "command",
+      });
+    }
 
     const data = await _patchSessionMode(sessionId, "chat");
     useAppStore.getState().setSessionMode(sessionId, data?.mode || "chat");

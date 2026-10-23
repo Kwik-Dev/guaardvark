@@ -11,7 +11,11 @@ from pathlib import Path
 
 from flask import Blueprint, current_app, request, jsonify
 from backend.services.tool_activity import broadcast_tool_activity
-from backend.socketio_instance import CHAT_ATTACHMENT_MAX_BYTES, chat_attachment_too_large
+from backend.socketio_instance import (
+    CHAT_ATTACHMENT_MAX_BYTES,
+    chat_attachment_too_large,
+    chat_attachments,
+)
 from backend.utils.response_utils import success_response
 
 logger = logging.getLogger(__name__)
@@ -39,6 +43,69 @@ def chat_config():
 # already running get a 409 instead.
 _inflight: dict = {}
 _inflight_lock = threading.Lock()
+# Threads a hard abort released: still running, but already stopped and muted
+# (turn_replaced), so the next turn on the session may take their slot.
+_released_by_abort: dict = {}
+# How long a new turn waits for the previous turn on the session to notice its
+# stop flag and exit before replacing it or refusing.
+INFLIGHT_GRACE_S = 1.5
+
+
+def release_turn_slot(session_id: str) -> bool:
+    """After a hard abort: let the next turn on the session take the slot.
+
+    A thread that is still running stays in the slot, so the next turn first
+    waits for it to exit and only then replaces it; dropping it here let a new
+    turn start beside it. Returns True when there was a slot to release.
+    """
+    with _inflight_lock:
+        existing = _inflight.get(session_id)
+        if existing is None:
+            return False
+        if existing.is_alive():
+            _released_by_abort[session_id] = existing
+        else:
+            _inflight.pop(session_id, None)
+        return True
+
+
+def start_turn_thread(session_id: str, target, name: str):
+    """Run ``target`` as the session's one chat turn; None when the slot is held.
+
+    Called after begin_new_turn() has stopped the previous turn. Waits up to
+    INFLIGHT_GRACE_S for that turn's thread to exit. A thread still running
+    after a hard abort is replaced (its events are already dropped by
+    turn_replaced); any other live thread keeps the slot and this returns None.
+    Shared by POST /api/chat/unified and chat:send so the two never run two
+    turns on one session at once.
+    """
+    with _inflight_lock:
+        existing = _inflight.get(session_id)
+    if existing is not None and existing.is_alive() and existing is not threading.current_thread():
+        existing.join(timeout=INFLIGHT_GRACE_S)
+
+    def _run():
+        try:
+            target()
+        finally:
+            with _inflight_lock:
+                if _inflight.get(session_id) is threading.current_thread():
+                    _inflight.pop(session_id, None)
+
+    with _inflight_lock:
+        existing = _inflight.get(session_id)
+        if existing is not None and existing.is_alive():
+            if _released_by_abort.get(session_id) is not existing:
+                return None
+            logger.warning(
+                f"[UNIFIED_CHAT] session {session_id}: replacing a turn that was "
+                f"hard-aborted and has not exited yet"
+            )
+        _released_by_abort.pop(session_id, None)
+        thread = threading.Thread(target=_run, daemon=True, name=name)
+        _inflight[session_id] = thread
+        thread.start()
+        return thread
 
 
 def _project_root_dir(value) -> str | None:
@@ -83,6 +150,37 @@ def _merge_session_mode_options(session_id: str, options: dict | None) -> dict:
     return merged
 
 
+def _save_chat_image(image_data) -> str | None:
+    """Write one base64 chat picture under the uploads folder and return its
+    history URL, or ``None`` when it could not be saved (the turn still runs)."""
+    try:
+        import os, base64 as b64mod
+        from backend.config import UPLOAD_DIR
+        img_dir = os.path.join(UPLOAD_DIR, "chat_images")
+        os.makedirs(img_dir, exist_ok=True)
+        raw_bytes = b64mod.b64decode(image_data)
+        # Detect actual image format from magic bytes
+        ext = "png"  # default
+        if raw_bytes[:4] == b"\x89PNG":
+            ext = "png"
+        elif raw_bytes[:3] == b"\xff\xd8\xff":
+            ext = "jpg"
+        elif raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":
+            ext = "webp"
+        elif b"ftypavif" in raw_bytes[:32] or b"ftypavis" in raw_bytes[:32]:
+            ext = "avif"
+        elif b"ftypheic" in raw_bytes[:32] or b"ftypheix" in raw_bytes[:32]:
+            ext = "heic"
+        fname = f"chat_image_{uuid.uuid4().hex[:12]}.{ext}"
+        with open(os.path.join(img_dir, fname), "wb") as f:
+            f.write(raw_bytes)
+        logger.info(f"Saved unified chat image: {fname} ({ext})")
+        return f"/api/enhanced-chat/vision/image/{fname}"
+    except Exception as img_err:
+        logger.warning(f"Failed to save chat image: {img_err}")
+        return None
+
+
 @unified_chat_bp.route("", methods=["POST"])
 def unified_chat():
     """
@@ -95,7 +193,11 @@ def unified_chat():
         return jsonify({"success": False, "error": "Invalid JSON body"}), 400
 
     message = data.get("message", "").strip()
-    image_data = data.get("image")  # Optional base64-encoded image
+    # Optional base64-encoded pictures: ``images`` (several) or ``image`` (one).
+    # The first is the turn's primary picture; the rest ride along as
+    # ``attached_images`` for the model to see. Image tools edit the first.
+    attached_images = chat_attachments(data)
+    image_data = attached_images[0] if attached_images else None
     raw_options = data.get("options", {})
     options = raw_options if isinstance(raw_options, dict) else {}
     has_direct_tool = bool(
@@ -106,7 +208,7 @@ def unified_chat():
     if not message and not image_data and not has_direct_tool:
         return jsonify({"success": False, "error": "Message or image is required"}), 400
 
-    too_large = chat_attachment_too_large(image_data)
+    too_large = chat_attachment_too_large(attached_images)
     if too_large:
         return jsonify({
             "success": False,
@@ -117,13 +219,17 @@ def unified_chat():
 
     # If image provided but no message, set a default
     if not message and image_data:
-        message = "Describe this image."
+        message = "Describe these images." if len(attached_images) > 1 else "Describe this image."
     if not message and has_direct_tool:
         slash = (options.get("slash_command") or options.get("direct_tool") or "").strip()
         args = (options.get("slash_args") or "").strip()
         message = f"/{slash.lstrip('/')} {args}".strip() if slash else "direct tool"
 
     session_id = data.get("session_id") or str(uuid.uuid4())
+    from backend.utils.session_ids import session_id_refusal
+    _too_long = session_id_refusal(session_id)
+    if _too_long:
+        return jsonify({"error": _too_long}), 400
     is_voice_message = bool(data.get("is_voice_message", False))
     request_id = str(uuid.uuid4())
     project_id = data.get("project_id")
@@ -141,6 +247,11 @@ def unified_chat():
     # The same id must reach the brain and the engine, so the ack, the socket
     # events and the saved row all name one turn.
     options["request_id"] = request_id
+    try:
+        from backend.services.turn_router import chat_surface
+        options["surface"] = chat_surface(session_id, is_voice_message).value
+    except Exception as e:
+        logger.debug(f"chat surface not set: {e}")
 
     # Also forward to direct-tool for slash commands etc.
     if project_root and "project_root" not in options:
@@ -243,34 +354,21 @@ def unified_chat():
     # Run in background thread with app context
     app = current_app._get_current_object()
 
-    # Save image file for chat history if provided
-    image_url = None
-    if image_data:
-        try:
-            import os, base64 as b64mod, imghdr
-            from backend.config import UPLOAD_DIR
-            img_dir = os.path.join(UPLOAD_DIR, "chat_images")
-            os.makedirs(img_dir, exist_ok=True)
-            raw_bytes = b64mod.b64decode(image_data)
-            # Detect actual image format from magic bytes
-            ext = "png"  # default
-            if raw_bytes[:4] == b"\x89PNG":
-                ext = "png"
-            elif raw_bytes[:3] == b"\xff\xd8\xff":
-                ext = "jpg"
-            elif raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":
-                ext = "webp"
-            elif b"ftypavif" in raw_bytes[:32] or b"ftypavis" in raw_bytes[:32]:
-                ext = "avif"
-            elif b"ftypheic" in raw_bytes[:32] or b"ftypheix" in raw_bytes[:32]:
-                ext = "heic"
-            fname = f"chat_image_{uuid.uuid4().hex[:12]}.{ext}"
-            with open(os.path.join(img_dir, fname), "wb") as f:
-                f.write(raw_bytes)
-            image_url = f"/api/enhanced-chat/vision/image/{fname}"
-            logger.info(f"Saved unified chat image: {fname} ({ext})")
-        except Exception as img_err:
-            logger.warning(f"Failed to save chat image: {img_err}")
+    # Save the attached pictures for chat history, one URL per picture in
+    # attach order, ``None`` where a save failed so the positions stay
+    # aligned with the pictures (and their names). The first one's URL is
+    # the row's ``imageUrl``; all of them are ``imageUrls`` when there are
+    # several.
+    image_urls = [_save_chat_image(img) for img in attached_images]
+    image_url = image_urls[0] if image_urls else None
+
+    # The server alone decides what the engine sees as attached this turn.
+    options.pop("attached_images", None)
+    options.pop("attached_image_urls", None)
+    if len(attached_images) > 1:
+        options["attached_images"] = attached_images
+        if any(image_urls):
+            options["attached_image_urls"] = image_urls
 
     # Vision pipeline: while a camera streams, its latest frame rides along as
     # camera context, not as the user's picture (which would skip RAG and make
@@ -286,8 +384,15 @@ def unified_chat():
             pass
 
     def run_engine():
+        import contextlib
+        from backend.services import job_arbiter
         from backend.services.unified_chat_engine import begin_turn, end_turn
         begin_turn(session_id, turn_mark)
+        # Job order on: background work holds while this turn runs.
+        interactive_turn = contextlib.ExitStack()
+        interactive_turn.enter_context(
+            job_arbiter.interactive("voice_chat" if is_voice_message else "chat", session_id)
+        )
         try:
             logger.info(f"[SOCKET-CHAT] BACKEND THREAD START for session={session_id}; first chat:thinking may emit BEFORE client join_room completes (race window open)")
             # Wire the emit_fn into the thread-local so that agent_control tools
@@ -307,25 +412,9 @@ def unified_chat():
             # to brain or legacy. This guarantees the bypass even when AgentBrain
             # is the sole router. Avoids LLM involvement and the associated eviction EOFs.
             try:
-                from backend.services.slash_command_executor import resolve_slash_direct_tool
-                from backend.services.unified_chat_engine import UnifiedChatEngine
-                from backend.utils.llm_service import get_llm_for_startup
-                from backend.tools.tool_registry_init import initialize_all_tools
-                d_tool, d_params = resolve_slash_direct_tool(options)
-                if d_tool:
-                    logger.info(f"[UNIFIED_API] Direct slash/direct intercept for {d_tool} before router")
-                    reg = initialize_all_tools()
-                    llm = None
-                    try:
-                        llm = get_llm_for_startup()
-                    except Exception:
-                        pass
-                    eng = UnifiedChatEngine(tool_registry=reg, llm_instance=llm or object())
-                    eng.app = app
-                    rid = str(uuid.uuid4())
-                    disp = message or f"/{options.get('slash_command', d_tool)}"
-                    with app.app_context():
-                        eng._run_direct_tool_execution(d_tool, d_params, session_id, emit_fn, rid, disp, options)
+                from backend.services.slash_command_executor import run_direct_tool_turn
+                if run_direct_tool_turn(options, message, session_id, emit_fn, app,
+                                        project_id=project_id, log_tag="UNIFIED_API"):
                     return  # done, direct path emitted everything
             except Exception as _dir_e:
                 logger.debug(f"Direct intercept pre-check skipped or failed (will route normally): {_dir_e}")
@@ -361,6 +450,7 @@ def unified_chat():
             logger.error(f"Chat engine thread error: {e}", exc_info=True)
             emit_fn("chat:error", {"error": str(e)})
         finally:
+            interactive_turn.close()
             end_turn(session_id)
             # Always clear the thread-local emitter when this chat turn ends
             # (success, error, or abort) so the next turn on this thread gets a fresh one.
@@ -381,39 +471,24 @@ def unified_chat():
                 if _inflight.get(session_id) is threading.current_thread():
                     _inflight.pop(session_id, None)
 
-    # Snapshot the existing thread (if any) so we can wait for it to unwind
-    # outside the lock — we already set the abort flag above, the old thread
-    # just needs a moment to notice and exit. Without this grace period, the
-    # new request races the abort signal and almost always loses with 409,
-    # even though we explicitly asked the old thread to step aside.
-    with _inflight_lock:
-        existing = _inflight.get(session_id)
-
-    if existing is not None and existing.is_alive():
-        existing.join(timeout=1.5)
-
-    # Now claim the slot. If the old thread is *still* alive after the grace
-    # period, it's genuinely wedged (stuck Ollama call, frozen tool, etc.) —
-    # reject and tell the user to hard-abort or start a new session.
-    with _inflight_lock:
-        existing = _inflight.get(session_id)
-        if existing is not None and existing.is_alive():
-            logger.warning(
-                f"[UNIFIED_CHAT] Rejecting request {request_id[:8]} — session "
-                f"{session_id} has a wedged chat thread that didn't unwind "
-                f"after abort signal"
-            )
-            return jsonify({
-                "success": False,
-                "error": "A previous request for this session is still running "
-                         "and didn't respond to the abort signal. "
-                         "Use /abort (CLI), POST /api/chat/unified/<session_id>/abort, "
-                         "or /new for a fresh session.",
-                "request_id": request_id,
-            }), 409
-        thread = threading.Thread(target=run_engine, daemon=True, name=f"unified-chat-{request_id[:8]}")
-        _inflight[session_id] = thread
-        thread.start()
+    # The previous turn was stopped above (begin_new_turn); give its thread a
+    # moment to notice and exit. A thread that is still alive and was not
+    # hard-aborted is wedged (stuck Ollama call, frozen tool): refuse.
+    thread = start_turn_thread(session_id, run_engine, f"unified-chat-{request_id[:8]}")
+    if thread is None:
+        logger.warning(
+            f"[UNIFIED_CHAT] Rejecting request {request_id[:8]} — session "
+            f"{session_id} has a wedged chat thread that didn't unwind "
+            f"after abort signal"
+        )
+        return jsonify({
+            "success": False,
+            "error": "A previous request for this session is still running "
+                     "and didn't respond to the abort signal. "
+                     "Use /abort (CLI), POST /api/chat/unified/<session_id>/abort, "
+                     "or /new for a fresh session.",
+            "request_id": request_id,
+        }), 409
 
     return jsonify({
         "success": True,
@@ -447,6 +522,10 @@ def direct_tool_sync():
         return jsonify({"success": False, "error": "tool or slash_command required"}), 400
 
     session_id = data.get("session_id") or "cli_direct"
+    from backend.utils.session_ids import session_id_refusal
+    _too_long = session_id_refusal(session_id)
+    if _too_long:
+        return jsonify({"error": _too_long}), 400
 
     # Sanitize image prompts at the API boundary so CLI /imagine and browser
     # direct-tool share the same pure-visual text (and never hit NameError on
@@ -544,13 +623,7 @@ def abort_chat(session_id):
     except Exception:
         pass
 
-    # Force-release the session slot. The old thread's finally block uses an
-    # identity check, so a late exit will not clobber a newer claim.
-    cleared = False
-    with _inflight_lock:
-        if session_id in _inflight:
-            _inflight.pop(session_id, None)
-            cleared = True
+    cleared = release_turn_slot(session_id)
 
     try:
         from backend.socketio_instance import socketio

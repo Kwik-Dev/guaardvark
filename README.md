@@ -59,7 +59,7 @@ https://github.com/user-attachments/assets/c6d9d18b-cfff-4ae2-8220-dc7f329fee5d
 
 ## Quick start
 
-**Linux with an NVIDIA GPU** (16 GB for video; chat, RAG and agents run on less, see the [hardware tiers](docs/HARDWARE.md)). A fresh Ubuntu desktop has no `curl` or `git`; run `sudo apt install -y curl git` first.
+**Linux with an NVIDIA GPU** (16 GB for video, 12 GB for the Wan 2.2 5B; chat, RAG and agents run on less, see the [hardware tiers](docs/HARDWARE.md)). A fresh Ubuntu desktop has no `curl` or `git`; run `sudo apt install -y curl git` first.
 
 ```bash
 GUAARDVARK_REPO_URL=https://github.com/Kwik-Dev/guaardvark.git \
@@ -97,7 +97,7 @@ Other ways in: [Docker](INSTALL.md#alternative-docker-linux-core-stack-only) · 
 - **Directors.** A beat-synced music-video director, a five-role Film Crew that turns a logline into a finished video, and a built-in video editor. [▶ Ep 8](https://www.youtube.com/watch?v=l2LqKA9GQDc) · [▶ Ep 9](https://www.youtube.com/watch?v=sq104u9N4Qg)
 - **Self-improvement.** Guaardvark tests itself, drafts fixes and stages them for your review behind a codebase lock; the System Map draws the whole codebase from its real imports. [▶ Ep 11](https://www.youtube.com/watch?v=7kHvi_2vT6U) · [▶ Ep 14](https://www.youtube.com/watch?v=yEy1tVKxsF0)
 - **Command center.** A GPU orchestrator, a plugin manager with a live VRAM budget, jobs and scheduling, schema-aware backups, and a multi-machine Interconnector. [▶ Ep 12](https://www.youtube.com/watch?v=A1-_ykcHOhQ)
-- **Terminal and API.** The `guaardvark` [CLI](#cli) with an interactive REPL, plus REST, GraphQL and Socket.IO. [▶ Ep 20](https://www.youtube.com/watch?v=Z3nXVtfdlSI)
+- **Terminal and API.** The `guaardvark` [CLI](#cli) with an interactive REPL, plus REST and Socket.IO. [▶ Ep 20](https://www.youtube.com/watch?v=Z3nXVtfdlSI)
 
 The complete, enumerated list of models, tools, plugins and pages is in **[CAPABILITIES.md](CAPABILITIES.md)**.
 
@@ -188,14 +188,14 @@ All generation runs on your GPU. No cloud APIs, no per-minute billing.
 | Model | Type | Max duration | Native resolution | VRAM |
 |-------|------|-------------|-------------------|------|
 | **Wan 2.2 TI2V-5B** (default) | Text + image to video | ~5 s (up to 121 frames @ 24 fps) | 1280x704 | ~11 GB |
-| **Wan 2.2 14B MoE** | Text to video | 5 s (81 frames @ 16 fps) | 832x480 | 11 GB |
-| **Wan 2.2 14B I2V** | Image to video | 5 s (81 frames @ 16 fps) | 832x480 | 11 GB |
+| **Wan 2.2 14B MoE** | Text to video | 5 s (81 frames @ 16 fps) | 832x480 | 16 GB |
+| **Wan 2.2 14B I2V** | Image to video | 5 s (81 frames @ 16 fps) | 832x480 | 16 GB |
 | **CogVideoX-5B** | Text to video | 6 s (49 frames @ 8 fps) | 720x480 | 16 GB |
 | **CogVideoX-5B I2V** | Image to video | 6 s (49 frames @ 8 fps) | 720x480 | 16 GB |
-| **LTX-2.3 Distilled FP8** | Text + image to video | ~10 s (161 frames @ 16 fps) | 768x512 | ~14 GB |
-| **LTX-2.5 Distilled Int8** | Text + image to video | ~10 s (161 frames @ 16 fps) | 768x512 | ~14 GB |
-| **HunyuanVideo 13B** (GGUF Q5) | Text to video | ~3 s (73 frames @ 24 fps, up to 129) | 848x480 | ~11 GB |
-| **HunyuanVideo 13B I2V** (GGUF Q5) | Image to video | ~3 s (73 frames @ 24 fps, up to 129) | 848x480 | ~11 GB |
+| **LTX-2.3 Distilled FP8** | Text + image to video | ~10 s (161 frames @ 16 fps) | 768x512 | 16 GB |
+| **LTX-2.5 Distilled Int8** | Text + image to video | ~10 s (161 frames @ 16 fps) | 768x512 | 16 GB |
+| **HunyuanVideo 13B** (GGUF Q5) | Text to video | ~3 s (73 frames @ 24 fps, up to 129) | 848x480 | 16 GB |
+| **HunyuanVideo 13B I2V** (GGUF Q5) | Image to video | ~3 s (73 frames @ 24 fps, up to 129) | 848x480 | 16 GB |
 | **MiniMax H3** (pruned Int8) | Text, first frame, last frame, first + last frame to video **with its own stereo soundtrack** (dialogue, ambience, score) | ~7 s offered (175 frames @ 24 fps; the model trains to 15 s) | 864x480 default, 1344x768 max | 16 GB card; measured 6.5 min for a 5 s clip at 864x480, 20 steps, on a 16 GB RTX 40-series card |
 | **MiniMax H3 Reference** (pruned Int8) | Up to 9 images, 3 clips and 3 audio files to video with soundtrack (identity, motion, voice, editing) | same | same | same |
 
@@ -206,7 +206,7 @@ MiniMax H3 also comes as unpruned Int8 and BF16 builds for 24 GB and 48 GB cards
 - **Frame interpolation** with RIFE (1x raw, 2x frame rate, 2x plus upscale), **prompt enhancement** styles (Cinematic, Realistic, Artistic, Anime, or raw), a **low-VRAM mode** for Wan and CogVideoX, and a **batch queue** for prompt lists.
 - **ComfyUI integration:** one click into the node editor for custom workflows. Wan and LTX run through ComfyUI. LTX-2.5 needs ComfyUI ≥ 0.32.0 and a one-time license accept on [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) (`HF_TOKEN` in `.env`); after the download, generation stays local.
 - **MiniMax H3** generates picture and sound in one pass. Guaardvark compiles your prompt into the model's structured format (numbered shots with cut times, speaker ids, tagged dialogue), and the Film Crew renders each scene as one spoken window on it. It is licensed under the MiniMax H3 Community License, which names the EU, UK, South Korea and USA as territories that need MiniMax's application form; the Video Models dialog shows the license and the link, and posts carrying H3 clips add a "Generated with MiniMax H3" line.
-- Video generation needs a 16 GB-class card; see [docs/HARDWARE.md](docs/HARDWARE.md).
+- Video generation needs a 16 GB-class card, except the Wan 2.2 5B, which is admitted from 11 GB; see [docs/HARDWARE.md](docs/HARDWARE.md).
 
 ### LoRA training and consistent characters
 
@@ -275,7 +275,7 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## More built in
 
-- **Supervised outreach.** Drafts replies to threads on Reddit, YouTube, Discord, X and Facebook, grounded in your own indexed documents, graded for relevance before they reach the queue, with nothing posted until you approve it. Kill switch, per-platform cadence limits and a JSONL audit trail.
+- **Supervised outreach.** Drafts replies to threads on Reddit, YouTube, Discord and Facebook, grounded in your own indexed documents, graded for relevance before they reach the queue, with nothing posted until you approve it. Reddit, YouTube and Facebook posts go out one at a time while you watch the Agent Screen. Kill switch, per-platform cadence limits and a JSONL audit trail.
 - **Files and projects.** A desktop-style file manager (folders as windows, drag and drop, right-click menus) with clients, projects, websites and notes linked together and indexed recursively. Files stream into the browser's own players and viewers, so video plays without a codec pack and PDFs start rendering before they finish downloading.
 - **Rules, prompts, lessons and memory.** Portable rule bundles, lessons that teach the agent from a good run, and "remember …" notes that carry across chats.
 - **Discord bot** plugin for chat, `/imagine` images and search against your own install.
@@ -286,14 +286,14 @@ See [SECURITY.md](SECURITY.md) to report a vulnerability.
 <details>
 <summary>How supervised outreach works</summary>
 
-1. **Discover.** The agent scouts target threads from a URL you paste or from platform entry points (subscribed subreddits, Discord channels, Twitter feeds, Facebook groups).
-2. **Context.** For each candidate it fetches the post and top comments: Reddit through its JSON API, Discord, Twitter and Facebook through the agent's logged-in Firefox session, with a vision-model fallback when page selectors drift.
+1. **Discover.** The agent scouts target threads from a URL you paste or from platform entry points (subscribed subreddits, Discord channels, Facebook groups).
+2. **Context.** For each candidate it fetches the post and top comments: Reddit through its JSON API, Discord and Facebook through the agent's logged-in Firefox session, with a vision-model fallback when page selectors drift.
 3. **Draft.** Your local model writes a reply grounded in the thread and in citations from your indexed documents, shaped by one configurable persona (voice, expertise, citation style, what never to say).
 4. **Grade.** Every draft is scored against a relevance and quality rubric; anything below the threshold is dropped. Generic "great post!" replies don't survive.
-5. **Review.** Drafts land in a queue. In supervised mode (the default) nothing posts without your approval.
-6. **Post.** Approved drafts post through the logged-in browser session (Reddit comments and link posts, Facebook comments, YouTube) or the Discord API, cadence-gated. The Reddit and Facebook posters read the page at every step: they check the browser is still on the approved post, read the text back out of the box before submitting, and count a post only once it shows on the page. `/outreach …` in chat or `guaardvark outreach "…"` runs recon and drafting; posting still needs approval while supervised.
+5. **Review.** Drafts land in a queue. Nothing posts without your approval, and there is no setting that changes that.
+6. **Post.** Approved Discord replies go out through the Discord bot. Reddit comments and link posts, Facebook comments and YouTube comments go through the agent's logged-in browser, so each one starts only when you press **Post now, I'm watching** on the Approvals page with the Agent Screen open: one click, one post, driven on screen while you watch, cadence-gated. Closing the Agent Screen before the submit step stops it. The Reddit and Facebook posters read the page at every step: they check the browser is still on the approved post, read the text back out of the box before submitting, and count a post only once it shows on the page. `/outreach …` in chat or `guaardvark outreach "…"` runs recon and drafting; posting still needs your approval and your click. X and LinkedIn are not offered: both forbid driving an account with browser automation.
 
-Safety: a system-wide kill switch stops every pipeline mid-flight; supervised mode is the default; at most one post per 30 minutes per platform (configurable); every scout, draft, grade, approval, rejection, post and failure is recorded in a JSONL audit trail. Manual draft mode and on-demand passes for one platform or subreddit are available from the UI.
+Safety: a system-wide kill switch stops every pipeline mid-flight; every post needs a person's approval; at most one post per 30 minutes per platform; every scout, draft, grade, approval, rejection, post and failure is recorded in a JSONL audit trail. Manual draft mode and on-demand passes for one platform or subreddit are available from the UI.
 
 </details>
 
@@ -394,11 +394,12 @@ More screenshots are on [guaardvark.com](https://guaardvark.com).
 |---------|---------|-------------|
 | Chat + RAG | 4 GB | 8 GB |
 | Image generation | 6 GB | 12 GB |
-| Wan 2.2 video | 16 GB* | 16 GB |
+| Wan 2.2 5B video | 11 GB* | 16 GB |
+| Wan 2.2 14B video | 16 GB | 16 GB |
 | CogVideoX-5B video | 16 GB | 20 GB |
 | Upscaling | 0.5 GB | 2–4 GB |
 
-\* Wan's weights fit in ~11 GB, but the generation preflight requires a 16 GB-class card for every current video family; see [docs/HARDWARE.md](docs/HARDWARE.md).
+\* The Wan 2.2 5B declares an 11 GB floor: an 11 GB card can select it by hand, and from 12 GB the automatic pick chooses it. A full render on 12 GB has not been confirmed yet. Every other video family needs a 16 GB-class card; see [docs/HARDWARE.md](docs/HARDWARE.md).
 
 **Platforms.** Linux with one NVIDIA card is the primary target. Apple Silicon is supported, with GPU features arriving through Metal (what works today is in [INSTALL.md](INSTALL.md#install-macos-apple-silicon)). Windows through WSL2 is being verified.
 
@@ -504,7 +505,7 @@ Config: `~/.guaardvark/cli.json` (legacy `~/.llx/config.json` is still read). Th
 Browser / CLI (PyPI: guaardvark) / MCP Client (Claude Desktop, Cursor, etc.)
     | HTTP + WebSocket / stdio MCP
     v
-Flask (~100 API blueprints, auto-discovered) + GraphQL + Socket.IO
+Flask (about 96 API modules, auto-discovered) + Socket.IO
     |
     +-- AgentBrain (3-tier routing: Reflex → Instinct → Deliberation)
     |
@@ -529,7 +530,7 @@ PostgreSQL  Redis  Ollama  Agent Display (:99, on-demand)  ComfyUI / Audio Found
 - Many components (blueprints, tool registry, plugins) are discovered or declared at runtime; exact counts drift between releases.
 - `backend/mcp/config.py` controls the MCP server's default-deny policy.
 
-**Frontend:** React 18 · Vite · Material-UI v5 · Zustand · Apollo Client · Monaco Editor · Socket.IO<br>
+**Frontend:** React 18 · Vite · Material-UI v5 · Zustand · Monaco Editor · Socket.IO<br>
 **Core models and engines:** Gemma4 / Llama-family / Moondream (vision) · Z-Image / FLUX.1 / Krea 2 / SDXL · Wan 2.2 / LTX / HunyuanVideo / CogVideoX / MiniMax H3 · ACE-Step / Stable Audio Open / Chatterbox / Kokoro / Piper · Real-ESRGAN family + HAT · Whisper
 
 More: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [agent mental model](docs/AGENT_MENTAL_MODEL.md).
@@ -540,7 +541,7 @@ More: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [agent mental model](docs/
 
 **Near term**
 - A hand-editable timeline in the video editor: drag to reorder, a transition per cut, and text overlays in the plan.
-- Every pipeline starting its own services (music video, Film Crew, images, audio, upscaling), the way video renders already start ComfyUI.
+- Every pipeline starting its own services (music video, Film Crew, images, audio), the way video renders already start ComfyUI.
 - Memory and context budgets sized to the model, and semantic memory recall with embeddings.
 - Outreach posting on X, verified end to end.
 - Sending a song from Audio Studio straight to the Music Video page.

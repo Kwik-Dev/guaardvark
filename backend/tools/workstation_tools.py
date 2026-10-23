@@ -56,6 +56,7 @@ _LOG_WRITERS: Dict[str, str] = {
     "mcp.log": "start.sh",
     "celery_main.log": "start_celery.sh",
     "celery_training.log": "start_celery.sh",
+    "celery_research.log": "backend/services/research_worker.py",
     "celery_beat.log": "start_celery.sh",
     "ollama_bootstrap.log": "start.sh",
     "whisper_server.log": "start.sh",
@@ -618,14 +619,20 @@ class SwarmStatusTool(BaseTool):
     read_only = True
     idempotent = True
     description = (
-        "Get Swarm Orchestrator status (same as GET /api/swarm/status). "
-        "Use when the user asks about the coding swarm, worktrees, or running swarm tasks. "
-        "Returns an honest offline error if the swarm plugin is not running."
+        "Report what Guaardvark's Swarm Orchestrator is doing: the coding swarms that run several agents "
+        "at once, each task in its own git worktree. Without swarm_id it returns every swarm the service "
+        "is tracking (swarms, with their count); each swarm has its status (not_started, running, completed or "
+        "failed), its tasks (title, status, branch, worktree, agent backend, elapsed time, tokens, "
+        "estimated cost, error), task counts by status, how many are running, total cost and tokens, "
+        "elapsed seconds and worktree disk use. With swarm_id it returns that swarm alone, a finished "
+        "one too when its result is saved on disk; an unknown id is 'Swarm not found'. Reads only: swarms "
+        "are started from Guaardvark's chat, its Swarm page or POST /api/swarm/launch. When the swarm "
+        "plugin is not running the call fails and says so; do not report a swarm as running then."
     )
     parameters = {
         "swarm_id": ToolParameter(
             name="swarm_id", type="string", required=False, default="",
-            description="Optional id of one swarm, as the launch returned it, e.g. 'swarm-20260930-120000-a1b2c3' (letters, digits, '-' and '_' only).",
+            description="One swarm's id, as its launch returned it, e.g. 'swarm-20260930-120000-a1b2c3' (letters, digits, '-' and '_' only). Omit to list every tracked swarm.",
         ),
     }
 
@@ -723,13 +730,19 @@ class LaunchSwarmTool(BaseTool):
         from backend.api import swarm_api
         from backend.services.guarded_code_service import default_repo_root
 
-        body = {
+        # Same path as the Swarm page: the goal becomes a one-task plan file,
+        # which is what the sidecar reads (it refuses a body with no plan_path).
+        body, refusal = swarm_api.prepare_launch({
             "goal": goal,
             "self_code": True,
             "auto_merge": False,
             "acknowledge_dirty_tree": bool(kwargs.get("acknowledge_dirty_tree")),
             "repo_path": str(default_repo_root()),
-        }
+        })
+        if refusal:
+            message, http_status, code = refusal
+            return ToolResult(success=False, error=message,
+                              metadata={"http_status": http_status, "code": code})
         data, status = swarm_api._proxy_post("/swarm/launch", body, timeout=30)
         if status == 503:
             return ToolResult(

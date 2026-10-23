@@ -168,6 +168,15 @@ def test_a_reply_without_origin_carries_no_cors_headers(client):
     assert client.get("/api/settings/x").headers.getlist("Access-Control-Allow-Origin") == []
 
 
+def test_this_installs_frontend_can_read_the_paging_headers(client):
+    """GET /api/rules puts its real row count in X-Total-Count; a page served
+    from another of this install's origins reads it only if it is exposed."""
+    response = client.get("/api/settings/x", headers={"Origin": "http://192.168.1.20:5173"})
+    exposed = response.headers.get("Access-Control-Expose-Headers", "")
+    for name in ("X-Total-Count", "X-Page", "X-Per-Page"):
+        assert name in exposed
+
+
 def test_preflight_allows_patch_and_the_api_key_header(client):
     response = _preflight(client, "/api/settings/x", "http://localhost:5173", method="PATCH")
     assert _allow_origin(response) == "http://localhost:5173"

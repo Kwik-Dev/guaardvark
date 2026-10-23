@@ -788,8 +788,9 @@ class RAGAutoresearchService:
         )
         try:
             from backend.models import InterconnectorLearning, db
+            from backend.utils.node_identity import local_node_id
             learning = InterconnectorLearning(
-                source_node_id=os.environ.get("GUAARDVARK_NODE_ID", "local"),
+                source_node_id=local_node_id(),
                 learning_type="rag_optimization",
                 description=description,
                 confidence=min(1.0, max(0.0, result.get("delta", 0.0))),
@@ -798,7 +799,7 @@ class RAGAutoresearchService:
             db.session.add(learning)
             db.session.commit()
         except Exception as e:
-            logger.debug(f"Family learning row skipped: {e}")
+            logger.warning(f"Family learning row not recorded: {e}")
             try:
                 from backend.models import db
                 db.session.rollback()
@@ -811,7 +812,7 @@ class RAGAutoresearchService:
                 reason="autoresearch promotion",
             )
         except Exception as e:
-            logger.debug(f"Family broadcast skipped: {e}")
+            logger.warning(f"Family broadcast failed: {e}")
 
     def _emit_socket_event(self, result: dict):
         """Emit real-time update via Socket.IO."""

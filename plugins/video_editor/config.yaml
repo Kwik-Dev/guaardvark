@@ -21,7 +21,11 @@ output:
   renders_dir: data/outputs/videos/editor-renders
 
 registration:
-  backend_url: http://localhost:5055
+  # Each render is POSTed to the main Guaardvark backend so it lands as a
+  # Document row (Media Library, the Music Video player). The backend URL
+  # resolves from FLASK_PORT in the project .env (or GUAARDVARK_BACKEND_URL);
+  # set backend_url only to point at a non-default backend.
+  # backend_url: http://localhost:5000
   folder: Videos
   enabled: true
 

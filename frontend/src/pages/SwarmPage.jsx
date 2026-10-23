@@ -97,8 +97,15 @@ const STATUS_CONFIG = {
   needs_review: { color: "warning", icon: <ReviewIcon fontSize="small" />, label: "Needs Review" },
   merged: { color: "success", icon: <MergeIcon fontSize="small" />, label: "Merged" },
   cancelled: { color: "default", icon: <CloseIcon fontSize="small" />, label: "Cancelled" },
+  // The agent exited cleanly but committed and changed nothing.
+  no_changes: { color: "warning", icon: <ReviewIcon fontSize="small" />, label: "No changes" },
+  // The agent ran past agent_timeout_minutes and was stopped.
+  timed_out: { color: "error", icon: <FailedIcon fontSize="small" />, label: "Timed out" },
 };
 
+
+// Task states whose logs and diff are worth opening.
+const VIEWABLE_TASK_STATUSES = ["running", "done", "failed", "needs_review", "no_changes", "timed_out"];
 
 // ─── Main Page ───────────────────────────────────────────────────────
 
@@ -419,7 +426,7 @@ const SwarmPage = () => {
     }
     if (p.kind === "task") {
       const { swarmId, task } = p;
-      const canView = ["running", "done", "failed"].includes(task.status);
+      const canView = VIEWABLE_TASK_STATUSES.includes(task.status);
       return [
         canView && { label: "View logs", onClick: () => handleViewTask(swarmId, task.id) },
         canView && { label: "View diff", onClick: () => handleViewTask(swarmId, task.id, 1) },
@@ -1221,7 +1228,7 @@ const TaskCard = ({ task, swarmId, onViewTask, onItemContextMenu, _theme }) => {
         borderColor:
           task.status === "running"
             ? "primary.main"
-            : task.status === "failed"
+            : task.status === "failed" || task.status === "timed_out"
               ? "error.main"
               : "divider",
       }}
@@ -1260,7 +1267,7 @@ const TaskCard = ({ task, swarmId, onViewTask, onItemContextMenu, _theme }) => {
         )}
       </CardContent>
       <CardActions sx={{ pt: 0 }}>
-        {(task.status === "running" || task.status === "done" || task.status === "failed") && (
+        {VIEWABLE_TASK_STATUSES.includes(task.status) && (
           <Tooltip title="View task detail">
             <IconButton
               size="small"

@@ -3,13 +3,26 @@ import {
   buildFinalPrompts,
   clampQuantity,
   ignoresNegativeAndAnatomy,
+  IMAGE_MAX_SEED,
   imageModelOption,
   isZimageModel,
   modelFamily,
   modelInstallNeed,
+  QWEN_IMAGE_21_GUIDANCE_MAX,
+  parseImageSeed,
   qualityPresetsForModel,
   resolveQualityPreset,
 } from './batchImageSettings';
+
+describe('parseImageSeed', () => {
+  it('reads a typed seed across the 2**32 image space and leaves anything else random', () => {
+    expect(parseImageSeed('390656711')).toBe(390656711);
+    expect(parseImageSeed(' 7 ')).toBe(7);
+    expect(parseImageSeed(String(IMAGE_MAX_SEED))).toBe(4294967295);
+    expect(parseImageSeed(String(IMAGE_MAX_SEED + 1))).toBeNull();
+    for (const t of ['', '  ', null, undefined, 'abc', '-3', '2.5']) expect(parseImageSeed(t)).toBeNull();
+  });
+});
 
 describe('modelFamily', () => {
   it('classifies the catalog ids', () => {
@@ -23,6 +36,13 @@ describe('modelFamily', () => {
     expect(modelFamily('realistic-vision')).toBe('sd');
     expect(modelFamily('sana-sprint')).toBe('sana');
     expect(modelFamily('sana-sprint-0.6b')).toBe('sana');
+  });
+
+  it('resolves Qwen-Image 2.1 ids, shipped and user, and leaves the editing model alone', () => {
+    expect(modelFamily('qwen-image-21')).toBe('qwen-image-21');
+    expect(modelFamily('user-qwen-image-21-foo')).toBe('qwen-image-21');
+    expect(modelFamily('user-qwen-image-21-ft-fp8-xl')).toBe('qwen-image-21');
+    expect(modelFamily('qwen-image-edit')).toBe('sd');
   });
 
   it('does not treat auto as Z-Image (the router may pick SDXL)', () => {
@@ -57,6 +77,19 @@ describe('quality presets', () => {
     expect(qualityPresetsForModel('sd-xl').some((p) => p.steps === 25)).toBe(true);
   });
 
+  it('gives Qwen-Image 2.1 the official template recipe and nothing faster', () => {
+    const presets = qualityPresetsForModel('qwen-image-21');
+    expect(presets.map((p) => p.value)).toEqual(['standard', 'high']);
+    expect(presets.every((p) => p.guidance === 1.0)).toBe(true);
+    expect(presets.every((p) => p.steps >= 25)).toBe(true);
+    expect(presets.find((p) => p.value === 'standard').steps).toBe(25);
+    const high = presets.find((p) => p.value === 'high').steps;
+    expect(high).toBeGreaterThanOrEqual(40);
+    expect(high).toBeLessThanOrEqual(50);
+    expect(resolveQualityPreset('user-qwen-image-21-foo', 'flux-ultra')).toBe('standard');
+    expect(qualityPresetsForModel('user-qwen-image-21-foo')).toBe(presets);
+  });
+
   it('keeps the current preset when the new family offers it', () => {
     expect(resolveQualityPreset('sd-xl', 'fast')).toBe('fast');
     expect(resolveQualityPreset('zimage-turbo', 'standard')).toBe('standard');
@@ -70,7 +103,7 @@ describe('quality presets', () => {
   });
 
   it('every family default exists in its own list', () => {
-    for (const model of ['auto', 'zimage-turbo', 'flux-dev', 'krea2-turbo', 'krea2-raw', 'sd-xl', 'sdxl-turbo', 'realistic-vision', 'sana-sprint']) {
+    for (const model of ['auto', 'zimage-turbo', 'flux-dev', 'krea2-turbo', 'krea2-raw', 'sd-xl', 'sdxl-turbo', 'realistic-vision', 'sana-sprint', 'qwen-image-21']) {
       const def = resolveQualityPreset(model, 'not-a-preset');
       expect(qualityPresetsForModel(model).map((p) => p.value)).toContain(def);
     }
@@ -135,5 +168,17 @@ describe('model install state', () => {
     const some = [AUTO, imageModelOption(row('sd-xl', { is_downloaded: true }))];
     expect(modelInstallNeed(some, 'auto')).toBeNull();
     expect(modelInstallNeed(some, 'sd-xl')).toBeNull();
+  });
+});
+
+describe('Qwen-Image 2.1 guidance slider', () => {
+  it('stops at the registry cfg_range upper bound (media_model_registry qwen-image-21: 1.0-5.0)', () => {
+    expect(QWEN_IMAGE_21_GUIDANCE_MAX).toBe(5);
+  });
+  it('offers no preset outside that range', () => {
+    for (const p of qualityPresetsForModel('qwen-image-21')) {
+      expect(p.guidance).toBeGreaterThanOrEqual(1);
+      expect(p.guidance).toBeLessThanOrEqual(QWEN_IMAGE_21_GUIDANCE_MAX);
+    }
   });
 });

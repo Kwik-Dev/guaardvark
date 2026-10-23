@@ -111,4 +111,18 @@ describe("NewTrainingJobModal", () => {
     expect(screen.getByRole("button", { name: "Create Job" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Download base models" })).toBeInTheDocument();
   });
+
+  it("names the unmet requirement when the libraries are installed but incomplete", async () => {
+    trainingService.getTrainingLibraries.mockResolvedValue({
+      ready: false,
+      libraries: [{ id: "trl", name: "TRL", state: "installed" }],
+      unmet: ["trl 1.13.0 needs accelerate>=1.4.0 (1.2.1 installed)"],
+    });
+    render(<NewTrainingJobModal open onClose={() => {}} onSave={() => {}} />);
+
+    expect(await screen.findByText("Training libraries are installed, but incomplete.")).toBeInTheDocument();
+    expect(screen.getByText(/trl 1\.13\.0 needs accelerate>=1\.4\.0 \(1\.2\.1 installed\)/)).toBeInTheDocument();
+    expect(screen.queryByText("Training libraries are not installed.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create Job" })).toBeDisabled();
+  });
 });

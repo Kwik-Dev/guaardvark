@@ -10,6 +10,7 @@ import {
   Download as DownloadIcon,
   Edit as EditIcon,
   IosShare as ShareIcon,
+  Casino as SeedIcon,
 } from '@mui/icons-material';
 import ImageEditor from './ImageEditor';
 import { guardedMediaSrc } from '../../utils/assetGuard';
@@ -17,6 +18,8 @@ import { guardedMediaSrc } from '../../utils/assetGuard';
 const ImageLightbox = ({
   imageUrl,
   imageName = '',
+  // Small line under the name, e.g. the prompt a rewrite sent to the model.
+  caption = '',
   documentId,
   onClose,
   onPrev,
@@ -24,6 +27,9 @@ const ImageLightbox = ({
   onDownload,
   onPublish,
   onImageEdited,
+  // The seed this image rendered with; with onUseSeed the toolbar offers to reuse it.
+  seed = null,
+  onUseSeed,
   hasPrev = false,
   hasNext = false,
   initialEditMode = false,
@@ -97,10 +103,24 @@ const ImageLightbox = ({
           zIndex: 1,
         }}
       >
-        <Typography variant="body2" sx={{ color: 'white', ml: 1, opacity: 0.8 }} noWrap>
-          {imageName}
-        </Typography>
-        <Box>
+        <Box sx={{ minWidth: 0, flex: 1, mr: 1 }}>
+          <Typography variant="body2" sx={{ color: 'white', ml: 1, opacity: 0.8 }} noWrap>
+            {imageName}
+          </Typography>
+          {caption && (
+            <Typography
+              variant="caption"
+              title={caption}
+              sx={{
+                color: 'white', ml: 1, opacity: 0.6, display: '-webkit-box',
+                WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+              }}
+            >
+              {caption}
+            </Typography>
+          )}
+        </Box>
+        <Box sx={{ flexShrink: 0 }}>
           {documentId && (
             <Tooltip title="Edit image (E)">
               <IconButton onClick={() => setEditMode(true)} sx={{ color: 'white' }} size="small">
@@ -112,6 +132,13 @@ const ImageLightbox = ({
             <Tooltip title="Share / Publish (S)">
               <IconButton onClick={onPublish} sx={{ color: 'white' }} size="small">
                 <ShareIcon />
+              </IconButton>
+            </Tooltip>
+          )}
+          {seed != null && onUseSeed && (
+            <Tooltip title={`Use this image's seed (${seed})`}>
+              <IconButton onClick={() => onUseSeed(seed)} sx={{ color: 'white' }} size="small" aria-label={`Use seed ${seed}`}>
+                <SeedIcon />
               </IconButton>
             </Tooltip>
           )}

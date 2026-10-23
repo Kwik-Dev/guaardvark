@@ -6,6 +6,7 @@ analyze the conflict markers (<<<<<<< HEAD) and resolve them based on
 the intent of the swarm plan.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -113,7 +114,8 @@ Provide the FULL resolved content of the file. Do not include any explanations, 
                 json={
                     "message": prompt,
                     "chat_mode": "instinct",
-                    "session_id": f"merger-{rel_path.replace('/', '-')}"
+                    # One session per file, hashed so a long path still fits the 36-character id.
+                    "session_id": f"merger-{hashlib.sha1(rel_path.encode()).hexdigest()[:16]}"
                 },
                 timeout=60
             )

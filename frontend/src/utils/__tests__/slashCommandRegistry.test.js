@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  directToolOptions,
   extractCommandRules,
   getAllCommands,
   getBuiltInCommands,
@@ -93,5 +94,39 @@ describe("DB command loader", () => {
       name: "/ping",
       description: "Ping",
     });
+  });
+});
+
+describe("directToolOptions", () => {
+  it("carries a slash command's tool, params, command, args and image model", () => {
+    expect(
+      directToolOptions({
+        direct_tool: "generate_image",
+        direct_tool_params: { prompt: "a fox", model: "z-image-turbo" },
+        slash_command: "imagine",
+        slash_args: "a fox",
+        image_model: "z-image-turbo",
+        isVoiceMessage: false,
+      })
+    ).toEqual({
+      direct_tool: "generate_image",
+      direct_tool_params: { prompt: "a fox", model: "z-image-turbo" },
+      slash_command: "imagine",
+      slash_args: "a fox",
+      image_model: "z-image-turbo",
+    });
+  });
+
+  it("gives a command without params an empty params object", () => {
+    expect(directToolOptions({ direct_tool: "read_logs", slash_command: "logs" })).toEqual({
+      direct_tool: "read_logs",
+      direct_tool_params: {},
+      slash_command: "logs",
+    });
+  });
+
+  it("adds nothing to an ordinary message", () => {
+    expect(directToolOptions(undefined)).toEqual({});
+    expect(directToolOptions({ documentNotice: true })).toEqual({});
   });
 });

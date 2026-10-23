@@ -98,6 +98,18 @@ def _unified(client: LlxClient, job_id: str) -> dict:
             "files": [], "raw": d}
 
 
+def _owner(client: LlxClient, job_id: str) -> dict:
+    """The active job a bare id belongs to: a row whose own job_id it is (a
+    training build's progress id, for one), read under the registry id."""
+    d = client.get("/api/jobs/active")
+    jobs = (d.get("jobs") if isinstance(d, dict) else d) or []
+    for job in jobs:
+        meta = job.get("metadata") or {}
+        if job_id in (str(job.get("native_id")), str(meta.get("job_id")), str(meta.get("celery_task_id"))):
+            return _unified(client, job["id"])
+    raise LlxError(f"No active job owns {job_id}", 404)
+
+
 def read_job(client: LlxClient, job_id: str) -> dict:
     """Return the job's state in one shape. Raises LlxError if no route knows the id."""
     job_id = job_id.strip()
@@ -112,9 +124,9 @@ def read_job(client: LlxClient, job_id: str) -> dict:
     elif job_id.isdigit():
         readers = [lambda c, i: _unified(c, f"task:{i}")]
     elif _HEX32.match(job_id):
-        readers = [_audio, lambda c, i: _unified(c, f"unified:{i}")]
+        readers = [_audio, lambda c, i: _unified(c, f"unified:{i}"), _owner]
     else:
-        readers = [_image, _video, lambda c, i: _unified(c, f"unified:{i}")]
+        readers = [_image, _video, lambda c, i: _unified(c, f"unified:{i}"), _owner]
 
     last: LlxError | None = None
     for reader in readers:

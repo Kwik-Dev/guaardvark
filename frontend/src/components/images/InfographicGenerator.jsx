@@ -298,7 +298,7 @@ const InfographicGenerator = () => {
             </Stack>
           )}
           {!generating && !result && (
-            <Typography variant="body2" sx={{ color: 'text.disabled' }}>
+            <Typography variant="body2" sx={{ color: 'text.secondary' }}>
               Preview appears here
             </Typography>
           )}

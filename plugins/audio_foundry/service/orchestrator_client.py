@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-from service.config_loader import resolve_backend_url
+from service.config_loader import API_KEY_HEADER, backend_api_key, backend_url_is_own, resolve_backend_url
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ class OrchestratorClient:
         enabled: bool = True,
     ) -> None:
         self._url = resolve_backend_url(backend_url).rstrip("/")
+        self._own_backend = backend_url_is_own(backend_url)
         self._timeout = float(timeout_s)
         # Env var hard-disables regardless of constructor arg — for tests.
         if os.environ.get(_ENV_DISABLE) == "1":
@@ -109,13 +110,25 @@ class OrchestratorClient:
             "/api/gpu/memory/evict",
             {"slot_id": slot_id},
             op="evict",
+            missing_ok=True,
         )
 
     # ------------------------------------------------------------------
 
-    def _post(self, path: str, payload: dict[str, Any], op: str) -> bool:
+    def _post(self, path: str, payload: dict[str, Any], op: str, missing_ok: bool = False) -> bool:
+        """missing_ok: a 404 means the orchestrator does not track the slot,
+        which is the outcome an evict wants, so it is not a failure."""
         try:
-            response = httpx.post(f"{self._url}{path}", json=payload, timeout=self._timeout)
+            key = backend_api_key(self._own_backend)
+            response = httpx.post(
+                f"{self._url}{path}",
+                json=payload,
+                headers={API_KEY_HEADER: key} if key else None,
+                timeout=self._timeout,
+            )
+            if missing_ok and response.status_code == 404:
+                logger.debug("Orchestrator %s: slot not tracked", op)
+                return True
             response.raise_for_status()
             return True
         except httpx.HTTPError as e:

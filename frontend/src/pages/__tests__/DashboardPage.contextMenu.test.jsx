@@ -25,7 +25,7 @@ vi.mock("../../components/dashboard/CSVGenerationCard", () => makeCard("CSV Gene
 vi.mock("../../components/dashboard/CodeGenerationCard", () => makeCard("Code Generation"));
 vi.mock("../../components/dashboard/ImageGenerationCard", () => makeCard("Image Generation"));
 vi.mock("../../components/dashboard/FileManagerCard", () => makeCard("File Manager"));
-vi.mock("../../components/dashboard/FamilySelfImprovementCard", () => makeCard("Family & Self-Improvement"));
+vi.mock("../../components/dashboard/FamilySelfImprovementCard", () => makeCard("Family & Self-improvement"));
 vi.mock("../../components/dashboard/RAGAutoresearchCard", () => makeCard("RAG Autoresearch"));
 vi.mock("../../components/dashboard/GpuStatusCard", () => makeCard("GPU Memory"));
 

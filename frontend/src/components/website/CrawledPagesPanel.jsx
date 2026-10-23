@@ -101,9 +101,11 @@ const CrawledPagesPanel = ({ website, onFeedback }) => {
           </Select>
         </FormControl>
         <Tooltip title="Refresh">
-          <IconButton size="small" onClick={loadPages} disabled={loading}>
-            <RefreshIcon fontSize="small" />
-          </IconButton>
+          <span>
+            <IconButton size="small" onClick={loadPages} disabled={loading}>
+              <RefreshIcon fontSize="small" />
+            </IconButton>
+          </span>
         </Tooltip>
       </Stack>
 

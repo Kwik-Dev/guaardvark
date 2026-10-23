@@ -29,7 +29,7 @@ export default function EmptyState({ icon, title, description, action }) {
         {title}
       </Typography>
       {description && (
-        <Typography variant="body2" color="text.disabled">
+        <Typography variant="body2" color="text.secondary">
           {description}
         </Typography>
       )}

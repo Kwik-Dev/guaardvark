@@ -949,3 +949,242 @@ class TestDirector:
             mock_check.assert_not_called()
             assert out.get("ok") is True
             assert out.get("red") is False
+
+
+class TestRunsOffTheMainWorker:
+    """A run is queued for the research worker, and every model call it makes
+    waits while a render or training job holds the GPU."""
+
+    def _running(self, tag="t-gpu"):
+        run = ResearchRun(run_tag=tag, mode="rag_tuning", status="running",
+                          wall_clock_budget_s=3600, started_at=utcnow())
+        db.session.add(run)
+        db.session.commit()
+        return run
+
+    def test_the_run_is_sent_to_the_research_queue_through_the_launcher(self):
+        captured = {}
+        with patch("backend.services.research_worker.dispatch",
+                   side_effect=lambda send: captured.setdefault("send", send)) as dispatch, \
+             patch("backend.celery_app.celery.send_task") as send_task:
+            ResearchRunService()._enqueue_execute_run("run-1")
+            dispatch.assert_called_once()
+            send_task.assert_not_called()      # only once the worker is up
+            captured["send"]()
+        args, kwargs = send_task.call_args
+        assert args == ("autoresearch.execute_run",)
+        assert kwargs["args"] == ["run-1"]
+        assert kwargs["queue"] == "research"
+        assert kwargs["time_limit"] > kwargs["soft_time_limit"] > 12 * 3600
+
+    def test_kickoff_refuses_when_the_research_worker_cannot_start(self, app):
+        from backend.services.research_worker import WorkerStartError
+        with app.app_context():
+            _seed_corpus(eval_source_status="INDEXED")
+            svc_run = ResearchRunService()
+            with _ollama_up(), \
+                 patch.object(svc_run, "_celery_has_live_execute_run", return_value=False), \
+                 patch.object(svc_run, "_enqueue_execute_run",
+                              side_effect=WorkerStartError("could not start the research worker: boom")), \
+                 patch("backend.utils.llm_service.get_saved_active_model_name",
+                       return_value="gemma4:12b"):
+                result = svc_run.kickoff(budget_hours=1, trigger="manual")
+            assert result["not_run"] is True
+            assert result["reasons"][0].startswith("research_worker_unavailable — could not start")
+            run = db.session.get(ResearchRun, result["run"]["id"])
+            assert run.status == "failed_precondition"
+
+    def test_a_young_pending_run_waits_for_its_worker_and_an_old_one_is_reaped(self, app):
+        with app.app_context():
+            young = ResearchRun(run_tag="t-young", mode="rag_tuning", status="pending")
+            old = ResearchRun(run_tag="t-old", mode="rag_tuning", status="pending",
+                              created_at=utcnow() - timedelta(minutes=5))
+            db.session.add_all([young, old])
+            db.session.commit()
+            svc_run = ResearchRunService()
+            with patch.object(svc_run, "_celery_has_live_execute_run", return_value=False):
+                assert svc_run._recover_stale_runs() == 1
+            db.session.refresh(young)
+            db.session.refresh(old)
+            assert young.status == "pending"
+            assert (old.status, old.halt_reason) == ("halted", "worker_crashed")
+
+    def test_execute_run_wires_the_gpu_turn_for_the_run_and_removes_it(self, app):
+        with app.app_context():
+            run = ResearchRun(run_tag="t-wire", mode="rag_tuning", status="pending",
+                              wall_clock_budget_s=60)
+            db.session.add(run)
+            db.session.commit()
+            svc_run = ResearchRunService()
+            auto_svc = MagicMock()
+            seen = {}
+
+            def body(r, svc, mode):
+                seen["harness"] = svc.eval_harness.gpu_turn
+                seen["agent"] = svc.agent.gpu_turn
+            with patch.object(svc_run, "_check_preconditions", return_value=(True, "")), \
+                 patch.object(svc_run, "_execute_claimed", side_effect=body), \
+                 patch("backend.services.rag_autoresearch_service.get_autoresearch_service",
+                       return_value=auto_svc):
+                svc_run.execute_run(run.id)
+            assert seen["harness"] is seen["agent"] and callable(seen["harness"])
+            assert auto_svc.eval_harness.gpu_turn is None and auto_svc.agent.gpu_turn is None
+
+    def test_the_gpu_turn_raises_once_the_run_is_stopped(self, app):
+        from backend.services.research_run_service import ResearchRunStopped
+        with app.app_context():
+            run = self._running()
+            svc_run = ResearchRunService()
+            svc_run._set_kill(True)
+            with patch("backend.utils.gpu_check.gpu_reserved_reason") as probe:
+                with pytest.raises(ResearchRunStopped):
+                    svc_run._gpu_turn(run)
+            probe.assert_not_called()          # a stopped run makes no further call
+            assert not issubclass(ResearchRunStopped, Exception)
+
+    def test_a_wait_for_the_gpu_is_recorded_and_reported(self, app):
+        with app.app_context():
+            run = self._running("t-waited")
+            svc_run = ResearchRunService()
+            with patch("backend.utils.gpu_check.wait_for_gpu_turn", return_value=42.0):
+                assert svc_run._gpu_turn(run) == 42.0
+            db.session.refresh(run)
+            assert run.promotions["gpu_wait_s"] == 42
+            assert "**GPU**: waited 42 s for renders or training" in svc_run._write_report(run, [])
+
+    def test_a_stop_mid_experiment_ends_the_slice_killed_without_a_crash_row(self, app):
+        from backend.services.research_run_service import ResearchRunStopped
+        with app.app_context():
+            run = self._running("t-stop-exp")
+            svc_run = ResearchRunService()
+            auto_svc = MagicMock()
+            auto_svc._load_config.return_value = {"params": {}, "phase": 1,
+                                                  "phase_plateau_count": 0}
+            auto_svc.eval_harness.avg_pair_seconds = None
+            auto_svc.eval_harness.run_full_eval.return_value = {
+                "composite_score": 3.0, "num_pairs": 4, "judged_pairs": 4,
+                "parse_fail_crash": False}
+            auto_svc.run_single_experiment.side_effect = ResearchRunStopped("t-stop-exp")
+            with patch("backend.services.research_run_service.time.sleep"), \
+                 patch("backend.utils.gpu_check.gpu_busy", return_value=False):
+                ledger, ids, halt, status = svc_run._run_rag_slice(run, auto_svc, time.time(), 3600)
+            assert (ledger, ids, halt, status) == ([], [], "killed", "killed")
+            assert auto_svc._current_experiment_id is None
+
+    def test_a_stop_during_the_baseline_ends_the_slice_killed(self, app):
+        from backend.services.research_run_service import ResearchRunStopped
+        with app.app_context():
+            run = self._running("t-stop-base")
+            auto_svc = MagicMock()
+            auto_svc._load_config.return_value = {"params": {}, "phase": 1}
+            auto_svc.eval_harness.avg_pair_seconds = None
+            auto_svc.eval_harness.run_full_eval.side_effect = ResearchRunStopped("t-stop-base")
+            out = ResearchRunService()._run_rag_slice(run, auto_svc, time.time(), 3600)
+            assert out == ([], [], "killed", "killed")
+            auto_svc.run_single_experiment.assert_not_called()
+
+    def test_a_stopped_run_never_launches_the_swarm(self, app):
+        from backend.services.research_run_service import ResearchRunStopped
+        with app.app_context():
+            run = self._running("t-no-swarm")
+            svc_run = ResearchRunService()
+            with patch.object(svc_run, "_gpu_turn", side_effect=ResearchRunStopped("x")), \
+                 patch.object(svc_run, "_launch_code_swarm") as launch:
+                with pytest.raises(ResearchRunStopped):
+                    svc_run._run_code_slice(run, 600, {})
+            launch.assert_not_called()
+
+    def test_a_stop_during_confirmation_closes_the_run_killed(self, app):
+        from backend.services.research_run_service import ResearchRunStopped
+        with app.app_context():
+            run = ResearchRun(run_tag="t-stop-confirm", mode="rag_tuning", status="pending",
+                              wall_clock_budget_s=60)
+            db.session.add(run)
+            db.session.commit()
+            svc_run = ResearchRunService()
+            with patch.object(svc_run, "_check_preconditions", return_value=(True, "")), \
+                 patch.object(svc_run, "_run_rag_slice",
+                              return_value=([], ["c1"], "budget_exhausted", "completed")), \
+                 patch.object(svc_run, "_confirm_and_activate",
+                              side_effect=ResearchRunStopped("t-stop-confirm")), \
+                 patch("backend.services.rag_autoresearch_service.get_autoresearch_service"):
+                svc_run.execute_run(run.id)
+            db.session.refresh(run)
+            assert (run.status, run.halt_reason) == ("killed", "killed")
+            assert "confirmation not run: the run was stopped" in run.report_md
+
+    def test_a_stop_from_any_other_step_still_closes_the_run(self, app):
+        from backend.services.research_run_service import ResearchRunStopped
+        with app.app_context():
+            run = ResearchRun(run_tag="t-stray", mode="unified", status="pending",
+                              wall_clock_budget_s=60)
+            db.session.add(run)
+            db.session.commit()
+            svc_run = ResearchRunService()
+            with patch.object(svc_run, "_check_preconditions", return_value=(True, "")), \
+                 patch.object(svc_run, "_execute_claimed", side_effect=ResearchRunStopped("t-stray")), \
+                 patch("backend.services.rag_autoresearch_service.get_autoresearch_service"):
+                svc_run.execute_run(run.id)
+            db.session.refresh(run)
+            assert run.status == "killed" and run.ended_at is not None
+
+
+class TestHarnessWaitsForTheGpu:
+    class _LLM:
+        model = "fake"
+
+        def __init__(self, order):
+            self.order = order
+
+        def complete(self, prompt, temperature=0.0):
+            self.order.append("llm")
+            return "ok"
+
+    def test_each_llm_call_waits_first_and_the_wait_extends_the_deadline(self):
+        order = []
+        h = RAGEvalHarness()
+        h._llms = {"answer": self._LLM(order)}
+        h.begin_experiment_budget(duration_s=30)
+        before = h._deadline
+        h.gpu_turn = lambda: order.append("turn") or 12.5
+        assert h._call_llm("q", role="answer") == "ok"
+        assert order == ["turn", "llm"]
+        assert h._deadline - before == pytest.approx(12.5)
+
+    def test_without_a_hook_the_model_is_used_at_once(self):
+        order = []
+        h = RAGEvalHarness()
+        h._llms = {"answer": self._LLM(order)}
+        h.begin_experiment_budget(duration_s=30)
+        before = h._deadline
+        h._call_llm("q", role="answer")
+        assert order == ["llm"] and h._deadline == before
+
+    def test_time_spent_waiting_is_kept_out_of_the_pair_timing(self):
+        clock = {"t": 100.0}
+        h = RAGEvalHarness()
+        h.begin_experiment_budget(duration_s=10_000)
+
+        def turn():
+            clock["t"] += 30.0
+            return 30.0
+        h.gpu_turn = turn
+
+        def one_pair(pair, config):
+            h._await_gpu_turn()
+            clock["t"] += 2.0
+            return {"composite": 4.0}
+        with patch("backend.services.rag_eval_harness.time.monotonic", side_effect=lambda: clock["t"]), \
+             patch.object(h, "_eval_single_pair", side_effect=one_pair):
+            result = h.run_full_eval({}, pairs=[{"id": "p1"}, {"id": "p2"}])
+        assert result["num_pairs"] == 2
+        assert h.avg_pair_seconds == pytest.approx(2.0)
+
+    def test_the_proposer_waits_for_its_turn_before_calling_its_model(self):
+        from backend.services.rag_experiment_agent import RAGExperimentAgent
+        order = []
+        agent = RAGExperimentAgent()
+        agent._llm = self._LLM(order)
+        agent.gpu_turn = lambda: order.append("turn") or 0.0
+        assert agent._call_llm("propose") == "ok"
+        assert order == ["turn", "llm"]

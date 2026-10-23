@@ -1303,7 +1303,7 @@ const CastMemberPage = () => {
                       <Box sx={{ height: 160, display: 'flex', alignItems: 'center', justifyContent: 'center',
                                  bgcolor: 'action.hover' }}>
                         {s.status === 'generating' ? <CircularProgress size={22} />
-                          : s.status === 'pending' ? <Typography variant="caption" color="text.disabled">queued</Typography>
+                          : s.status === 'pending' ? <Typography variant="caption" color="text.secondary">queued</Typography>
                           : s.status === 'failed' ? <Typography variant="caption" color="error">failed</Typography>
                           : <Typography variant="caption" color="text.secondary">{s.status}</Typography>}
                       </Box>

@@ -252,7 +252,9 @@ def enhanced_code_aware_indexing(file_path, document, document_id, update_progre
 
 
 def simple_index_document(file_path, document_id):
-    """Enhanced document indexing for code files without LlamaIndex dependencies"""
+    """Record a code file's metadata without LlamaIndex. It adds nothing to the
+    vector index, so it does not mark the document INDEXED; True means the
+    metadata was written, not that the document is searchable."""
     try:
         logger.info(f"Starting enhanced indexing for document {document_id}")
 
@@ -296,10 +298,9 @@ def simple_index_document(file_path, document_id):
                     # Update the document with enhanced status
                     session.execute(text("""
                         UPDATE documents
-                        SET index_status = :index_status, indexed_at = :indexed_at, file_metadata = :file_metadata
+                        SET file_metadata = :file_metadata
                         WHERE id = :document_id
-                    """), {"index_status": 'INDEXED', "indexed_at": datetime.datetime.now().isoformat(),
-                           "file_metadata": json.dumps(metadata), "document_id": document_id})
+                    """), {"file_metadata": json.dumps(metadata), "document_id": document_id})
 
                     session.commit()
                     logger.info(f"Enhanced code file indexing completed for document {document_id}: {metadata['line_count']} lines, {metadata['char_count']} characters")
@@ -311,16 +312,15 @@ def simple_index_document(file_path, document_id):
                 finally:
                     session.close()
             else:
-                logger.info(f"Processing as regular file: {file_path}")
-                # For non-code files, use basic processing
-                pass
+                # Nothing to record for other files, and nothing was indexed.
+                logger.info(f"Fallback indexing does nothing for a non-code file: {file_path}")
+                return False
 
             return True
 
         except UnicodeDecodeError as e:
             logger.warning(f"Text encoding issue for {file_path}: {e}")
-            # Still mark as indexed but note the encoding issue
-            return True
+            return False
         except Exception as e:
             logger.error(f"Error processing file content for {document_id}: {e}")
             return False
@@ -357,6 +357,11 @@ def index_document_task(document_id, process_id=None):
         except Exception:
             pass
         return {"skipped": True, "reason": "indexing_paused", "document_id": document_id}
+
+    # Job order on: a document is the safe point; hold here while a chat or
+    # voice turn runs (job_arbiter.yield_point; a no-op with the setting off).
+    from backend.services import job_arbiter
+    job_arbiter.yield_point("indexing", document_id, label=f"Indexing document {document_id}")
 
     logger.info(f"Starting isolated indexing task for document {document_id} with process ID: {process_id}")
 
@@ -439,13 +444,18 @@ def index_document_task(document_id, process_id=None):
         
         # Index the document using enhanced code-aware processing
         update_progress(70, f'Processing file content for {document["filename"]}')
+        fallback_reason = None
         try:
             # Use the enhanced indexing that works with the existing CodeChunker system
             success = enhanced_code_aware_indexing(full_file_path, document, document_id, update_progress)
         except Exception as e:
             logger.error(f"Enhanced indexing failed: {e}, falling back to simple indexing")
             update_progress(75, f'Using fallback indexing due to error for {document["filename"]}')
-            success = simple_index_document(full_file_path, document_id)
+            # The fallback records file metadata; it adds nothing to the vector
+            # index, so it never makes the document searchable.
+            simple_index_document(full_file_path, document_id)
+            success = False
+            fallback_reason = f"Indexing failed for {document['filename']}: {e}"
 
         if success == DEFERRED:
             message = f"Indexing deferred for {document['filename']}: vector store not in use; left PENDING"
@@ -484,7 +494,7 @@ def index_document_task(document_id, process_id=None):
                 reason = no_content_reason(document_id)
             except Exception:
                 reason = None
-            error_msg = reason or f"Indexing failed for document {document_id}"
+            error_msg = reason or fallback_reason or f"Indexing failed for document {document_id}"
             logger.error(error_msg)
 
             # Update document status
@@ -574,9 +584,116 @@ def generate_bulk_csv_v2_task(rule_id, project_id, target_site, source_site, tar
         
         return {'error': error_msg}
 
+
+def _guaardvark_storage_dirs():
+    """(storage_dir, upload_dir, backup_dir) resolved the way backend.config
+    resolves them (relative values against GUAARDVARK_ROOT, same defaults),
+    taken at call time: this module stays free of backend.config, and a worker
+    or a test sees the current values rather than import-time ones."""
+    root = (os.environ.get('GUAARDVARK_ROOT')
+            or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    def resolve(var, default):
+        path = os.environ.get(var, default)
+        return path if os.path.isabs(path) else os.path.join(root, path)
+
+    return (resolve('GUAARDVARK_STORAGE_DIR', 'data'),
+            resolve('GUAARDVARK_UPLOAD_DIR', 'data/uploads'),
+            resolve('GUAARDVARK_BACKUP_DIR', 'backups'))
+
+
+def scan_import_source(source_path, supported_extensions, storage_dir, upload_dir, target_dir=None,
+                       backup_dir=None):
+    """Walk ``source_path`` for files a bulk import may take.
+
+    Returns ``(files, skipped)`` where ``files`` is a list of
+    ``(full_path, rel_path, filename)`` and ``skipped`` counts what the walk
+    left alone. The rules, in order:
+
+    - hidden directories (dot-prefixed) are pruned, so os.walk never enters
+      them: .git, .ssh, .aws, .gnupg, .cache, ... (skipped["hidden_dirs"]);
+    - symlinked directories are pruned and symlinked files skipped, so the
+      walk never leaves the source (skipped["symlinks"]);
+    - Guaardvark's own data folder (``storage_dir``, minus ``upload_dir``) and
+      the import's target folder are pruned when they lie under the source,
+      so docstore.json, index_store.json, config/*.json and the internal
+      secret can never be imported or moved (skipped["internal_dirs"]);
+    - Guaardvark's backups folder (``backup_dir``: full install archives) is
+      pruned the same way when an import of a parent folder reaches it;
+    - hidden files are skipped: .env, .netrc, .gitignore, .bashrc, ...
+      (skipped["hidden_files"]);
+    - credential and secret files named by path_safety.SENSITIVE_PATTERNS are
+      skipped wherever they sit: id_rsa, credentials, *.pem, *.key, ...
+      (skipped["sensitive_files"]);
+    - the extension filter is unchanged, and a plain file with no extension
+      (README, LICENSE, Makefile) is still taken.
+    """
+    from backend.utils.path_safety import is_sensitive, is_within
+
+    skipped = {"hidden_dirs": 0, "hidden_files": 0, "sensitive_files": 0,
+               "symlinks": 0, "internal_dirs": 0}
+    storage_real = os.path.realpath(storage_dir) if storage_dir else None
+    upload_real = os.path.realpath(upload_dir) if upload_dir else None
+    target_real = os.path.realpath(target_dir) if target_dir else None
+    backup_real = os.path.realpath(backup_dir) if backup_dir else None
+
+    def is_internal(path):
+        real = os.path.realpath(path)
+        if target_real and real == target_real:
+            return True
+        if backup_real and is_within(real, [backup_real]):
+            return True
+        if not storage_real or not is_within(real, [storage_real]):
+            return False
+        return not (upload_real and is_within(real, [upload_real]))
+
+    files_found = []
+    for root, dirs, files in os.walk(source_path):
+        kept = []
+        for d in sorted(dirs):
+            full = os.path.join(root, d)
+            if d.startswith('.'):
+                skipped["hidden_dirs"] += 1
+            elif os.path.islink(full):
+                skipped["symlinks"] += 1
+            elif is_internal(full):
+                skipped["internal_dirs"] += 1
+            else:
+                kept.append(d)
+        dirs[:] = kept  # in place: this is what os.walk descends into
+        for file in sorted(files):
+            full_path = os.path.join(root, file)
+            if file.startswith('.'):
+                skipped["hidden_files"] += 1
+                continue
+            if is_sensitive(file):
+                skipped["sensitive_files"] += 1
+                continue
+            if os.path.islink(full_path):
+                skipped["symlinks"] += 1
+                continue
+            file_ext = os.path.splitext(file)[1].lower()
+            if file_ext in supported_extensions or not file_ext:  # Include files without extensions
+                rel_path = os.path.relpath(full_path, source_path)
+                files_found.append((full_path, rel_path, file))
+    return files_found, skipped
+
+
+def _skipped_summary(skipped):
+    """One clause for the status message, or '' when nothing was skipped."""
+    files = skipped["hidden_files"] + skipped["sensitive_files"] + skipped["symlinks"]
+    dirs = skipped["hidden_dirs"] + skipped["internal_dirs"]
+    parts = []
+    if dirs:
+        parts.append(f"{dirs} hidden or internal folder{'s' if dirs != 1 else ''}")
+    if files:
+        parts.append(f"{files} hidden or private file{'s' if files != 1 else ''}")
+    return f"; skipped {' and '.join(parts)}" if parts else ""
+
+
 def bulk_import_documents_task(job_id, source_path, target_folder, project_id=None, 
                                client_id=None, website_id=None, reindex_missing=True, 
-                               force_copy=False, dry_run=False):
+                               force_copy=True, dry_run=False, target_folder_id=None):
     """
     Bulk import documents from a source directory without Flask dependencies.
     
@@ -588,8 +705,10 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
         client_id: Optional client ID
         website_id: Optional website ID
         reindex_missing: Whether to reindex documents that aren't indexed
-        force_copy: Whether to copy files (vs move)
+        force_copy: Copy files (default) rather than move them out of the source
         dry_run: If True, don't actually import, just report what would be done
+        target_folder_id: The exact folder to import into; when given,
+            target_folder is only its path and is not looked up by name
     
     Returns:
         Dict with job status and statistics
@@ -629,14 +748,41 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
             logger.error(error_msg)
             update_job_status("error", error_msg, 0)
             return {'error': error_msg, 'job_id': job_id}
-        
-        # Get upload directory
-        upload_dir = os.environ.get('GUAARDVARK_UPLOAD_DIR', os.path.join(STORAGE_DIR, 'uploads'))
+
+        # Guaardvark's own data folder is never a source (docstore, index
+        # store, config, the internal secret); its uploads folder is the one
+        # exception, so already-imported files can be reorganised.
+        storage_dir, upload_dir, backup_dir = _guaardvark_storage_dirs()
+        from backend.utils.path_safety import is_within
+        if (is_within(source_path, [storage_dir]) and not is_within(source_path, [upload_dir])):
+            error_msg = ("Source path is inside Guaardvark's own data folder; "
+                         "only its uploads folder can be imported from")
+            logger.error(f"{error_msg}: {source_path}")
+            update_job_status("error", error_msg, 0)
+            return {'error': error_msg, 'job_id': job_id}
+        if is_within(source_path, [backup_dir]):
+            error_msg = "Source path is inside Guaardvark's backups folder"
+            logger.error(f"{error_msg}: {source_path}")
+            update_job_status("error", error_msg, 0)
+            return {'error': error_msg, 'job_id': job_id}
         
         # Find or create Folder record in database
         folder_id = None
         folder_path_for_db = None
-        if target_folder:
+        if target_folder_id:
+            session = get_db_session()
+            try:
+                folder_row = session.execute(text("SELECT id, path FROM folders WHERE id = :id"),
+                                             {"id": target_folder_id}).fetchone()
+            finally:
+                session.close()
+            if not folder_row:
+                error_msg = "The folder to import into no longer exists"
+                logger.error(f"{error_msg}: id {target_folder_id}")
+                update_job_status("error", error_msg, 0)
+                return {'error': error_msg, 'job_id': job_id}
+            folder_id, folder_path_for_db = folder_row
+        elif target_folder:
             # Normalize folder path (ensure it starts with /)
             folder_path_for_db = target_folder if target_folder.startswith('/') else f"/{target_folder}"
             
@@ -706,24 +852,22 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
                             '.pdf', '.doc', '.docx'}
         supported_extensions = text_extensions | media_extensions | indexable_extensions
         
-        files_to_import = []
-        for root, dirs, files in os.walk(source_path):
-            for file in files:
-                file_ext = os.path.splitext(file)[1].lower()
-                if file_ext in supported_extensions or not file_ext:  # Include files without extensions
-                    full_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(full_path, source_path)
-                    files_to_import.append((full_path, rel_path, file))
-        
+        files_to_import, skipped = scan_import_source(
+            source_path, supported_extensions, storage_dir, upload_dir, target_dir, backup_dir)
+        skipped_note = _skipped_summary(skipped)
+
         total_files = len(files_to_import)
-        logger.info(f"Found {total_files} files to import")
-        update_job_status("processing", f"Found {total_files} files to import", 30)
-        
+        logger.info(f"Found {total_files} files to import{skipped_note}")
+        update_job_status("processing", f"Found {total_files} files to import{skipped_note}", 30)
+
         if dry_run:
-            update_job_status("complete", f"Dry run: Would import {total_files} files", 100, 
-                            {"total_files": total_files, "files": [f[2] for f in files_to_import]})
-            return {'job_id': job_id, 'status': 'complete', 'dry_run': True, 
-                   'total_files': total_files, 'files': [f[2] for f in files_to_import]}
+            dry_stats = {"total_files": total_files, "files": [f[2] for f in files_to_import],
+                         "skipped_private": skipped}
+            update_job_status("complete", f"Dry run: Would import {total_files} files{skipped_note}", 100,
+                              dry_stats)
+            return {'job_id': job_id, 'status': 'complete', 'dry_run': True,
+                    'total_files': total_files, 'files': [f[2] for f in files_to_import],
+                    'skipped_private': skipped}
         
         # Process files
         imported_count = 0
@@ -772,97 +916,109 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
                 cur_id, cur_path = new_row[0], nxt
             return cur_id, cur_path
 
+        import shutil
+
+        def db_path_for(file_folder_path, name):
+            # document.path is relative to the uploads dir (no leading slash);
+            # only folder.path carries one.
+            if file_folder_path:
+                return f"{file_folder_path}/{name}".lstrip('/')
+            return os.path.join(target_folder or "Imports", name)
+
+        def queue_indexing(doc_id):
+            try:
+                from backend.celery_tasks_isolated import index_document_task
+                index_document_task.apply_async((doc_id,), queue='indexing')
+                return True
+            except Exception as e:
+                logger.warning(f"Could not queue indexing for document {doc_id}: {e}")
+                return False
+
         try:
             for idx, (source_file, rel_path, filename) in enumerate(files_to_import):
                 progress = 30 + int((idx / total_files) * 60)
                 update_job_status("processing", f"Importing {filename} ({idx+1}/{total_files})", progress)
 
+                copied_file = None
                 try:
                     rel_dir = os.path.dirname(rel_path)
                     file_folder_id, file_folder_path = ensure_folder_chain(rel_dir)
-
-                    # Copy or move file, preserving the source subdirectory
                     dest_dir = os.path.join(target_dir, rel_dir) if rel_dir else target_dir
-                    os.makedirs(dest_dir, exist_ok=True)
-                    target_file = os.path.join(dest_dir, filename)
-
-                    # Handle duplicate filenames
-                    counter = 1
-                    base_name, ext = os.path.splitext(filename)
-                    while os.path.exists(target_file):
-                        target_file = os.path.join(dest_dir, f"{base_name}_{counter}{ext}")
-                        counter += 1
-
-                    if force_copy:
-                        import shutil
-                        shutil.copy2(source_file, target_file)
-                    else:
-                        import shutil
-                        shutil.move(source_file, target_file)
-
-                    # Create relative path for database
-                    # Use folder path if available, otherwise use target_folder
-                    if file_folder_path:
-                        # document.path is relative to the uploads dir (no leading
-                        # slash) — only folder.path carries one
-                        db_path = f"{file_folder_path}/{os.path.basename(target_file)}".lstrip('/')
-                    else:
-                        # Fallback: use target_folder name without leading slash
-                        db_path = os.path.join(target_folder or "Imports", os.path.basename(target_file))
-
-                    # Check if document already exists
-                    result = session.execute(text("SELECT id, index_status FROM documents WHERE path = :db_path"),
-                                            {"db_path": db_path})
-                    existing = result.fetchone()
 
                     indexable = (os.path.splitext(filename)[1].lower()
                                  in indexable_extensions
                                  or not os.path.splitext(filename)[1])
 
+                    # A row for this file from an earlier run is looked up by the
+                    # path it would get, before any on-disk rename, so a re-run
+                    # skips it rather than importing a name_1.ext duplicate. The
+                    # source file is not touched.
+                    existing = session.execute(
+                        text("SELECT id, index_status FROM documents WHERE path = :db_path"),
+                        {"db_path": db_path_for(file_folder_path, filename)}).fetchone()
                     if existing:
                         doc_id, index_status = existing
                         if reindex_missing and index_status != 'INDEXED' and indexable:
-                            # Queue for reindexing
-                            try:
-                                from backend.celery_tasks_isolated import index_document_task
-                                index_document_task.apply_async((doc_id,), queue='indexing')
+                            if queue_indexing(doc_id):
                                 indexed_count += 1
-                            except Exception as e:
-                                logger.warning(f"Could not queue reindexing for document {doc_id}: {e}")
                         skipped_count += 1
-                        logger.info(f"Skipped existing document: {filename}")
-                    else:
-                        # Create new document record
-                        file_size = os.path.getsize(target_file)
-                        file_ext = os.path.splitext(filename)[1]
+                        logger.info(f"Skipped already imported document: {filename}")
+                        continue
 
-                        insert_result = session.execute(text("""
-                            INSERT INTO documents (filename, path, type, size, project_id, client_id, website_id, folder_id, index_status, uploaded_at)
-                            VALUES (:filename, :path, :type, :size, :project_id, :client_id, :website_id, :folder_id, :index_status, :uploaded_at)
-                            RETURNING id
-                        """), {"filename": filename, "path": db_path, "type": file_ext, "size": file_size,
-                               "project_id": project_id, "client_id": client_id, "website_id": website_id,
-                               "folder_id": file_folder_id,
-                               "index_status": 'PENDING' if indexable else 'STORED',
-                               "uploaded_at": datetime.datetime.now().isoformat()})
-                        doc_id = insert_result.fetchone()[0]
-                        session.commit()
+                    os.makedirs(dest_dir, exist_ok=True)
+                    target_file = os.path.join(dest_dir, filename)
 
-                        imported_count += 1
-                        logger.info(f"Created document record {doc_id}: {filename}")
+                    # A file on disk without a row (an earlier run that failed
+                    # after copying) keeps its name; this one gets a suffix.
+                    counter = 1
+                    base_name, ext = os.path.splitext(filename)
+                    while os.path.exists(target_file):
+                        target_file = os.path.join(dest_dir, f"{base_name}_{counter}{ext}")
+                        counter += 1
+                    db_path = db_path_for(file_folder_path, os.path.basename(target_file))
 
-                        if indexable:
-                            # Queue for indexing
-                            try:
-                                from backend.celery_tasks_isolated import index_document_task
-                                index_document_task.apply_async((doc_id,), queue='indexing')
-                                indexed_count += 1
-                            except Exception as e:
-                                logger.warning(f"Could not queue indexing for document {doc_id}: {e}")
+                    # Copy first, in both modes. The source leaves the user's
+                    # folder only once its row is committed; a failure below
+                    # removes the copy and leaves the source where it was.
+                    shutil.copy2(source_file, target_file)
+                    copied_file = target_file
+
+                    file_size = os.path.getsize(target_file)
+                    file_ext = os.path.splitext(filename)[1]
+
+                    insert_result = session.execute(text("""
+                        INSERT INTO documents (filename, path, type, size, project_id, client_id, website_id, folder_id, index_status, uploaded_at)
+                        VALUES (:filename, :path, :type, :size, :project_id, :client_id, :website_id, :folder_id, :index_status, :uploaded_at)
+                        RETURNING id
+                    """), {"filename": filename, "path": db_path, "type": file_ext, "size": file_size,
+                           "project_id": project_id, "client_id": client_id, "website_id": website_id,
+                           "folder_id": file_folder_id,
+                           "index_status": 'PENDING' if indexable else 'STORED',
+                           "uploaded_at": datetime.datetime.now().isoformat()})
+                    doc_id = insert_result.fetchone()[0]
+                    session.commit()
+                    copied_file = None  # the copy is now the imported file
+
+                    imported_count += 1
+                    logger.info(f"Created document record {doc_id}: {filename}")
+
+                    if not force_copy:
+                        try:
+                            os.remove(source_file)
+                        except OSError as e:
+                            logger.warning(f"Imported {filename} but could not remove the source {source_file}: {e}")
+
+                    if indexable and queue_indexing(doc_id):
+                        indexed_count += 1
 
                 except Exception as e:
                     session.rollback()
                     error_count += 1
+                    if copied_file and os.path.exists(copied_file):
+                        try:
+                            os.remove(copied_file)
+                        except OSError as cleanup_err:
+                            logger.warning(f"Could not remove partial copy {copied_file}: {cleanup_err}")
                     logger.error(f"Error importing {filename}: {e}", exc_info=True)
 
         finally:
@@ -874,11 +1030,14 @@ def bulk_import_documents_task(job_id, source_path, target_folder, project_id=No
             "imported": imported_count,
             "skipped": skipped_count,
             "errors": error_count,
-            "queued_for_indexing": indexed_count
+            "queued_for_indexing": indexed_count,
+            "skipped_private": skipped,
         }
-        
-        update_job_status("complete", f"Import complete: {imported_count} imported, {skipped_count} skipped, {error_count} errors", 
-                         100, stats)
+
+        update_job_status("complete",
+                          f"Import complete: {imported_count} imported, {skipped_count} skipped, "
+                          f"{error_count} errors{skipped_note}",
+                          100, stats)
         
         logger.info(f"Bulk import {job_id} completed: {stats}")
         return {

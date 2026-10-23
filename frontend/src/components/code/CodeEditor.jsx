@@ -10,7 +10,7 @@ import {
   PlayArrow as RunIcon,
   Psychology as AiIcon,
 } from "@mui/icons-material";
-import Editor from "@monaco-editor/react";
+import Editor from "../../utils/monaco";
 import { useTheme } from "@mui/material/styles";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
 

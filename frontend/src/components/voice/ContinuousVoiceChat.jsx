@@ -1321,57 +1321,59 @@ const ContinuousVoiceChat = React.forwardRef(({
 
     return (
       <Tooltip title={isProcessingAudio ? 'Processing...' : isListening ? 'Stop listening' : 'Start voice chat'}>
-        <IconButton
-          onClick={handleToggle}
-          disabled={processingQueue > 3}
-          sx={{
-            width: btnSize,
-            height: btnSize,
-            borderRadius: '50%',
-            backgroundColor: isProcessingAudio
-              ? '#7c4dff'
-              : isListening
-                ? (speechDetected ? '#ff1744' : '#2979ff')
-                : 'transparent',
-            color: isListening || isProcessingAudio ? '#fff' : 'text.primary',
-            border: isListening || isProcessingAudio ? '2px solid transparent' : 'none',
-            transition: 'all 0.2s ease',
-            boxShadow: isProcessingAudio
-              ? '0 0 16px rgba(124,77,255,0.6), 0 0 4px rgba(124,77,255,0.3) inset'
-              : isListening && speechDetected
-                ? '0 0 16px rgba(255,23,68,0.6), 0 0 4px rgba(255,23,68,0.3) inset'
-                : isListening
-                  ? '0 0 12px rgba(41,121,255,0.5)'
-                  : 'none',
-            animation: isProcessingAudio
-              ? `${pulseAnimation} 1.5s ease-in-out infinite`
-              : 'none',
-            p: 0,
-            '&:hover': {
+        <span>
+          <IconButton
+            onClick={handleToggle}
+            disabled={processingQueue > 3}
+            sx={{
+              width: btnSize,
+              height: btnSize,
+              borderRadius: '50%',
               backgroundColor: isProcessingAudio
-                ? '#651fff'
+                ? '#7c4dff'
                 : isListening
-                  ? (speechDetected ? '#d50000' : '#2962ff')
-                  : 'action.hover',
-            },
-          }}
-        >
-          <Box sx={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: btnSize * 0.6,
-            height: btnSize * 0.6,
-            color: 'inherit'
-          }}>
-            <CanvasWaveform 
-              isListening={isListening} 
-              speechDetected={speechDetected} 
-              waveformActive={waveformActive} 
-              compact={true}
-            />
-          </Box>
-        </IconButton>
+                  ? (speechDetected ? '#ff1744' : '#2979ff')
+                  : 'transparent',
+              color: isListening || isProcessingAudio ? '#fff' : 'text.primary',
+              border: isListening || isProcessingAudio ? '2px solid transparent' : 'none',
+              transition: 'all 0.2s ease',
+              boxShadow: isProcessingAudio
+                ? '0 0 16px rgba(124,77,255,0.6), 0 0 4px rgba(124,77,255,0.3) inset'
+                : isListening && speechDetected
+                  ? '0 0 16px rgba(255,23,68,0.6), 0 0 4px rgba(255,23,68,0.3) inset'
+                  : isListening
+                    ? '0 0 12px rgba(41,121,255,0.5)'
+                    : 'none',
+              animation: isProcessingAudio
+                ? `${pulseAnimation} 1.5s ease-in-out infinite`
+                : 'none',
+              p: 0,
+              '&:hover': {
+                backgroundColor: isProcessingAudio
+                  ? '#651fff'
+                  : isListening
+                    ? (speechDetected ? '#d50000' : '#2962ff')
+                    : 'action.hover',
+              },
+            }}
+          >
+            <Box sx={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: btnSize * 0.6,
+              height: btnSize * 0.6,
+              color: 'inherit'
+            }}>
+              <CanvasWaveform 
+                isListening={isListening} 
+                speechDetected={speechDetected} 
+                waveformActive={waveformActive} 
+                compact={true}
+              />
+            </Box>
+          </IconButton>
+        </span>
       </Tooltip>
     );
   }
@@ -1395,26 +1397,28 @@ const ContinuousVoiceChat = React.forwardRef(({
               : 'Click to start continuous listening'
           }
         >
-          <IconButton
-            onClick={handleToggle}
-            disabled={processingQueue > 3}
-            color={isListening ? 'error' : 'primary'}
-            size="large"
-            sx={{
-              border: 2,
-              borderColor: isListening ? 'error.main' : 'primary.main',
-              backgroundColor: isListening ? 'error.light' : 'transparent',
-              animation: isListening ? `${pulseAnimation} 2s ease-in-out infinite` : 'none',
-              width: 56,
-              height: 56,
-              '&:hover': {
-                backgroundColor: isListening ? 'error.main' : 'primary.light',
-                color: 'white'
-              }
-            }}
-          >
-            {isListening ? <MicIcon /> : <MicOffIcon />}
-          </IconButton>
+          <span>
+            <IconButton
+              onClick={handleToggle}
+              disabled={processingQueue > 3}
+              color={isListening ? 'error' : 'primary'}
+              size="large"
+              sx={{
+                border: 2,
+                borderColor: isListening ? 'error.main' : 'primary.main',
+                backgroundColor: isListening ? 'error.light' : 'transparent',
+                animation: isListening ? `${pulseAnimation} 2s ease-in-out infinite` : 'none',
+                width: 56,
+                height: 56,
+                '&:hover': {
+                  backgroundColor: isListening ? 'error.main' : 'primary.light',
+                  color: 'white'
+                }
+              }}
+            >
+              {isListening ? <MicIcon /> : <MicOffIcon />}
+            </IconButton>
+          </span>
         </Tooltip>
 
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexWrap: 'wrap' }}>
@@ -1465,7 +1469,7 @@ const ContinuousVoiceChat = React.forwardRef(({
             Click the microphone button or press Spacebar to start listening
           </Typography>
           {wakeWordEnabled && (
-            <Typography variant="body2" color="text.disabled" sx={{ mt: 1 }}>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
               Wake word mode is enabled — listener will start in passive mode
             </Typography>
           )}

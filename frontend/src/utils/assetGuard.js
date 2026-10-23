@@ -10,22 +10,26 @@ export function isLocalAssetUrl(url) {
   if (!url || typeof url !== "string") return false;
   const u = url.trim();
   if (!u) return false;
-  // Relative paths + inline data are always local.
-  if (u.startsWith("/") || u.startsWith("./") || u.startsWith("../")) return true;
   if (u.startsWith("data:") || u.startsWith("blob:")) return true;
+  // Resolve before judging: "//host/x" and "/\host/x" look relative, but the
+  // browser fetches both from another host.
   let host;
   try {
     host = new URL(u, window.location.origin).hostname;
   } catch {
-    // Unparseable but carries no scheme → treat as a relative/local reference.
-    return !/^[a-z][a-z0-9+.-]*:\/\//i.test(u);
+    // The browser cannot resolve it either, so there is nothing to load.
+    return false;
   }
   if (!host) return true;
   if (host === window.location.hostname) return true;
-  if (host === "127.0.0.1" || host === "localhost" || host === "::1") return true;
+  if (host === "127.0.0.1" || host === "localhost" || host === "[::1]") return true;
   // Private LAN ranges — the app is intentionally reachable on the local network.
-  if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) return true;
-  return false;
+  // IPv4 literals only: "10.example.com" is a public name.
+  const ip = host.match(/^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/);
+  if (!ip) return false;
+  const a = Number(ip[1]);
+  const b = Number(ip[2]);
+  return a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
 }
 
 // Inline SVG shown in place of a blocked remote image. Pure data URI — no network.
@@ -45,4 +49,75 @@ export const REMOTE_BLOCKED_PLACEHOLDER =
 // placeholder so the <img>/<video> never issues an outbound request.
 export function guardedMediaSrc(url) {
   return isLocalAssetUrl(url) ? url : REMOTE_BLOCKED_PLACEHOLDER;
+}
+
+// ── HTML put into the page (sticky notes) ─────────────────────────────────
+// Setting innerHTML loads every <img> in it at once, so remote media has to be
+// taken out of the string first. The original URL is kept on the element
+// (data-remote-*) and put back by unguardHtmlMedia before the HTML is saved,
+// so a note's content is not changed by being shown.
+const MEDIA_ATTRS = {
+  IMG: ["src", "srcset"],
+  SOURCE: ["src", "srcset"],
+  VIDEO: ["src", "poster"],
+  AUDIO: ["src"],
+  INPUT: ["src"],
+};
+const REMOTE_PREFIX = "data-remote-";
+const CSS_URL = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+
+function srcsetIsLocal(value) {
+  return value
+    .split(",")
+    .map((part) => part.trim().split(/\s+/)[0])
+    .filter(Boolean)
+    .every(isLocalAssetUrl);
+}
+
+function mayHoldMedia(html) {
+  return typeof html === "string" && /<(img|source|video|audio|input)\b|url\(/i.test(html);
+}
+
+export function guardHtmlMedia(html) {
+  if (!mayHoldMedia(html) || typeof DOMParser === "undefined") return html;
+  // A DOMParser document is inert: nothing in it is fetched.
+  const doc = new DOMParser().parseFromString(`<body>${html}</body>`, "text/html");
+  let changed = false;
+  doc.body.querySelectorAll("*").forEach((el) => {
+    for (const attr of MEDIA_ATTRS[el.tagName] || []) {
+      const value = el.getAttribute(attr);
+      if (value == null) continue;
+      const local = attr === "srcset" ? srcsetIsLocal(value) : isLocalAssetUrl(value);
+      if (local) continue;
+      el.setAttribute(REMOTE_PREFIX + attr, value);
+      if (attr === "src" && el.tagName === "IMG") el.setAttribute("src", REMOTE_BLOCKED_PLACEHOLDER);
+      else el.removeAttribute(attr);
+      changed = true;
+    }
+    const style = el.getAttribute("style");
+    if (style && /url\(/i.test(style)) {
+      const remote = [...style.matchAll(CSS_URL)].some((m) => !isLocalAssetUrl(m[2]));
+      if (remote) {
+        el.setAttribute(REMOTE_PREFIX + "style", style);
+        el.setAttribute("style", style.replace(CSS_URL, (m, q, u) => (isLocalAssetUrl(u) ? m : "none")));
+        changed = true;
+      }
+    }
+  });
+  return changed ? doc.body.innerHTML : html;
+}
+
+export function unguardHtmlMedia(html) {
+  if (typeof html !== "string" || !html.includes(REMOTE_PREFIX) || typeof DOMParser === "undefined") {
+    return html;
+  }
+  const doc = new DOMParser().parseFromString(`<body>${html}</body>`, "text/html");
+  doc.body.querySelectorAll("*").forEach((el) => {
+    for (const { name, value } of [...el.attributes]) {
+      if (!name.startsWith(REMOTE_PREFIX)) continue;
+      el.setAttribute(name.slice(REMOTE_PREFIX.length), value);
+      el.removeAttribute(name);
+    }
+  });
+  return doc.body.innerHTML;
 }

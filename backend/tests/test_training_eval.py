@@ -84,9 +84,18 @@ def progress(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def export_verified(monkeypatch):
-    """The pipeline exports only for a base model whose export is verified;
-    these tests are about the gate in front of that, so it counts as verified."""
+    """The pipeline exports only for a base model whose export is verified and
+    once the GGUF converter is installed; these tests are about the gate in
+    front of that, so both count as ready."""
     monkeypatch.setattr("backend.services.training_base_models.export_verified", lambda model_id: True)
+    monkeypatch.setattr("backend.services.training_gguf_converter.refusal_for", lambda entry: None)
+
+
+@pytest.fixture(autouse=True)
+def libraries_ready(monkeypatch):
+    """The training libraries count as installed and complete; the trainer
+    itself is a stand-in, and the refusal has its own tests."""
+    monkeypatch.setattr("backend.services.training_libraries.unavailable_reason", lambda: None)
 
 
 @pytest.fixture

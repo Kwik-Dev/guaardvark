@@ -117,3 +117,25 @@ export const getJobsGate = async () => {
   const res = await axios.get(`${API_BASE}/jobs/gate`);
   return res.data;
 };
+
+// GET /api/jobs/queue — the job arbiter's line (backend/services/job_arbiter.py):
+// {enabled, classes, queued: [{id, label, class, class_label, position, reason,
+//  blocked, can_run_now, ...}], paused: [...], running: [...], holds: [...],
+//  interactive_busy}. With job order off, `enabled` is false and the lists are empty.
+export const getJobQueue = async () => {
+  const res = await axios.get(`${API_BASE}/jobs/queue`);
+  return res.data;
+};
+
+// POST /api/jobs/queue/:id/move — direction "up" or "down". Returns the new
+// snapshot; 409 with {error} when job order is off or the item stopped waiting.
+export const moveQueuedJob = async (ticketId, direction) => {
+  const res = await axios.post(`${API_BASE}/jobs/queue/${encodeURIComponent(ticketId)}/move`, { direction });
+  return res.data;
+};
+
+// POST /api/jobs/queue/:id/run-now — for an item waiting on a swarm agent's GPU hold.
+export const runQueuedJobNow = async (ticketId) => {
+  const res = await axios.post(`${API_BASE}/jobs/queue/${encodeURIComponent(ticketId)}/run-now`);
+  return res.data;
+};

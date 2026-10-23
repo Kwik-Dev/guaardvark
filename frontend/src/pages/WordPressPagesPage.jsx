@@ -592,13 +592,15 @@ function WordPressPagesPage() {
                       </Tooltip>
                       {page.pull_status === "pulled" && page.process_status === "pending" && (
                         <Tooltip title="Process Now">
-                          <IconButton
-                            size="small"
-                            onClick={() => handleProcessPage(page.id)}
-                            disabled={isProcessing}
-                          >
-                            <AutoAwesomeIcon />
-                          </IconButton>
+                          <span>
+                            <IconButton
+                              size="small"
+                              onClick={() => handleProcessPage(page.id)}
+                              disabled={isProcessing}
+                            >
+                              <AutoAwesomeIcon />
+                            </IconButton>
+                          </span>
                         </Tooltip>
                       )}
                     </Stack>

@@ -58,6 +58,8 @@ import BreadcrumbNav from '../components/filesystem/BreadcrumbNav';
 import ImageThumbnailGrid from '../components/images/ImageThumbnailGrid';
 import ImagesContextMenu from '../components/images/ImagesContextMenu';
 import ImageLightbox from '../components/images/ImageLightbox';
+import FilmCard from '../components/images/FilmCard';
+import { fallbackBatchName } from '../utils/batchNames';
 import PublishModal from '../components/modals/PublishModal';
 import PageLayout from '../components/layout/PageLayout';
 import { MEDIA_TABS, MEDIA_LIBRARY_TAB, mediaTabIndexForPath } from '../constants/mediaTabs';
@@ -65,6 +67,7 @@ import { useAppStore } from '../stores/useAppStore';
 import { NAV_CHROME } from '../config/navCatalog';
 import { useLayout } from '../contexts/LayoutContext';
 import { useSnackbar } from '../components/common/SnackbarProvider';
+import { formatUiError } from '../utils/uiError';
 import { ContextualLoader } from '../components/common/LoadingStates';
 import { useStatus } from '../contexts/StatusContext';
 import axios from 'axios';
@@ -79,6 +82,7 @@ const IMAGES_ROOT_STORED_PATH = 'Images';
 const WINDOWS_STATE_ENDPOINT = '/api/state/images-windows';
 const API_BASE = '/api/files';
 const VIDEO_API_BASE = '/api/batch-video';
+const FILMS_API = '/api/production/films';
 
 // Grid configuration (same as DocumentsPage)
 const WINDOWS_COLS = 48;
@@ -159,8 +163,9 @@ const ImagesPage = () => {
   // Video Library tab state
   const [videoBatches, setVideoBatches] = useState([]);
   const [videoBatchDetails, setVideoBatchDetails] = useState({});
+  const [films, setFilms] = useState([]);
   const [videoLoading, setVideoLoading] = useState(false);
-  const [videoPlayer, setVideoPlayer] = useState(null); // { url, title, batchId, playlist, currentIndex }
+  const [videoPlayer, setVideoPlayer] = useState(null); // { url, title, downloadName, batchId, playlist, currentIndex }
   const [videoDeleteConfirm, setVideoDeleteConfirm] = useState(null);
 
   // Per-window refresh
@@ -236,9 +241,13 @@ const ImagesPage = () => {
 
       return { folders, files };
     } catch (err) {
-      // If /Images/ doesn't exist yet, treat as empty
+      // If /Images/ doesn't exist yet (404), it is simply empty; any other
+      // failure is said, so an outage does not look like an empty library.
       setRootFolders([]);
       setRootFiles([]);
+      if (err?.response?.status !== 404) {
+        showMessage?.(`Images could not be loaded: ${formatUiError(err?.response?.data) || formatUiError(err) || 'the request failed'}`, 'error');
+      }
       return { folders: [], files: [] };
     } finally {
       setLoading(false);
@@ -453,12 +462,41 @@ const ImagesPage = () => {
     }
   }, []);
 
+  // Film Crew films are filed in Documents, not in Video Gen batches, so they
+  // come from their own list and share the Videos grid with the batches.
+  const fetchFilms = useCallback(async () => {
+    try {
+      const res = await fetch(FILMS_API);
+      if (res.ok) {
+        const data = await res.json();
+        setFilms(data.films || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch films:', err);
+    }
+  }, []);
+
+  const refreshVideos = useCallback(() => {
+    fetchVideoBatches();
+    fetchFilms();
+  }, [fetchVideoBatches, fetchFilms]);
+
   // Load video batches when switching to Video Library tab
   useEffect(() => {
     if (activeTab === MEDIA_LIBRARY_TAB) {
-      fetchVideoBatches();
+      refreshVideos();
     }
-  }, [activeTab, fetchVideoBatches]);
+  }, [activeTab, refreshVideos]);
+
+  // Films and batches in one grid, newest first.
+  const videoCards = useMemo(() => {
+    const cards = [
+      ...films.map((film, index) => ({ kind: 'film', time: film.created_at, film, index })),
+      ...videoBatches.map((batch) => ({ kind: 'batch', time: batch.start_time, batch })),
+    ];
+    const ms = (t) => (t ? new Date(t).getTime() : 0);
+    return cards.sort((a, b) => ms(b.time) - ms(a.time));
+  }, [films, videoBatches]);
 
   const handlePlayVideo = useCallback((batchId, videoPath, startIndex) => {
     const details = videoBatchDetails[batchId];
@@ -476,6 +514,33 @@ const ImagesPage = () => {
 
   const handleDownloadVideoBatch = useCallback((batchId) => {
     window.open(`${VIDEO_API_BASE}/download/${batchId}`, '_blank');
+  }, []);
+
+  const handlePlayFilm = useCallback((index) => {
+    const playlist = films.map((f) => ({
+      item_id: `film-${f.production_id}`,
+      url: f.url,
+      title: f.name,
+      download_name: `${f.name}.mp4`,
+      thumbnail_url: f.poster_url,
+    }));
+    const target = playlist[index];
+    if (!target) return;
+    setVideoPlayer({
+      url: target.url,
+      title: target.title,
+      downloadName: target.download_name,
+      batchId: null,
+      playlist,
+      currentIndex: index,
+    });
+  }, [films]);
+
+  const handleDownloadFilm = useCallback((film) => {
+    const a = document.createElement('a');
+    a.href = film.url;
+    a.download = `${film.name}.mp4`;
+    a.click();
   }, []);
 
   const handleDeleteVideoBatch = useCallback(async (batchId) => {
@@ -516,15 +581,6 @@ const ImagesPage = () => {
         month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
       });
     } catch { return ''; }
-  }, []);
-
-  // Legacy batches predate display_name in metadata — pull a humane label
-  // out of "VideoBatch_MM-DD-YYYY_NNN" instead of slicing it to "VideoBatch_0".
-  const fallbackBatchName = useCallback((batchId) => {
-    if (!batchId) return 'Batch';
-    const m = batchId.match(/^VideoBatch_(\d{2})-(\d{2})-\d{4}_(\d+)$/);
-    if (m) return `${m[1]}/${m[2]} #${m[3]}`;
-    return batchId.replace(/^VideoBatch_/, '');
   }, []);
 
   // ──────────────────── Window State Persistence ────────────────────
@@ -1264,6 +1320,7 @@ const ImagesPage = () => {
       dragDropHandledRef.current = true;
 
       let successCount = 0;
+      const moveFailures = [];
       for (const item of itemsToMove) {
         try {
           if (item.itemType === 'folder' || item.type === 'folder') {
@@ -1278,7 +1335,8 @@ const ImagesPage = () => {
             successCount++;
           }
         } catch (itemErr) {
-          // Continue with other items
+          // Continue with other items; the ones that failed are named below.
+          moveFailures.push(`${item.filename || item.name || item.path}: ${formatUiError(itemErr?.response?.data) || formatUiError(itemErr)}`);
         }
       }
 
@@ -1293,6 +1351,12 @@ const ImagesPage = () => {
           });
           return updated;
         });
+      }
+      if (moveFailures.length) {
+        showMessage?.(
+          `${moveFailures.length} item(s) could not be moved — ${moveFailures.slice(0, 3).join('; ')}`,
+          'error',
+        );
       }
     } catch (err) {
       showMessage?.('Move failed', 'error');
@@ -1544,7 +1608,7 @@ const ImagesPage = () => {
 
   if (loading && activeTab === MEDIA_LIBRARY_TAB) {
     return (
-      <PageLayout title="Images">
+      <PageLayout title="Media">
         <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 400 }}>
           <ContextualLoader loading message="Loading images..." showProgress={false} inline />
         </Box>
@@ -1636,10 +1700,10 @@ const ImagesPage = () => {
                   pointerEvents: 'none', opacity: 0.5, gap: 1,
                 }}>
                   <BrandLogo size={64} sx={{ opacity: 0.4 }} />
-                  <Typography variant="h6" color="text.disabled">
+                  <Typography variant="h6" color="text.secondary">
                     No images yet
                   </Typography>
-                  <Typography variant="body2" color="text.disabled">
+                  <Typography variant="body2" color="text.secondary">
                     Generate images from the Image Gen tab or right-click to create a folder
                   </Typography>
                 </Box>
@@ -2096,25 +2160,39 @@ const ImagesPage = () => {
 
         {/* Video Batches Section — stacked thumbnails within Media Library */}
         {/* (still inside activeTab === MEDIA_LIBRARY_TAB conditional) */}
-        {videoBatches.length > 0 && (
+        {videoCards.length > 0 && (
           <Box sx={{ px: 2, pb: 2 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
               <Typography variant="subtitle1" sx={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 1 }}>
                 <VideocamIcon sx={{ fontSize: 20 }} />
                 Videos
-                <Chip label={videoBatches.length} size="small" variant="outlined" sx={{ height: 20, fontSize: '0.65rem' }} />
+                <Chip label={videoCards.length} size="small" variant="outlined" sx={{ height: 20, fontSize: '0.65rem' }} />
               </Typography>
               <Box sx={{ display: 'flex', gap: 0.5 }}>
                 <Button size="small" variant="outlined" startIcon={<VideoIcon />} onClick={() => window.open('/video', '_self')}>
                   Generate
                 </Button>
-                <IconButton size="small" onClick={fetchVideoBatches} disabled={videoLoading}>
+                <IconButton size="small" onClick={refreshVideos} disabled={videoLoading}>
                   <RefreshIcon fontSize="small" />
                 </IconButton>
               </Box>
             </Box>
             <Grid container spacing={2}>
-              {videoBatches.map((batch) => {
+              {videoCards.map((card) => {
+                if (card.kind === 'film') {
+                  return (
+                    <Grid item xs={6} sm={4} md={3} lg={2} key={`film-${card.film.production_id}`}>
+                      <FilmCard
+                        film={card.film}
+                        index={card.index}
+                        dateStr={formatVideoTime(card.film.created_at)}
+                        onPlay={handlePlayFilm}
+                        onDownload={handleDownloadFilm}
+                      />
+                    </Grid>
+                  );
+                }
+                const { batch } = card;
                 const details = videoBatchDetails[batch.batch_id];
                 const results = details?.results?.filter(r => r.success && r.video_path) || [];
                 const firstResult = results[0];
@@ -2208,7 +2286,7 @@ const ImagesPage = () => {
                           {displayName}
                         </Typography>
                         {batch.start_time && (
-                          <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.6rem' }}>
+                          <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.6rem' }}>
                             {formatVideoTime(batch.start_time)}
                           </Typography>
                         )}
@@ -2289,6 +2367,7 @@ const ImagesPage = () => {
         onArrangeIcons={handleArrangeIcons}
         onArrangeWindows={handleArrangeWindows}
         hasClipboard={Boolean(clipboard)}
+        hasOpenWindows={activeWindows.length > 0}
         hasSelection={selectedItems.size > 0}
         contextType={contextMenuType}
         selectedItem={contextMenuItem}
@@ -2311,7 +2390,10 @@ const ImagesPage = () => {
           onPublish={handlePublishFromLightbox}
           onImageEdited={() => {
             setLightbox(null);
+            // A copy lands beside the original, which may be inside an open
+            // folder window; those grids refetch only on their refresh key.
             refreshData();
+            refreshOpenWindows();
           }}
           hasPrev={lightbox.fileIndex > 0}
           hasNext={lightbox.fileIndex < lightbox.fileList.length - 1}
@@ -2444,9 +2526,10 @@ const ImagesPage = () => {
             const r = playlist[idx];
             setVideoPlayer(prev => ({
               ...prev,
-              url: `${VIDEO_API_BASE}/video/${batchId}/${r.video_path}`,
+              url: r.url || `${VIDEO_API_BASE}/video/${batchId}/${r.video_path}`,
               currentIndex: idx,
-              title: r.video_path?.split('/').pop() || `Video ${idx + 1}`,
+              title: r.title || r.video_path?.split('/').pop() || `Video ${idx + 1}`,
+              downloadName: r.download_name,
             }));
           };
           return (
@@ -2507,9 +2590,9 @@ const ImagesPage = () => {
                     '&::-webkit-scrollbar-thumb': { bgcolor: 'grey.700', borderRadius: 2 },
                   }}>
                     {playlist.map((r, idx) => {
-                      const thumbUrl = r.thumbnail_path
+                      const thumbUrl = r.thumbnail_url || (r.thumbnail_path
                         ? `${VIDEO_API_BASE}/video/${batchId}/${r.thumbnail_path}`
-                        : null;
+                        : null);
                       return (
                         <Box
                           key={r.item_id || idx}
@@ -2556,7 +2639,7 @@ const ImagesPage = () => {
                   <Button size="small" onClick={() => {
                     const a = document.createElement('a');
                     a.href = videoPlayer.url;
-                    a.download = videoPlayer.title;
+                    a.download = videoPlayer.downloadName || videoPlayer.title;
                     a.click();
                   }} startIcon={<DownloadIcon />}>
                     Download

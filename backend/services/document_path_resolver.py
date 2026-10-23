@@ -47,26 +47,51 @@ _GENERATOR_OUTPUT_BASES = [
 ]
 
 
+def _inside_install_outputs(path: Path) -> bool:
+    """True when ``path`` lies under this install's data folder or a known
+    generator output base, so a row's absolute path never reaches other files."""
+    root = _project_root()
+    bases = [root / b for b in ("data", *_GENERATOR_OUTPUT_BASES)]
+    try:
+        from backend.config import OUTPUT_DIR, STORAGE_DIR
+        bases += [Path(STORAGE_DIR), Path(OUTPUT_DIR)]
+    except Exception:  # noqa: BLE001 — the repo-relative bases still apply
+        pass
+    try:
+        real = path.resolve()
+    except (OSError, ValueError):
+        return False
+    for base in bases:
+        try:
+            real.relative_to(base.resolve())
+            return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 def _candidates_for_doc(doc) -> list[Path]:
     """Build an ordered list of paths to try for `doc`.
 
     Order:
-    1. Absolute Document.path (some legacy code stores absolute).
+    1. Absolute Document.path, when it is inside this install's folders.
     2. UPLOAD_BASE + Document.path (the canonical join).
     3. project-root + Document.path (relative to repo root).
     4. Each known generator output base + basename(path).
     5. Each known generator output base + Document.filename.
     """
     candidates: list[Path] = []
-    raw_path = (doc.path or "").lstrip("/")
+    stored = doc.path or ""
+    raw_path = stored.lstrip("/")
     filename = doc.filename or ""
 
     if not raw_path and not filename:
         return candidates
 
-    # 1. Absolute path stored as-is.
-    if raw_path.startswith("/"):
-        candidates.append(Path(raw_path))
+    # 1. Absolute path stored as-is (the Film Crew registers its outputs this
+    #    way), only inside this install's own data and generator folders.
+    if stored.startswith("/") and _inside_install_outputs(Path(stored)):
+        candidates.append(Path(stored))
 
     # 2. UPLOAD_BASE join — use existing helper if available.
     try:

@@ -601,74 +601,76 @@ const VoiceChatButton = ({
 
     return (
       <Tooltip title={isProcessing ? 'Processing...' : isRecording ? 'Stop recording' : 'Hold to push-to-talk (or click toggle). Wake-word gates passive only; buttons always visible.'}>
-        <IconButton
-          onClick={handleClick}
-          disabled={disabled || (isProcessing && !isRecording) || permission === 'denied' || !micEnabled}
-          sx={{
-            width: btnSize,
-            height: btnSize,
-            borderRadius: '50%',
-            backgroundColor: isProcessing
-              ? '#7c4dff'
-              : isRecording
-                ? '#ff1744'
-                : 'transparent',
-            color: isRecording || isProcessing ? '#fff' : 'text.primary',
-            border: isRecording || isProcessing ? '2px solid transparent' : 'none',
-            transition: 'all 0.2s ease',
-            boxShadow: isProcessing
-              ? '0 0 16px rgba(124,77,255,0.6), 0 0 4px rgba(124,77,255,0.3) inset'
-              : isRecording
-                ? `0 0 ${10 + recordingVolume * 14}px rgba(255,23,68,0.6)`
-                : 'none',
-            animation: isProcessing
-              ? `${pulseAnimation} 1.5s ease-in-out infinite`
-              : 'none',
-            p: 0,
-            '&:hover': {
+        <span>
+          <IconButton
+            onClick={handleClick}
+            disabled={disabled || (isProcessing && !isRecording) || permission === 'denied' || !micEnabled}
+            sx={{
+              width: btnSize,
+              height: btnSize,
+              borderRadius: '50%',
               backgroundColor: isProcessing
-                ? '#651fff'
+                ? '#7c4dff'
                 : isRecording
-                  ? '#d50000'
-                  : 'action.hover',
-            },
-          }}
-        >
-          <Box sx={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: '2.5px',
-            width: btnSize * 0.6,
-            height: btnSize * 0.6,
-          }}>
-            {Array.from({ length: numBars }).map((_, i) => {
-              const levelIndex = Math.floor((i / numBars) * (audioLevels.length || 1));
-              const realLevel = audioLevels[levelIndex] || 0;
-              const barHeight = isRecording && !isProcessing
-                ? Math.max(0.15, Math.min(1, realLevel * 2.0))
-                : idleHeights[i];
-              return (
-                <Box
-                  key={i}
-                  sx={{
-                    width: 3,
-                    borderRadius: 2,
-                    backgroundColor: 'currentColor',
-                    transition: 'height 50ms ease-out',
-                    height: isProcessing ? '40%' : `${barHeight * btnSize * 0.55}px`,
-                    minHeight: 3,
-                    opacity: 0.95,
-                    ...(isProcessing && {
-                      animation: `${waveformAnimation} ${0.6 + i * 0.12}s ease-in-out infinite`,
-                      animationDelay: `${i * 0.08}s`,
-                    }),
-                  }}
-                />
-              );
-            })}
-          </Box>
-        </IconButton>
+                  ? '#ff1744'
+                  : 'transparent',
+              color: isRecording || isProcessing ? '#fff' : 'text.primary',
+              border: isRecording || isProcessing ? '2px solid transparent' : 'none',
+              transition: 'all 0.2s ease',
+              boxShadow: isProcessing
+                ? '0 0 16px rgba(124,77,255,0.6), 0 0 4px rgba(124,77,255,0.3) inset'
+                : isRecording
+                  ? `0 0 ${10 + recordingVolume * 14}px rgba(255,23,68,0.6)`
+                  : 'none',
+              animation: isProcessing
+                ? `${pulseAnimation} 1.5s ease-in-out infinite`
+                : 'none',
+              p: 0,
+              '&:hover': {
+                backgroundColor: isProcessing
+                  ? '#651fff'
+                  : isRecording
+                    ? '#d50000'
+                    : 'action.hover',
+              },
+            }}
+          >
+            <Box sx={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '2.5px',
+              width: btnSize * 0.6,
+              height: btnSize * 0.6,
+            }}>
+              {Array.from({ length: numBars }).map((_, i) => {
+                const levelIndex = Math.floor((i / numBars) * (audioLevels.length || 1));
+                const realLevel = audioLevels[levelIndex] || 0;
+                const barHeight = isRecording && !isProcessing
+                  ? Math.max(0.15, Math.min(1, realLevel * 2.0))
+                  : idleHeights[i];
+                return (
+                  <Box
+                    key={i}
+                    sx={{
+                      width: 3,
+                      borderRadius: 2,
+                      backgroundColor: 'currentColor',
+                      transition: 'height 50ms ease-out',
+                      height: isProcessing ? '40%' : `${barHeight * btnSize * 0.55}px`,
+                      minHeight: 3,
+                      opacity: 0.95,
+                      ...(isProcessing && {
+                        animation: `${waveformAnimation} ${0.6 + i * 0.12}s ease-in-out infinite`,
+                        animationDelay: `${i * 0.08}s`,
+                      }),
+                    }}
+                  />
+                );
+              })}
+            </Box>
+          </IconButton>
+        </span>
       </Tooltip>
     );
   }

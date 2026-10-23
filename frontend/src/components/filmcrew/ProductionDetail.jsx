@@ -125,6 +125,31 @@ const ProductionDetail = ({
         </CollapsibleAlert>
       )}
 
+      {production.final_video && (
+        <Paper sx={{ p: 2, mb: 3 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+            <Typography variant="h6">Finished film</Typography>
+            <Button
+              size="small"
+              variant="outlined"
+              href={production.final_video.url}
+              download={production.final_video.filename}
+            >
+              Download
+            </Button>
+          </Box>
+          <Box
+            component="video"
+            key={production.final_video.document_id}
+            src={production.final_video.url}
+            controls
+            preload="metadata"
+            aria-label={`${production.name}, finished film`}
+            sx={{ width: '100%', maxHeight: 480, borderRadius: 1, bgcolor: 'common.black' }}
+          />
+        </Paper>
+      )}
+
       <VoiceFallbackNotice shots={production.shots} />
 
       <Paper sx={{ p: 2, mb: 3 }}>

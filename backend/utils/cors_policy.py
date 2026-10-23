@@ -30,11 +30,15 @@ Docker's nginx) passes to Flask, so for the browser those requests are
 same-origin and CORS never applies to them; Socket.IO still checks their Origin.
 
 The Interconnector is the one browser caller from other machines: a client
-node's Settings page calls its master's status, register and heartbeat routes
-directly (frontend/src/api/interconnectorService.js), from whatever origin
-that node's UI has. Those three routes, and only those, also accept any
-private-network or loopback origin. Register and heartbeat check the master's
-Interconnector key; status says only the node's name, mode and sync settings.
+node's Settings page checks its master's status route directly (Test
+Connection in frontend/src/api/interconnectorService.js), from whatever
+origin that node's UI has; status says only the node's name, mode and sync
+settings. A client enrols and heartbeats through its own backend, which signs
+each call with its node key (backend/utils/node_auth.py); calls between
+backends carry no Origin, so CORS does not apply to them. The register and
+heartbeat routes also accept private-network and loopback origins, like
+status, and only those three do; a page cannot produce the signature they
+require, so that lets no browser enrol or heartbeat.
 
 The same answer decides which pages may send a state-changing request at all
 (backend/utils/cross_site_guard.py), since CORS alone only stops a page from
@@ -65,7 +69,9 @@ DEFAULT_FLASK_PORT = "5000"
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 _SCHEMES = ("http", "https")
 
-# The master routes a client node's Settings page calls from the browser.
+# The master routes open to a client node's page: status, which its Test
+# Connection calls from the browser, and register and heartbeat, which its
+# backend calls signed (a browser cannot sign them).
 NODE_ROUTES = r"/api/interconnector/(?:status|nodes/register|nodes/[^/]+/heartbeat)/?"
 _PRIVATE_IPV4 = (
     r"(?:10(?:\.\d{1,3}){3}"
@@ -316,5 +322,8 @@ def init_cors(app, cors=None) -> list[str]:
         always_send=False,
         allow_headers=CORS_HEADERS,
         methods=CORS_METHODS,
+        # Paged list routes (GET /api/rules) put the real row count in these;
+        # a page served from another of this install's origins must see them.
+        expose_headers=["X-Total-Count", "X-Page", "X-Per-Page"],
     )
     return allowed_origins()

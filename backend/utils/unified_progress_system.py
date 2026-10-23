@@ -10,7 +10,7 @@ import subprocess
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Set
+from typing import Optional, Dict, Any, List, Set, Callable
 from enum import Enum
 import threading
 import time
@@ -18,6 +18,15 @@ import time
 from backend.utils.path_guard import PathEscapesRoot, contained
 
 logger = logging.getLogger(__name__)
+
+
+def _duration_words(seconds: float) -> str:
+    """A timer's length as a person says it: "40 minutes", "3 hours"."""
+    minutes = max(1, round(seconds / 60))
+    if minutes >= 60 and minutes % 60 == 0:
+        hours = minutes // 60
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    return f"{minutes} minute{'s' if minutes != 1 else ''}"
 
 
 def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
@@ -56,6 +65,7 @@ class ProcessType(Enum):
     WORDPRESS_PUSH = "wordpress_push"
     WORDPRESS_PROCESSING = "wordpress_processing"
     VIDEO_RENDER = "video_render"
+    UPSCALE = "upscale"
     OUTREACH = "outreach"
     UNKNOWN = "unknown"
 
@@ -220,6 +230,9 @@ class UnifiedProgressSystem:
         self._file_based_enabled = True
         self._socketio_enabled = True
         self._timeout_timers: Dict[str, threading.Timer] = {}
+        # Called once when a process is cancelled (Activity's Cancel), for an owner
+        # that cannot poll often enough to see the record before it is cleaned up.
+        self._cancel_listeners: Dict[str, Callable[[], None]] = {}
         self._gpu_monitor = GPUMonitor()
         self._gpu_monitoring_enabled = True
         # Set only by initialize(). A Celery worker reaches this singleton before
@@ -442,8 +455,21 @@ class UnifiedProgressSystem:
         message: str = "Cancelled",
         additional_data: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Cancel a process"""
-        return self._finish_process(process_id, ProcessStatus.CANCELLED, message, additional_data)
+        """Cancel a process, and tell its cancel listener if it has one."""
+        cancelled = self._finish_process(process_id, ProcessStatus.CANCELLED, message, additional_data)
+        with self._lock:
+            listener = self._cancel_listeners.pop(process_id, None)
+        if cancelled and listener:
+            try:
+                listener()
+            except Exception as e:  # a listener must not fail the cancel
+                logger.warning(f"Cancel listener for {process_id} failed: {e}")
+        return cancelled
+
+    def on_cancel(self, process_id: str, callback: Callable[[], None]) -> None:
+        """Call `callback` once if `process_id` is cancelled before it is cleaned up."""
+        with self._lock:
+            self._cancel_listeners[process_id] = callback
     
     def _finish_process(
         self,
@@ -501,7 +527,13 @@ class UnifiedProgressSystem:
         
         # Cancel any existing timeout timers since process is now finished
         self._cancel_timeout_timer(process_id)
-        
+        self._schedule_cleanup(process_id)
+
+        logger.info(f"Finished progress process: {process_id} ({status.value})")
+        return True
+
+    def _schedule_cleanup(self, process_id: str):
+        """Drop a finished process from memory and disk after a short delay."""
         # BUG FIX: Reduced cleanup delay from 30s to 5s
         # The 30s delay caused periodic frontend syncs (every 30s) to pull stale
         # completed jobs back into activeProcesses, preventing ProgressFooterBar from hiding
@@ -510,9 +542,60 @@ class UnifiedProgressSystem:
         # Housekeeping timers must never keep the interpreter alive at exit.
         cleanup_timer.daemon = True
         cleanup_timer.start()
-        self._timeout_timers[f"{process_id}_cleanup"] = cleanup_timer
-        
-        logger.info(f"Finished progress process: {process_id} ({status.value})")
+        with self._lock:
+            self._timeout_timers[f"{process_id}_cleanup"] = cleanup_timer
+
+    def apply_relayed_event(self, event_data: Dict[str, Any]) -> bool:
+        """Bring this process's copy of a job up to date from an event another
+        process published (the Redis relay in app.py).
+
+        A job created here and continued in a Celery worker (an upload's
+        indexing) is otherwise only updated in the worker, and the copy here
+        stays at its last value until its timeout marks it as an error. Only a
+        job this process already holds and has not finished is touched, and
+        nothing is emitted or published, so the relay cannot loop. The relay
+        also hears this process's own events; applying them again changes
+        nothing. A worker's "start" for a job held here is its re-creation of
+        the same id and is skipped.
+        """
+        process_id = str(event_data.get("job_id") or "")
+        try:
+            status = ProcessStatus(event_data.get("status"))
+        except ValueError:
+            return False
+        if not process_id or status == ProcessStatus.START:
+            return False
+        terminal = status in (ProcessStatus.COMPLETE, ProcessStatus.ERROR, ProcessStatus.CANCELLED)
+
+        with self._lock:
+            current = self._active_processes.get(process_id)
+            if current is None or current.status in (
+                    ProcessStatus.COMPLETE, ProcessStatus.ERROR, ProcessStatus.CANCELLED):
+                return False
+            progress = event_data.get("progress")
+            progress = int(progress) if isinstance(progress, (int, float)) else current.progress
+            message = event_data.get("message") or current.message
+            # This process's own updates come back through the relay unchanged.
+            if (status, progress, message) == (current.status, current.progress, current.message):
+                return False
+            event = ProgressEvent(
+                process_id=process_id,
+                progress=progress,
+                message=message,
+                status=status,
+                process_type=current.process_type,
+                additional_data=current.additional_data,
+            )
+            self._active_processes[process_id] = event
+            self._process_history.setdefault(process_id, []).append(event)
+            # Timers change under the same lock, so a request thread finishing
+            # or updating the job cannot interleave with them.
+            if terminal:
+                self._cancel_timeout_timer(process_id)
+                self._schedule_cleanup(process_id)
+            else:
+                ttl = 10800.0 if event.process_type == ProcessType.VIDEO_RENDER else 2400.0
+                self._schedule_timeout_timer(process_id, ttl)
         return True
     
     def _schedule_timeout_timer(self, process_id: str, timeout_seconds: float):
@@ -521,19 +604,22 @@ class UnifiedProgressSystem:
         self._cancel_timeout_timer(process_id)
         
         # Schedule new timeout timer
-        timeout_timer = threading.Timer(timeout_seconds, self._timeout_stuck_process, args=[process_id])
+        timeout_timer = threading.Timer(timeout_seconds, self._timeout_stuck_process, args=[process_id, timeout_seconds])
         timeout_timer.daemon = True
         timeout_timer.start()
-        self._timeout_timers[f"{process_id}_timeout"] = timeout_timer
+        with self._lock:
+            self._timeout_timers[f"{process_id}_timeout"] = timeout_timer
         
         logger.debug(f"Scheduled timeout timer for {process_id}: {timeout_seconds}s")
     
     def _cancel_timeout_timer(self, process_id: str):
         """Cancel timeout timer for a process"""
-        timeout_key = f"{process_id}_timeout"
-        if timeout_key in self._timeout_timers:
-            self._timeout_timers[timeout_key].cancel()
-            self._timeout_timers.pop(timeout_key, None)
+        # The relay thread, request threads and the timers themselves all change
+        # this dict; the lock is re-entrant, so callers already holding it are fine.
+        with self._lock:
+            timer = self._timeout_timers.pop(f"{process_id}_timeout", None)
+        if timer is not None:
+            timer.cancel()
             logger.debug(f"Cancelled timeout timer for {process_id}")
     
     def _emit_event(self, event: ProgressEvent):
@@ -723,7 +809,7 @@ class UnifiedProgressSystem:
         except Exception as e:
             logger.error(f"Failed to finish file tracking for {process_id}: {e}")
     
-    def _timeout_stuck_process(self, process_id: str):
+    def _timeout_stuck_process(self, process_id: str, timeout_seconds: Optional[float] = None):
         """Handle timeout for stuck processes"""
         with self._lock:
             # Check if process still exists before timing it out
@@ -742,7 +828,8 @@ class UnifiedProgressSystem:
             logger.warning(f"Process {process_id} timed out - marking as error")
         
         # Call error_process outside the lock to avoid deadlock
-        self.error_process(process_id, "Process timed out after 5 minutes")
+        waited = f" after {_duration_words(timeout_seconds)}" if timeout_seconds else ""
+        self.error_process(process_id, f"Process timed out{waited} without progress")
     
     def _cleanup_process(self, process_id: str):
         """Clean up completed processes from memory and file system"""
@@ -754,17 +841,18 @@ class UnifiedProgressSystem:
                     logger.info(f"Skipping cleanup for {process_id} — process is active (status={current.status.value})")
                     return
                 self._active_processes.pop(process_id, None)
+                self._process_history.pop(process_id, None)
+                self._cancel_listeners.pop(process_id, None)
                 logger.info(f"Cleaned up process from memory: {process_id}")
         
-        # Clean up all timers associated with this process
-        timers_to_remove = []
-        for timer_key in self._timeout_timers:
-            if timer_key.startswith(process_id):
-                self._timeout_timers[timer_key].cancel()
-                timers_to_remove.append(timer_key)
-        
-        for timer_key in timers_to_remove:
-            self._timeout_timers.pop(timer_key, None)
+        # Clean up this process's own timers: its exact keys, not a prefix match,
+        # which would also cancel the timers of a process whose id starts with this one.
+        with self._lock:
+            timers = [self._timeout_timers.pop(f"{process_id}{suffix}", None)
+                      for suffix in ("_timeout", "_cleanup")]
+        for timer in timers:
+            if timer is not None:
+                timer.cancel()
         
         # Also clean up file-based tracking
         if self._file_based_enabled:

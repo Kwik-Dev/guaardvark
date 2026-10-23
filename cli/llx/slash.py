@@ -12,6 +12,7 @@ from typing import Callable
 
 import click
 import typer
+from rich.markup import escape
 
 from llx import output
 from llx.command_catalog import COMMAND_META, COMMAND_TREE, suggest_command
@@ -122,12 +123,14 @@ class SlashRouter:
             if code not in (0, None):
                 msg = str(e).strip()
                 if msg:
-                    self._console.print(f"[llx.error]{msg}[/llx.error]")
+                    self._console.print(f"[llx.error]{escape(msg)}[/llx.error]")
         except SystemExit as e:
             if e.code not in (0, None):
                 self._console.print(f"[llx.error]Command failed (exit {e.code})[/llx.error]")
         except Exception as e:
-            self._console.print(f"[llx.error]Error in /{cmd}: {e}[/llx.error]")
+            # Escaped: an error carrying markup-like text (git's usage, a path in
+            # brackets) would otherwise raise here and end the REPL.
+            self._console.print(f"[llx.error]Error in /{escape(cmd)}: {escape(str(e))}[/llx.error]")
 
         return True
 
@@ -302,7 +305,7 @@ class SlashRouter:
             except Exception as e:
                 msg = str(e).strip()
                 if msg:
-                    self._console.print(f"[llx.error]Error: {msg}[/llx.error]")
+                    self._console.print(f"[llx.error]Error: {escape(msg)}[/llx.error]")
 
         self._commands[name] = handler
 
@@ -345,11 +348,11 @@ class SlashRouter:
             except click.ClickException as e:
                 msg = str(e).strip()
                 if msg:
-                    self._console.print(f"[llx.error]{msg}[/llx.error]")
+                    self._console.print(f"[llx.error]{escape(msg)}[/llx.error]")
             except Exception as e:
                 msg = str(e).strip()
                 if msg:
-                    self._console.print(f"[llx.error]Error: {msg}[/llx.error]")
+                    self._console.print(f"[llx.error]Error: {escape(msg)}[/llx.error]")
 
         self._commands[name] = handler
 
@@ -503,27 +506,29 @@ class SlashRouter:
 
     def _cmd_config(self, args: list[str]):
         """Show or set configuration values."""
-        from llx.config import load_config, save_config
+        from llx.config import effective_settings, load_config, mask_secret, resolve_server_url, save_config
 
         config = load_config()
+        # The settings this session actually uses, with where each came from;
+        # the server is the session's, which --server may have set.
+        server = self._state.get("server")
+        resolved, source = resolve_server_url()
+        rows = effective_settings(server or resolved, source if (not server or server == resolved) else "command line --server")
 
         if not args:
-            # Show all config
-            output.print_kv(
-                {k: str(v) for k, v in config.items()},
-                title="Configuration",
-            )
+            output.print_kv({name: f"{value}  ({where})" for name, value, where in rows},
+                            title="Configuration (in use)")
             return
 
         key = args[0]
 
         if len(args) == 1:
             # Show single key
-            val = config.get(key)
-            if val is None:
+            row = next((r for r in rows if r[0] == key), None)
+            if row is None or row[1] in ("None", "not set"):
                 self._console.print(f"[llx.dim]{key} is not set[/llx.dim]")
             else:
-                output.print_kv({key: str(val)})
+                output.print_kv({key: f"{row[1]}  ({row[2]})"})
             return
 
         # Set key = value
@@ -540,7 +545,8 @@ class SlashRouter:
 
         config[key] = parsed
         save_config(config)
-        self._console.print(f"[llx.success]Set {key} = {parsed}[/llx.success]")
+        shown = mask_secret(parsed) if ("key" in key or "token" in key) and parsed else parsed
+        self._console.print(f"[llx.success]Set {key} = {shown}[/llx.success]")
 
     def _cmd_theme(self, args: list[str]):
         """List or switch CLI themes."""
@@ -1043,44 +1049,42 @@ class SlashRouter:
             offset = int(parts.pop())
         path = " ".join(parts)
 
-        # Prefer backend read_code (existing agent tool) when connected
-        server = self._state.get("server")
-        used_backend = False
-        try:
-            from llx.client import get_client
-            client = get_client(server)
-            bres = client.execute_tool("read_code", {"filepath": path})
-            if bres.get("success"):
-                out = bres.get("result", {})
-                content = out.get("output", str(out))
-                self._console.print(f"[llx.dim]{path} (via backend read_code)[/llx.dim]")
-                try:
-                    self._console.print(Syntax(content[:8000], "python", line_numbers=True))
-                except Exception:
-                    self._console.print(content[:4000])
-                used_backend = True
-                from llx.working_memory import record_tool_use
+        # Prefer the backend's read_code when it can serve the file. The path is
+        # resolved against this CLI's working folder first: the backend resolves
+        # a relative one against its own. It takes no offset/limit, so a slice
+        # is always read here.
+        from llx.local_tools import _resolve_path
+        target = _resolve_path(path, self._state.get("cwd"))
+        content = None
+        why_local = None
+        if offset is None and limit is None:
+            try:
+                from llx.client import get_client
+                bres = get_client(self._state.get("server")).execute_tool("read_code", {"filepath": str(target)})
+            except Exception as e:  # offline or refused: read it here
+                bres = {"success": False, "error": str(e)}
+            result = bres.get("result") if isinstance(bres.get("result"), dict) else {}
+            if bres.get("success") and result.get("success", True) and isinstance(result.get("output"), str):
+                content = result["output"]
+                self._console.print(f"[llx.dim]{target} (via backend read_code)[/llx.dim]")
+                self._console.print(Syntax(content[:8000], "python", line_numbers=True))
+                from llx.working_memory import normalize_working_memory, record_tool_use
                 mem = normalize_working_memory(self._state.get("working_memory"))
-                record_tool_use(mem, "read_code", {"filepath": path})
+                record_tool_use(mem, "read_code", {"filepath": str(target)})
                 self._state["working_memory"] = mem
-        except Exception:
-            pass
+                path_for_mem = str(target)
+            else:
+                why_local = result.get("error") or bres.get("error")
 
-        if not used_backend:
-            res = read_file(path, offset=offset, limit=limit, cwd=self._state.get("cwd"))
+        if content is None:
+            res = read_file(target, offset=offset, limit=limit, cwd=self._state.get("cwd"))
             if "error" in res:
                 self._console.print(f"[llx.error]{res['error']}[/llx.error]")
                 return
-            content = res.get("content", "")
-            try:
-                syn = Syntax(content, "python", line_numbers=True, word_wrap=True)
-                self._console.print(f"[llx.dim]{res['path']} (local read; backend read_code preferred when online)[/llx.dim]")
-                self._console.print(syn)
-            except Exception:
-                self._console.print(content)
-            path_for_mem = res.get("path", path)
-        else:
-            path_for_mem = path
+            note = f"; backend read_code: {why_local}" if why_local else ""
+            self._console.print(f"[llx.dim]{res['path']} (local read{note})[/llx.dim]")
+            self._console.print(Syntax(res.get("content", ""), "python", line_numbers=True, word_wrap=True))
+            path_for_mem = res.get("path", str(target))
 
         from llx.working_memory import normalize_working_memory, apply_attachments
         mem = normalize_working_memory(self._state.get("working_memory"))
@@ -1161,7 +1165,7 @@ class SlashRouter:
             old_t, new_t = [x.strip() for x in rest.split(">>>", 1)]
 
         if old_t and new_t:
-            # Strongly prefer the real backend edit_code (guarded, audited, part of 70+ tool engine)
+            # Strongly prefer the real backend edit_code (guarded, audited, part of the backend tool engine)
             try:
                 from llx.client import get_client, LlxConnectionError, LlxError
                 client = get_client(server)
@@ -1330,7 +1334,11 @@ class SlashRouter:
                     "importance": 0.7
                 })
                 if mem_res.get("success"):
-                    self._console.print("[llx.dim]  (also saved to agent long-term memory via save_memory)[/llx.dim]")
+                    meta = (mem_res.get("result") or {}).get("metadata") or {}
+                    if meta.get("already_saved"):
+                        self._console.print("[llx.dim]  (already in agent long-term memory)[/llx.dim]")
+                    else:
+                        self._console.print("[llx.dim]  (also saved to agent long-term memory via save_memory)[/llx.dim]")
             except Exception:
                 pass  # non-fatal
         elif sub in ("done", "complete", "finish") and len(args) > 1:
@@ -1356,8 +1364,7 @@ class SlashRouter:
         from llx.local_tools import run_command
         target = " ".join(args).strip() or None
         if target:
-            res = run_command(f"git diff -- {target}", cwd=self._state.get("cwd"))
-            self._console.print(res.get("output", ""))
+            res = run_command(["git", "diff", "--", target], cwd=self._state.get("cwd"))
         else:
             # last recorded edit
             mem = self._state.get("working_memory") or {}
@@ -1365,7 +1372,17 @@ class SlashRouter:
             if last and last.get("path"):
                 self._console.print(f"[llx.dim]Last edit target was {last['path']}[/llx.dim]")
             res = run_command("git diff --stat", cwd=self._state.get("cwd"))
-            self._console.print(res.get("output", "(no git diff)"))
+        out = (res.get("output") or "").strip()
+        if not res.get("success"):
+            text = res.get("error") or out
+            if "not a git repository" in text.lower():
+                self._console.print("[llx.dim](not a git repository)[/llx.dim]")
+            else:
+                self._console.print(text or "(git diff failed)", markup=False, highlight=False)
+        elif not out:
+            self._console.print("[llx.dim](no git diff)[/llx.dim]")
+        else:
+            self._console.print(res["output"], markup=False, highlight=False)
 
     def _cmd_apply(self, args: list[str]):
         self._console.print("[llx.dim]/apply is currently an alias for confirming the last /edit. Use /edit directly.[/llx.dim]")
@@ -1613,7 +1630,7 @@ class SlashRouter:
         self._console.print("\n[llx.dim]Use /context for state, /tools for full list.[/llx.dim]")
 
     def _cmd_analyze(self, args: list[str]):
-        """Analyze a project/site (especially for CSS/styling improvements). Takes initiative: explores structure, reviews build.py, finds CSS, loads GUAARDVARK.md, creates todos."""
+        """Analyze a project/site (especially for CSS/styling improvements). Takes initiative: explores structure, reviews build.py, finds CSS, writes GUAARDVARK.md when the project has none (never overwrites one; /init --force rewrites it), loads it, creates todos."""
         from llx.utils import populate_project_context, find_project_root
         from llx.local_tools import read_file
         from llx.working_memory import normalize_working_memory, apply_todos
@@ -1630,7 +1647,8 @@ class SlashRouter:
                 from llx.utils import generate_and_write_guaardvark_md
                 gen_res = generate_and_write_guaardvark_md(root, force=False)
                 if gen_res.get("status") == "created":
-                    self._console.print(f"[llx.success]Auto-created GUAARDVARK.md at {gen_res.get('path')}[/llx.success]")
+                    self._console.print(f"[llx.success]Wrote GUAARDVARK.md at {gen_res.get('path')} (the project had none; "
+                                        f"/init --force rewrites it)[/llx.success]")
                     populate_project_context(mem, root)  # reload
             except Exception as e:
                 self._console.print(f"[llx.dim]Could not auto-create GUAARDVARK.md: {e}[/llx.dim]")

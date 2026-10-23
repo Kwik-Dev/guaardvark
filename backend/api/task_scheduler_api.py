@@ -171,7 +171,7 @@ def list_tasks():
 
         task_list = []
         for task in tasks:
-            handler_obj = registry.get_handler(task.task_handler) if task.task_handler else None
+            handler_obj = registry.get(task.task_handler) if task.task_handler else None
             task_list.append({
                 "id": task.id,
                 "job_id": task.job_id,

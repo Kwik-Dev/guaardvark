@@ -54,7 +54,7 @@ def _cast_required(subject, link) -> bool:
     )
 
 
-VALID_CAST_ACTIONS = {"use_existing_lora", "train_from_uploads", "train_from_generated"}
+VALID_CAST_ACTIONS = {"use_existing_lora", "train_from_uploads", "train_from_generated", "as_described"}
 
 
 def _dispatch_lora_train(subject_id: int) -> str | None:
@@ -140,6 +140,11 @@ def create():
         from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY, model_capabilities
         if video_model not in VIDEO_MODEL_REGISTRY or not model_capabilities(video_model):
             return jsonify({"error": f"video_model '{video_model}' is not a video model"}), 400
+    aspect_ratio = settings.get("aspect_ratio")
+    if aspect_ratio is not None:
+        from backend.services.production_service import FILM_ASPECT_RATIOS
+        if aspect_ratio not in FILM_ASPECT_RATIOS:
+            return jsonify({"error": f"aspect_ratio must be one of {list(FILM_ASPECT_RATIOS)}"}), 400
 
     svc = ProductionService(db.session)
     p = svc.create(name=name, script_text=script_text, project_id=project_id, settings=settings)
@@ -209,7 +214,7 @@ def get_production(prod_id):
     p = db.session.get(Production, prod_id)
     if p is None:
         return jsonify({"error": "not_found"}), 404
-    shots = [_shot_to_dict(s) for s in p.shots]
+    shots = [_shot_to_dict(s) for s in sorted(p.shots, key=lambda s: (s.scene_number or 0, s.shot_number or 0))]
     return jsonify({
         "id": p.id, "name": p.name,
         "status": p.status, "current_stage": p.current_stage,
@@ -219,9 +224,55 @@ def get_production(prod_id):
         "script_text": p.script_text,
         "settings_json": p.settings_json,
         "error_blob": p.error_blob,
+        "final_video": _final_video(p),
         "shots": shots,
         "final_video": _production_final_video(p),
     })
+
+
+def _final_video(p):
+    """The newest finished film of a production, or None before the first one."""
+    from backend.services.production_documents import production_outputs
+    films = production_outputs(p, "final")
+    if not films:
+        return None
+    doc = films[0]
+    return {
+        "document_id": doc.id,
+        "filename": doc.filename,
+        "path": doc.path,
+        "url": f"/api/files/document/{doc.id}/download",
+        "created_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
+    }
+
+
+def _poster_url(p):
+    """The first storyboard frame in script order, or None when nothing was drawn."""
+    shots = sorted(p.shots, key=lambda s: (s.scene_number or 0, s.shot_number or 0))
+    first = next((s for s in shots if s.storyboard_image_path), None)
+    if first is None:
+        return None
+    return f"/api/production/{p.id}/storyboard/shot/{first.id}/image"
+
+
+@bp.get("/films")
+def list_films():
+    """Every production's finished film, newest first. The Media Library lists
+    these beside the Video Gen batches; the films themselves are filed in
+    Documents under productions/<id>/final."""
+    films = []
+    for p in Production.query.all():
+        film = _final_video(p)
+        if film is None:
+            continue
+        films.append({
+            "production_id": p.id,
+            "name": p.name,
+            "poster_url": _poster_url(p),
+            **film,
+        })
+    films.sort(key=lambda f: f["created_at"] or "", reverse=True)
+    return jsonify({"films": films})
 
 
 @bp.delete("/<int:prod_id>")
@@ -327,6 +378,19 @@ def cast_subject(prod_id, subject_id):
     elif action == "train_from_generated":
         subj.training_status = "training"
         needs_dispatch = True
+
+    elif action == "as_described":
+        # Drawn from the script's description in each shot, with no LoRA: an
+        # unseen voice, a crowd, or a figure whose face may vary between shots.
+        # The choice is stored on this production's link, so the Cast Library
+        # subject other films share keeps its own setting.
+        from backend.models import ProductionSubject
+        link = ProductionSubject.query.filter_by(
+            production_id=prod_id, subject_id=subj.id
+        ).first()
+        if link is None:
+            return jsonify({"error": "subject is not part of this production"}), 404
+        link.cast_required = False
 
     # Commit the status transition BEFORE dispatching the Celery task. The
     # trainer reads training_status in a separate worker process/connection and

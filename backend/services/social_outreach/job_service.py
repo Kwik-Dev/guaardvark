@@ -13,7 +13,7 @@ import logging
 from typing import Any
 
 from backend.models import Task, db
-from backend.services.social_outreach import kill_switch, persona
+from backend.services.social_outreach import kill_switch, profile
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,15 @@ OUTREACH_TASK_TYPES = {
     "youtube_recon": "social_outreach_youtube",
     "draft": "social_outreach_draft",
     "discord": "social_outreach_discord",
+}
+
+# Runs that read an outside site, by what they read; with web access off they
+# are not queued, and each pass checks again when it runs.
+WEB_READING_RUNS = {
+    "social_outreach_youtube": "scout YouTube for outreach",
+    "social_outreach_recon": "scout Reddit for outreach",
+    "social_outreach_reddit": "scout Reddit for outreach",
+    "social_outreach_share": "scout Reddit for outreach",
 }
 
 
@@ -45,8 +54,8 @@ def queue_outreach_run(
 
     Raises:
         ValueError: unsupported platform.
-        RuntimeError: Outreach is disabled, web access is off for a YouTube
-            scout, or Celery submission fails.
+        RuntimeError: Outreach is disabled, web access is off for a run that
+            reads an outside site, or Celery submission fails.
     """
     normalized = (platform or "").strip().lower()
     task_type = OUTREACH_TASK_TYPES.get(normalized)
@@ -57,13 +66,10 @@ def queue_outreach_run(
     if not kill_switch.is_enabled():
         raise RuntimeError("outreach is disabled (kill switch is off)")
 
-    if task_type == "social_outreach_youtube":
-        # The YouTube scout sends its query to the web search engine, so it is
-        # not queued with web access off; the recon itself checks again when
-        # it runs (scout_youtube).
+    if task_type in WEB_READING_RUNS:
         from backend.utils.settings_utils import web_access_block_reason
 
-        blocked = web_access_block_reason("scout YouTube for outreach")
+        blocked = web_access_block_reason(WEB_READING_RUNS[task_type])
         if blocked:
             raise RuntimeError(blocked)
 
@@ -77,7 +83,10 @@ def queue_outreach_run(
     if link_url:
         workflow_config["link_url"] = link_url.strip()
     elif task_type == "social_outreach_share":
-        workflow_config["link_url"] = persona.SITE_URL
+        # No site in the profile: the executor skips the pass with the reason.
+        site = profile.site_url()
+        if site:
+            workflow_config["link_url"] = site
     if batch_size is not None:
         workflow_config["batch_size"] = max(1, min(int(batch_size), 25))
     if keyword_profiles:
@@ -153,7 +162,7 @@ def _task_description(platform: str, workflow_config: dict[str, Any]) -> str:
         subreddit = workflow_config.get("subreddit") or "next target from social_outreach_targets.json"
         return f"Discover and draft a Reddit Outreach comment for {subreddit}."
     if platform in ("self_share", "share"):
-        return "Draft a Guaardvark self-share link post through the supervised Outreach pipeline."
+        return "Draft a self-share link post through the supervised Outreach pipeline."
     if platform in ("youtube", "youtube_recon"):
         profiles = workflow_config.get("keyword_profiles") or ["configured profiles"]
         draft = " then draft" if workflow_config.get("chain_draft") else ""

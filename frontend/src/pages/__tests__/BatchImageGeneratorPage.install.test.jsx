@@ -44,8 +44,11 @@ const MODELS = {
 beforeEach(() => {
   global.fetch = vi.fn(async (url) => ({
     ok: true,
+    status: 200,
     headers: { get: () => "application/json" },
     json: async () => (String(url).endsWith("/batch-image/models") ? MODELS : {}),
+    // The page reads the model list through apiClient.handleResponse, which reads text().
+    text: async () => JSON.stringify(String(url).endsWith("/batch-image/models") ? MODELS : {}),
   }));
 });
 

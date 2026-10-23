@@ -12,6 +12,7 @@ export const PROCESS_TYPE_LABELS = {
   image_generation: "Image Gen",
   video_gen: "Video Gen",
   video_render: "Video Gen",
+  upscale: "Upscale",
   csv_processing: "CSV Gen",
   file_generation: "File Gen",
   analysis: "Analysis",
@@ -27,19 +28,20 @@ export const PROCESS_TYPE_LABELS = {
   wordpress_push: "WP Push",
   wordpress_processing: "WordPress",
   outreach: "Outreach",
+  code: "Code",
   processing: "Processing",
   unknown: "Working",
 };
 
 // Chip prefixes for the generation kinds people queue side by side.
-const CHIP_LABELS = { image_generation: "Image", video_gen: "Video", video_render: "Video" };
+const CHIP_LABELS = { image_generation: "Image", video_gen: "Video", video_render: "Video", upscale: "Upscale" };
 
 // Which running job leads when several run at once; waiting jobs always follow running ones.
 const PRIORITY = [
-  "production", "indexing", "video_gen", "video_render", "image_generation", "csv_processing",
+  "production", "indexing", "video_gen", "video_render", "image_generation", "upscale", "csv_processing",
   "file_generation", "analysis", "upload", "llm_processing", "web_scraping", "outreach", "backup",
   "training", "lora_train", "task_processing", "voice_processing", "document_processing",
-  "wordpress_pull", "wordpress_push", "wordpress_processing", "processing",
+  "wordpress_pull", "wordpress_push", "wordpress_processing", "code", "processing",
 ];
 
 export const TERMINAL_PROCESS_STATUSES = new Set(["complete", "end", "error", "cancelled"]);

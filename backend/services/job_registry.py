@@ -220,21 +220,57 @@ def adapt_experiment(row) -> Job:
 
 
 def adapt_demo_step(row) -> Job:
-    status = map_status(JobKind.DEMO, getattr(row, "status", None))
+    """DemoStep → Job.
+
+    A DemoStep row is a recorded action from learning mode: it is written
+    only after the action happened (stop_learning saves every step and marks
+    the demonstration complete in one commit; the replace-steps API rewrites
+    edited steps). The row carries no status or timestamps of its own, so a
+    stored step is a finished step. Mapping a missing status through
+    map_status would read as PENDING and list every recorded step as an
+    in-flight job forever.
+
+    Times come from the parent Demonstration (created_at / updated_at),
+    the closest record of when the step was recorded and saved.
+    """
+    native_status = getattr(row, "status", None)
+    status = map_status(JobKind.DEMO, native_status) if native_status else JobStatus.COMPLETED
+
+    parent = getattr(row, "demonstration", None)
+    started_at = getattr(parent, "created_at", None)
+    finished_at = getattr(parent, "updated_at", None) if status.is_terminal else None
+
+    action = getattr(row, "action_type", None)
+    target = (getattr(row, "target_description", None) or "").strip()
+    step_index = getattr(row, "step_index", None)
+    label = f"Demo step #{step_index if step_index is not None else row.id}"
+    if action:
+        label += f": {action}"
+    if target:
+        label += f" {target[:80]}"
+
     return Job(
         id=f"demo:{row.id}",
         kind=JobKind.DEMO,
         native_id=row.id,
         status=status,
-        label=getattr(row, "step_name", None) or f"Demo step #{row.id}",
+        label=label,
         progress=None,
-        started_at=getattr(row, "started_at", None),
-        finished_at=getattr(row, "completed_at", None) if status.is_terminal else None,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_s=_compute_duration(started_at, finished_at),
         cancellable=False,  # demo steps aren't user-cancellable
         parent_id=(
             f"demo:{row.demonstration_id}"
             if getattr(row, "demonstration_id", None) else None
         ),
+        metadata={
+            "step_index": step_index,
+            "action_type": action,
+            "is_mistake": bool(getattr(row, "is_mistake", False)),
+            "demonstration_name": getattr(parent, "name", None),
+            "demonstration_complete": getattr(parent, "is_complete", None),
+        },
     )
 
 

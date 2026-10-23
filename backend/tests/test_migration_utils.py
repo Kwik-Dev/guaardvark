@@ -85,3 +85,29 @@ def test_prune_keeps_chained_revisions(migrations_tree):
     assert "v2_6_1_baseline.py" in result["kept"]
     assert "v2_6_2_next.py" in result["kept"]
     assert result["heads_after"] == ["next_rev"]
+
+
+def test_a_migration_on_the_baseline_keeps_both(migrations_tree):
+    versions = migrations_tree / "versions"
+    _write_revision(versions / "v2_6_1_baseline.py", PREFERRED_BASELINE_REVISION, None)
+    _write_revision(versions / "v3_3_0_next.py", "v3_3_0_next", PREFERRED_BASELINE_REVISION)
+
+    result = prune_stale_migration_versions(str(migrations_tree))
+
+    assert result["removed"] == []
+    assert (versions / "v2_6_1_baseline.py").exists()
+    assert result["heads_after"] == ["v3_3_0_next"]
+
+
+def test_leftover_heads_lose_to_the_chain_on_the_baseline(migrations_tree):
+    # "zz_old" sorts after "v3_3_0_next": the chain is chosen by the baseline,
+    # not by name.
+    versions = migrations_tree / "versions"
+    _write_revision(versions / "v2_6_1_baseline.py", PREFERRED_BASELINE_REVISION, None)
+    _write_revision(versions / "v3_3_0_next.py", "v3_3_0_next", PREFERRED_BASELINE_REVISION)
+    _write_revision(versions / "zz_old.py", "zz_old", None)
+
+    result = prune_stale_migration_versions(str(migrations_tree))
+
+    assert result["removed"] == ["zz_old.py"]
+    assert result["heads_after"] == ["v3_3_0_next"]

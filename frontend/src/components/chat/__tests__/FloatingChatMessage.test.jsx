@@ -171,9 +171,41 @@ describe("FloatingChatMessage", () => {
     });
   });
 
+  describe("Generated media", () => {
+    it("shows a reply's generated picture and opens it in the lightbox", () => {
+      const msg = {
+        id: "a5",
+        role: "assistant",
+        content: "Here's the generated image.",
+        generatedImages: [{ url: "/api/outputs/fox.png", alt: "A fox", caption: "" }],
+      };
+      render(<FloatingChatMessage message={msg} />);
+
+      const picture = screen.getByAltText("A fox");
+      expect(picture).toHaveAttribute("src", "/api/outputs/fox.png");
+      expect(screen.getByText("Here's the generated image.")).toBeInTheDocument();
+
+      fireEvent.click(picture);
+      // The thumbnail plus the lightbox's full-size copy.
+      expect(screen.getAllByAltText("A fox")).toHaveLength(2);
+    });
+
+    it("plays a generated video", () => {
+      const msg = {
+        id: "a6",
+        role: "assistant",
+        content: "Here's the generated video.",
+        generatedImages: [{ url: "/api/outputs/clip.mp4", alt: "Generated video", type: "video" }],
+      };
+      const { container } = render(<FloatingChatMessage message={msg} />);
+      expect(container.querySelector("video")).toHaveAttribute("src", "/api/outputs/clip.mp4");
+    });
+  });
+
   describe("Fallback copying mechanism", () => {
     it("falls back to document.execCommand if clipboard API throws", async () => {
-      const execCommandMock = vi.fn();
+      // execCommand("copy") returns true when the copy succeeded; copyText reports that.
+      const execCommandMock = vi.fn().mockReturnValue(true);
       document.execCommand = execCommandMock;
 
       // Make navigator.clipboard throw

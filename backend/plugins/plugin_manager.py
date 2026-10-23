@@ -6,6 +6,7 @@ Manages plugin lifecycle and operations.
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -46,7 +47,43 @@ PLUGIN_COOLDOWN_S = 3.0           # per-plugin cooldown after release
 PLUGIN_COOLDOWN_GPU_S = 8.0       # longer for GPU plugins (more state to settle)
 GLOBAL_COOLDOWN_S = 2.0           # global cooldown across all plugin ops
 GLOBAL_COOLDOWN_AFTER_GPU_S = 8.0  # global cooldown after a GPU op (CUDA needs to settle)
-GPU_EXCLUSIVE_PLUGIN_IDS = {'ollama', 'comfyui'}  # mirror of frontend constant
+# Served to the Plugins page as each plugin's `gpu_exclusive` flag, so the
+# page and the gate agree on which plugins contend for the GPU.
+GPU_EXCLUSIVE_PLUGIN_IDS = {'ollama', 'comfyui'}
+
+# The Ollama card's "I run Ollama myself: never start or stop it" switch. The
+# settings API writes it to .env; start.sh and stop.sh read it from there.
+OLLAMA_EXTERNAL_ENV = "GUAARDVARK_OLLAMA_EXTERNAL"
+OLLAMA_EXTERNAL_SWITCH = "I run Ollama myself: never start or stop it"
+
+
+def ollama_is_external() -> bool:
+    """True when the user runs Ollama themselves.
+
+    .env is what the card's switch writes and what the next start.sh reads,
+    so it wins while the backend runs; the exported variable only counts when
+    there is no .env to read (a hand-run backend).
+    """
+    try:
+        from backend.profiles import env_file, read_env_value
+        if env_file().is_file():
+            value = read_env_value(OLLAMA_EXTERNAL_ENV)
+        else:
+            value = os.environ.get(OLLAMA_EXTERNAL_ENV)
+    except Exception:
+        value = os.environ.get(OLLAMA_EXTERNAL_ENV)
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _ollama_external_refusal(verb: str) -> Dict[str, Any]:
+    return {
+        'success': False,
+        'error': (
+            f'Not {verb}: the Ollama card has "{OLLAMA_EXTERNAL_SWITCH}" on, so '
+            f'Guaardvark leaves it alone. Turn that switch off to manage Ollama here.'
+        ),
+        'external': True,
+    }
 
 
 class PluginOperationGate:
@@ -284,25 +321,36 @@ class PluginManager:
         self._gate = PluginOperationGate()  # Traffic light for rapid clicks
         # plugin_id -> why the process on its port is not ours (see _instance_check).
         self._instance_problems: Dict[str, str] = {}
+        # plugin_id -> what its start script warned about (see _note_start_warnings).
+        self._start_warnings: Dict[str, str] = {}
 
         # Initialize status for all plugins
         self._init_plugin_status()
     
-    def _init_plugin_status(self):
-        """Initialize plugin status and restore previously running plugins."""
-        # Seed the in-memory `metadata.config.enabled` from the user_enabled
-        # overlay before anything else looks at it. After this point, that
-        # field reflects the EFFECTIVE state (user pref ∨ manifest default)
-        # for the rest of this process's lifetime. enable_plugin/disable_plugin
-        # keep it in sync on subsequent toggles. plugin.json on disk stays
-        # untouched — it's the canonical default for fresh installs.
+    def _seed_enabled_from_prefs(self) -> None:
+        """Seed the in-memory `metadata.config.enabled` from the user_enabled
+        overlay before anything else looks at it. After this point, that
+        field reflects the EFFECTIVE state (user pref ∨ manifest default)
+        for the rest of this process's lifetime. enable_plugin/disable_plugin
+        keep it in sync on subsequent toggles. plugin.json on disk stays
+        untouched — it's the canonical default for fresh installs."""
         prefs = self.state_store.get_user_enabled()
         if prefs:
             for plugin_id, metadata in self.registry.get_all_plugins().items():
                 if plugin_id in prefs:
                     metadata.config.enabled = bool(prefs[plugin_id])
 
-        # First pass: detect what's already running and kill orphans
+    def _probe_plugin_status(self, *, kill_orphans: bool) -> None:
+        """Record what is running now for every registered plugin.
+
+        ``kill_orphans`` is the boot-time cleanup: a disabled plugin whose
+        service still answers is killed, unless it is core, another enabled
+        plugin depends on it, or it sits on the backend's own port. A user-
+        triggered refresh passes False and only reads: a process on a disabled
+        plugin's port may be the user's own (an Ollama they run themselves, a
+        ComfyUI from another checkout) and the Refresh button never promised
+        to stop anything.
+        """
         for plugin_id, metadata in self.registry.get_all_plugins().items():
             if metadata.config.enabled:
                 if self._check_service_running(metadata):
@@ -312,7 +360,7 @@ class PluginManager:
             else:
                 # Plugin is disabled — kill orphans, but never touch core services
                 # or services that other enabled plugins depend on
-                if metadata.type == 'service' and self._check_service_running(metadata):
+                if kill_orphans and metadata.type == 'service' and self._check_service_running(metadata):
                     if metadata.core:
                         logger.info(f"Core plugin '{plugin_id}' is disabled but running on port {metadata.port} — leaving it alone")
                     elif self._has_enabled_dependents(plugin_id):
@@ -328,6 +376,34 @@ class PluginManager:
                         logger.warning(f"Disabled plugin '{plugin_id}' has orphan process on port {metadata.port} — killing it")
                         self._kill_by_port(metadata.port)
                 self._plugin_status[plugin_id] = PluginStatus.DISABLED
+
+    def reload(self) -> List[str]:
+        """Rescan the plugins directory and re-read every plugin's state.
+
+        The Plugins page's Refresh button. No orphan is killed and nothing is
+        started or restored, which is what a boot does (see
+        _init_plugin_status). The persisted running set only grows here, as
+        in _refresh_status: a plugin that crashed and is refreshed on stays
+        listed, so the next start brings it back. Returns the discovered
+        plugin ids.
+        """
+        discovered = self.registry.refresh()
+        self._seed_enabled_from_prefs()
+        self._probe_plugin_status(kill_orphans=False)
+        for plugin_id in list(self._plugin_status):
+            if not self.registry.is_registered(plugin_id):
+                self._plugin_status.pop(plugin_id, None)
+                self._instance_problems.pop(plugin_id, None)
+        self._persist_running_additions()
+        self._broadcast_plugins_status("refresh")
+        return discovered
+
+    def _init_plugin_status(self):
+        """Initialize plugin status and restore previously running plugins."""
+        self._seed_enabled_from_prefs()
+
+        # First pass: detect what's already running and kill orphans
+        self._probe_plugin_status(kill_orphans=True)
 
         # Second pass: start plugins that were running last time.
         # Always dedup the persisted list (defensive; prior races or old bugs could
@@ -401,13 +477,14 @@ class PluginManager:
     
     @staticmethod
     def _backend_port() -> Optional[int]:
-        """Return the main Flask backend's port (FLASK_PORT env, default 5002).
+        """Return the main Flask backend's port (see backend_http.backend_port).
         Used to short-circuit orphan-kill logic when a plugin manifest's port
         collides with the backend's own port — see the gpu_embedding case."""
+        from backend.utils.backend_http import backend_port
         try:
-            return int(os.environ.get("FLASK_PORT", "5002"))
+            return int(backend_port())
         except (TypeError, ValueError):
-            return 5002
+            return 5000
 
     @staticmethod
     def _service_url(metadata: PluginMetadata) -> Optional[str]:
@@ -460,6 +537,54 @@ class PluginManager:
             problems[plugin_id] = problem
         else:
             self.__dict__.setdefault('_instance_problems', {}).pop(plugin_id, None)
+
+    _WARNING_LINE = re.compile(r"^\s*warning:\s*(.+?)\s*$", re.IGNORECASE)
+    # A warning that still holds once the start completed says what will not
+    # work. Anything else the script went on to verify or retry: "returned
+    # non-zero (continuing to verify)", "backend not reachable (bot will start
+    # anyway)", the health wait the manager repeats itself.
+    _LASTING_WARNING = re.compile(
+        r"will (fail|return error|be unavailable)|unavailable|until .*installed",
+        re.IGNORECASE,
+    )
+
+    def _note_start_warnings(self, plugin_id: str, stdout: str) -> None:
+        """Keep what a start script warned about, for the card.
+
+        A start script reports a missing optional tool as a ``Warning:`` line
+        and exits 0 (video_editor: melt, auto-editor), so the plugin runs and
+        the page said Running with nothing more. Only lasting warnings are
+        kept (see _LASTING_WARNING), and a path in one is shown in display
+        form, never absolute.
+        """
+        from backend.utils.display_paths import display_text
+
+        warnings: List[str] = []
+        for line in (stdout or "").splitlines():
+            match = self._WARNING_LINE.match(line)
+            if not match or "health" in line.lower():
+                continue
+            text = match.group(1)
+            if not self._LASTING_WARNING.search(text):
+                continue
+            warnings.append(display_text(text))
+        store = self.__dict__.setdefault('_start_warnings', {})
+        if warnings:
+            store[plugin_id] = " ".join(warnings)
+            logger.warning(f"Plugin '{plugin_id}' started with warnings: {store[plugin_id]}")
+        else:
+            store.pop(plugin_id, None)
+
+    def _clear_start_warnings(self, plugin_id: str) -> None:
+        self.__dict__.setdefault('_start_warnings', {}).pop(plugin_id, None)
+
+    def _status_message(self, plugin_id: str) -> Optional[str]:
+        """What the card shows under the description: a stranger on the port
+        first (the plugin is then not running at all), else its start warnings."""
+        problem = self.__dict__.setdefault('_instance_problems', {}).get(plugin_id)
+        if problem:
+            return problem
+        return self.__dict__.setdefault('_start_warnings', {}).get(plugin_id)
 
     @staticmethod
     def _local_model_files(plugin_dir: Optional[Path], subdirs: List[str], extensions: List[str]) -> set:
@@ -736,15 +861,22 @@ class PluginManager:
                 # don't leave them UNKNOWN or flap them to STOPPED like a dead server.
                 self._plugin_status[plugin_id] = PluginStatus.RUNNING
         if came_up:
-            try:
-                running = set(self.state_store.get_running())
-                now_running = {pid for pid, st in self._plugin_status.items()
-                               if st == PluginStatus.RUNNING
-                               and getattr(self.registry.get_plugin(pid), 'type', None) == 'service'}
-                if not now_running <= running:
-                    self.state_store.set_running(list(running | now_running))
-            except Exception as e:  # noqa: BLE001 — persistence must never break a listing
-                logger.debug(f"could not persist running set after refresh: {e}")
+            self._persist_running_additions()
+
+    def _persist_running_additions(self) -> None:
+        """Add every answering service to the persisted running set; never
+        remove one. A service that crashed stays listed so the next boot
+        restores it (see _refresh_status); only a stop or a disable takes a
+        plugin off the list, through _save_running."""
+        try:
+            running = set(self.state_store.get_running())
+            now_running = {pid for pid, st in self._plugin_status.items()
+                           if st == PluginStatus.RUNNING
+                           and getattr(self.registry.get_plugin(pid), 'type', None) == 'service'}
+            if not now_running <= running:
+                self.state_store.set_running(list(running | now_running))
+        except Exception as e:  # noqa: BLE001 — persistence must never break a listing
+            logger.debug(f"could not persist running set after refresh: {e}")
     
     def _fail_plugin_start(self, plugin_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         # Core pillars (e.g. ollama — the inference backbone) are exempt from the
@@ -851,6 +983,31 @@ class PluginManager:
             logger.info(f"Plugin '{plugin_id}' (type={metadata.type}) marked ready — no service to start")
             return {'success': True, 'message': 'Enabled — runs on demand via the task queue (no server to start).'}
 
+        # The user's own Ollama is never started by Guaardvark. start.sh only
+        # checks that it answers; the card does the same instead of running
+        # plugins/ollama/scripts/start.sh (sudo systemctl start, ollama serve).
+        if plugin_id == 'ollama' and ollama_is_external():
+            if self._check_service_running(metadata):
+                self._plugin_status[plugin_id] = PluginStatus.RUNNING
+                self._save_running()
+                self._broadcast_plugins_status(f"start:{plugin_id}:external")
+                return {
+                    'success': True,
+                    'message': 'Using the Ollama you run yourself (Guaardvark never starts or stops it)',
+                    'external': True,
+                }
+            self._plugin_status[plugin_id] = PluginStatus.STOPPED
+            self._broadcast_plugins_status(f"start:{plugin_id}:external")
+            return {
+                'success': False,
+                'error': (
+                    f'Nothing answers at {self._service_url(metadata)} and the Ollama card has '
+                    f'"{OLLAMA_EXTERNAL_SWITCH}" on. Start your Ollama, or turn that switch off '
+                    f'to let Guaardvark start it.'
+                ),
+                'external': True,
+            }
+
         # ── Traffic light: rate-limit rapid clicks and enforce GPU exclusivity ──
         acquired, cooldown, reason = self._gate.try_acquire(plugin_id)
         if not acquired:
@@ -895,6 +1052,7 @@ class PluginManager:
 
             # Set status to starting
             self._plugin_status[plugin_id] = PluginStatus.STARTING
+            self._clear_start_warnings(plugin_id)
 
             # Try to find and run start script
             start_script = plugin_dir / 'scripts' / 'start.sh'
@@ -936,6 +1094,8 @@ class PluginManager:
                     return self._fail_plugin_start(
                         plugin_id, {'success': False, 'error': f'Start script failed: {detail}'}
                     )
+
+                self._note_start_warnings(plugin_id, result.get('stdout', ''))
 
                 # Wait for the service to answer, for as long as its manifest
                 # says a start takes (config.timeout, ComfyUI 60 s). A fixed
@@ -1016,6 +1176,14 @@ class PluginManager:
             self._broadcast_plugins_status(f"stop:{plugin_id}:disabled")
             return {'success': True, 'message': 'Plugin is disabled'}
 
+        # The user's own Ollama is never stopped by Guaardvark: the top-level
+        # stop.sh honours the switch, and so does the card. Without this the
+        # card's Off ran plugins/ollama/scripts/stop.sh (sudo systemctl stop,
+        # kill by port) against a daemon the switch promised to leave alone.
+        if plugin_id == 'ollama' and ollama_is_external():
+            self._broadcast_plugins_status(f"stop:{plugin_id}:external")
+            return _ollama_external_refusal('stopped')
+
         # ── Traffic light: rate-limit rapid clicks and enforce GPU exclusivity ──
         acquired, cooldown, reason = self._gate.try_acquire(plugin_id)
         if not acquired:
@@ -1067,6 +1235,7 @@ class PluginManager:
 
                     if not self._check_service_running(metadata):
                         self._plugin_status[plugin_id] = PluginStatus.STOPPED
+                        self._clear_start_warnings(plugin_id)
                         self._save_running()
                         logger.info(f"Plugin stopped: {plugin_id}")
                         return {
@@ -1094,6 +1263,7 @@ class PluginManager:
 
             if not self._check_service_running(metadata):
                 self._plugin_status[plugin_id] = PluginStatus.STOPPED
+                self._clear_start_warnings(plugin_id)
                 self._save_running()
                 logger.info(f"Plugin stopped: {plugin_id}")
                 return {'success': True, 'message': 'Plugin stopped successfully'}
@@ -1230,6 +1400,14 @@ class PluginManager:
         if not self.registry.is_registered(plugin_id):
             return {'success': False, 'error': f'Plugin not found: {plugin_id}'}
 
+        # Off on the Ollama card unloads its models and stops the daemon. With
+        # "I run Ollama myself" on, neither is Guaardvark's to do, and a card
+        # reading Disabled over a daemon still serving would be a lie, so the
+        # toggle is refused with the reason instead.
+        if plugin_id == "ollama" and ollama_is_external():
+            self._broadcast_plugins_status(f"disable:{plugin_id}:external")
+            return _ollama_external_refusal('turned off')
+
         # ComfyUI disable must also kill in-flight VideoGen batches even when the
         # sidecar is already stopped — the backend worker can still be spinning.
         if plugin_id == "comfyui":
@@ -1267,6 +1445,7 @@ class PluginManager:
             metadata.config.enabled = False
 
         self._plugin_status[plugin_id] = PluginStatus.DISABLED
+        self._clear_start_warnings(plugin_id)
         logger.info(f"Plugin disabled (user pref): {plugin_id}")
         self._broadcast_plugins_status(f"disable:{plugin_id}")
         return {'success': True, 'message': 'Plugin disabled'}
@@ -1408,15 +1587,17 @@ class PluginManager:
         if not metadata:
             return {'error': f'Plugin not found: {plugin_id}'}
         
-        plugin_dir = self.registry.get_plugin_dir(plugin_id)
         status = self._plugin_status.get(plugin_id, PluginStatus.UNKNOWN)
-        
+
         info = metadata.to_dict()
         info['status'] = status.value
         info['running'] = status == PluginStatus.RUNNING
-        info['plugin_dir'] = str(plugin_dir) if plugin_dir else None
-        if plugin_id in self._instance_problems:
-            info['status_message'] = self._instance_problems[plugin_id]
+        # Display form (plugins/<id>), the same as the listing: this reaches
+        # the browser, the CLI and MCP clients.
+        info['plugin_dir'] = self.registry.display_plugin_dir(plugin_id) or None
+        status_message = self._status_message(plugin_id)
+        if status_message:
+            info['status_message'] = status_message
         
         # Add health info if running
         if status == PluginStatus.RUNNING:
@@ -1435,10 +1616,12 @@ class PluginManager:
             status = self._plugin_status.get(plugin_id, PluginStatus.UNKNOWN)
             plugin_info['status'] = status.value
             plugin_info['running'] = status == PluginStatus.RUNNING
-            if plugin_id in self._instance_problems:
-                plugin_info['status_message'] = self._instance_problems[plugin_id]
+            status_message = self._status_message(plugin_id)
+            if status_message:
+                plugin_info['status_message'] = status_message
             # Round to 1 decimal so the frontend doesn't get noisy fractional updates
             plugin_info['cooldown_remaining'] = round(self._gate.cooldown_remaining(plugin_id), 1)
+            plugin_info['gpu_exclusive'] = plugin_id in GPU_EXCLUSIVE_PLUGIN_IDS
             result.append(plugin_info)
 
         return result

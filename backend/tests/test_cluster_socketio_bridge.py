@@ -1,11 +1,20 @@
 from unittest.mock import MagicMock, patch
 import pytest
 
+# Stands in for this machine's signed handshake (backend/utils/node_auth.py).
+_HANDSHAKE = {"gx_node": "n1", "gx_cert": "c", "gx_ts": "1", "gx_nonce": "n" * 16, "gx_sig": "s"}
 
-def test_bridge_open_connects_with_api_key():
+
+@pytest.fixture(autouse=True)
+def _signed_handshake(monkeypatch):
+    import backend.services.cluster_socketio_bridge as bridge_mod
+    monkeypatch.setattr(bridge_mod, "socket_auth", lambda: dict(_HANDSHAKE))
+
+
+def test_bridge_open_connects_with_a_signed_handshake():
     from backend.services.cluster_socketio_bridge import SocketIOChatBridge
     from backend.services.cluster_proxy import NodeTarget
-    target = NodeTarget("n2", "192.168.1.20", 5002, "secret-key")
+    target = NodeTarget("n2", "192.168.1.20", 5002)
     with patch("socketio.Client") as mock_client_cls:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
@@ -13,15 +22,16 @@ def test_bridge_open_connects_with_api_key():
         bridge.open()
         mock_client.connect.assert_called_once()
         call_kwargs = mock_client.connect.call_args.kwargs
-        # api_key passed via headers AND auth
-        assert call_kwargs.get("headers", {}).get("X-Guaardvark-API-Key") == "secret-key"
-        assert call_kwargs.get("auth", {}).get("api_key") == "secret-key"
+        assert call_kwargs["auth"] == _HANDSHAKE
+        # No node id sent as a key, in a header or the auth payload.
+        assert "X-Guaardvark-API-Key" not in (call_kwargs.get("headers") or {})
+        assert "api_key" not in call_kwargs["auth"]
 
 
 def test_bridge_forward_send_emits_chat_send():
     from backend.services.cluster_socketio_bridge import SocketIOChatBridge
     from backend.services.cluster_proxy import NodeTarget
-    bridge = SocketIOChatBridge("sess-1", NodeTarget("n2", "h", 5002, "k"))
+    bridge = SocketIOChatBridge("sess-1", NodeTarget("n2", "h", 5002))
     bridge._client = MagicMock()
     bridge.forward_send({"message": "hi"})
     bridge._client.emit.assert_called_once_with("chat:send", {"message": "hi"})
@@ -34,7 +44,7 @@ def test_bridge_forward_send_opens_lazily():
     with patch("socketio.Client") as mock_cls:
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
-        bridge = SocketIOChatBridge("sess-1", NodeTarget("n2", "h", 5002, "k"))
+        bridge = SocketIOChatBridge("sess-1", NodeTarget("n2", "h", 5002))
         bridge.forward_send({"message": "hi"})
         # open should have been called (via forward_send's lazy open)
         mock_client.connect.assert_called_once()
@@ -45,7 +55,7 @@ def test_registry_reuses_bridge_per_session():
     from backend.services.cluster_socketio_bridge import SocketIOBridgeRegistry
     from backend.services.cluster_proxy import NodeTarget
     SocketIOBridgeRegistry._bridges.clear()
-    target = NodeTarget("n2", "h", 5002, "k")
+    target = NodeTarget("n2", "h", 5002)
     with patch("backend.services.cluster_socketio_bridge.SocketIOChatBridge"):
         b1 = SocketIOBridgeRegistry.get_or_create("sess-regA", target)
         b2 = SocketIOBridgeRegistry.get_or_create("sess-regA", target)

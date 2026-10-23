@@ -7,6 +7,7 @@ import React, { useEffect, useState } from "react";
 import PageLayout from "../components/layout/PageLayout";
 import CollapsibleAlertSnackbar from "../components/common/CollapsibleAlertSnackbar";
 import {
+  Alert,
   Box,
   Typography,
   Grid,
@@ -64,6 +65,18 @@ import copyText from "../utils/copyText";
 import { ApiKeyRefusalAlert } from "../components/common/ApiKeyRefusalNotice";
 import { useStatus } from "../contexts/StatusContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
+
+// A parameter the test dialog has no value for yet. A false checkbox or a
+// 0 counts as a value; only an empty field does not.
+const isBlank = (value) => value === "" || value === null || value === undefined;
+
+// Names of the tool's required parameters still blank in the dialog; Execute
+// stays off while any remain, so the API's "missing parameters" refusal is
+// never the first the person hears of them.
+const missingRequiredParams = (tool, params) =>
+  Object.entries(tool?.parameters || {})
+    .filter(([name, param]) => param.required && isBlank(params?.[name]))
+    .map(([name]) => name);
 
 const ToolsPage = () => {
   const { activeModel, isLoadingModel, modelError } = useStatus();
@@ -216,12 +229,13 @@ const ToolsPage = () => {
     }
   };
 
-  const copyToClipboard = (text) => {
-    navigator.clipboard.writeText(text);
+  const copyToClipboard = async (text) => {
+    // copyText falls back to execCommand: navigator.clipboard is absent over plain http on the LAN.
+    const ok = await copyText(text);
     setSnackbar({
       open: true,
-      message: "Copied to clipboard",
-      severity: "success",
+      message: ok ? "Copied to clipboard" : "Could not copy to the clipboard",
+      severity: ok ? "success" : "error",
     });
   };
 
@@ -285,6 +299,7 @@ const ToolsPage = () => {
   );
 
   const sortedFilteredTools = sortTools(filteredTools);
+  const missingParams = missingRequiredParams(selectedTool, testParams);
 
   // Render tool card
   const renderToolCard = (tool) => {
@@ -768,31 +783,46 @@ const ToolsPage = () => {
                 {selectedTool.description}
               </Typography>
 
+              {selectedTool.requires_approval && (
+                <Alert severity="warning" sx={{ mb: 3 }}>
+                  Execute runs this tool for real, right away, without the
+                  approval step chat asks for first.
+                </Alert>
+              )}
+
               <Typography variant="subtitle2" sx={{ mb: 2 }}>
                 Parameters
               </Typography>
 
               {Object.entries(selectedTool.parameters || {}).map(
-                ([name, param]) => (
-                  <TextField
-                    key={name}
-                    fullWidth
-                    label={`${name}${param.required ? " *" : ""}`}
-                    helperText={`${param.description} (${param.type})`}
-                    value={testParams[name] || ""}
-                    onChange={(e) =>
-                      setTestParams((prev) => ({
-                        ...prev,
-                        [name]: e.target.value,
-                      }))
-                    }
-                    sx={{ mb: 2 }}
-                    required={param.required}
-                    type={param.type === "int" ? "number" : "text"}
-                    multiline={param.type === "string" && name.includes("content")}
-                    rows={param.type === "string" && name.includes("content") ? 3 : 1}
-                  />
-                )
+                ([name, param]) => {
+                  const missing = missingParams.includes(name);
+                  return (
+                    <TextField
+                      key={name}
+                      fullWidth
+                      label={`${name}${param.required ? " *" : ""}`}
+                      helperText={
+                        missing
+                          ? `Required. ${param.description} (${param.type})`
+                          : `${param.description} (${param.type})`
+                      }
+                      error={missing}
+                      value={testParams[name] || ""}
+                      onChange={(e) =>
+                        setTestParams((prev) => ({
+                          ...prev,
+                          [name]: e.target.value,
+                        }))
+                      }
+                      sx={{ mb: 2 }}
+                      required={param.required}
+                      type={param.type === "int" ? "number" : "text"}
+                      multiline={param.type === "string" && name.includes("content")}
+                      rows={param.type === "string" && name.includes("content") ? 3 : 1}
+                    />
+                  );
+                }
               )}
 
               {testResult?.authRefused && (
@@ -821,7 +851,8 @@ const ToolsPage = () => {
                   <Paper
                     sx={{
                       p: 2,
-                      bgcolor: "grey.100",
+                      bgcolor: "grey.900",
+                      color: "grey.100",
                       fontFamily: "monospace",
                       fontSize: 12,
                       whiteSpace: "pre-wrap",
@@ -841,7 +872,7 @@ const ToolsPage = () => {
           <Button
             variant="contained"
             onClick={handleExecuteTest}
-            disabled={testLoading}
+            disabled={testLoading || missingParams.length > 0}
             startIcon={testLoading ? <CircularProgress size={16} /> : <PlayArrow />}
           >
             Execute

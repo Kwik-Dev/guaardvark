@@ -1,8 +1,13 @@
 """
-Outward-facing persona block + canonical Guaardvark copy.
+Outward-facing persona block for social outreach.
 
 Lives here so every social-outreach surface (Discord cog, Reddit loop, self-share)
 pulls from the same source of truth. Don't fork these strings.
+
+Facts about what is being promoted come from the local profile
+(backend/services/social_outreach/profile.py) and, when present,
+data/agent/PITCH.md. Nothing here names a product: a fresh install drafts
+nothing until its profile is filled in.
 """
 
 import json
@@ -10,38 +15,19 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 import ollama
 
+from backend.services.social_outreach import profile
+from backend.utils.hosts import host_matches
+
 logger = logging.getLogger(__name__)
 
-SITE_URL = "https://guaardvark.com"
-GITHUB_URL = "https://github.com/guaardvark/guaardvark"
-GOTHAM_RISING_URL = "https://www.youtube.com/watch?v=8MdtM3HurJo"
-# Guaardvark channel Shorts — cite when a quick demo fits better than the long Gotham piece.
-SHORT_RH0_URL = "https://www.youtube.com/shorts/rh0LJRK_jAM"
-SHORT_YRO_URL = "https://www.youtube.com/shorts/YrOCJnW9SoA"
-MARKETING_VIDEOS = (
-    {"id": "rh0LJRK_jAM", "label": "Channel Short A", "url": SHORT_RH0_URL},
-    {"id": "YrOCJnW9SoA", "label": "Channel Short B", "url": SHORT_YRO_URL},
-    {"id": "8MdtM3HurJo", "label": "Gotham Rising demo", "url": GOTHAM_RISING_URL},
-)
-
-# One-line pitch — kept for the /social-outreach/persona API endpoint and
-# any legacy import that still expects a string here. The CANONICAL pitch
-# (and the thing the model actually reads at draft time) lives in
-# data/agent/PITCH.md and is loaded via _load_pitch_md() below. Edits to
-# PITCH.md go live on the next draft call without a restart.
-GUAARDVARK_PITCH = (
-    "Guaardvark is a self-hosted AI workstation. Local-first. Your machine, "
-    "your data, your rules."
-)
-
-# Path to the human-editable pitch sheet. The recon agent's regex feature
-# matcher (RELEVANCE_KEYWORDS) is structural and stays in code; this file
-# is for the LLM-facing facts the model reads every draft.
+# Path to the human-editable pitch sheet. When present it is what the model
+# reads at draft time, ahead of the sheet built from the profile. Edits go
+# live on the next draft call without a restart.
 _PITCH_MD_PATH = Path(
     os.environ.get("GUAARDVARK_ROOT") or Path(__file__).resolve().parents[3]
 ) / "data" / "agent" / "PITCH.md"
@@ -64,7 +50,6 @@ def _load_pitch_md() -> str:
     try:
         st = _PITCH_MD_PATH.stat()
     except FileNotFoundError:
-        logger.warning("PITCH.md not found at %s", _PITCH_MD_PATH)
         return ""
     except OSError as e:
         logger.warning("PITCH.md stat failed: %s", e)
@@ -80,70 +65,43 @@ def _load_pitch_md() -> str:
     _pitch_cache = (st.st_mtime, content)
     return content
 
-# One-line hooks for each feature. Pick whichever maps to the thread context.
-FEATURE_BLURBS = {
-    "local_ai": "everything runs locally on your hardware — no cloud, no API keys",
-    "screen_control": "the agent sees your screen and drives apps via vision + servo, not just chat",
-    "video_gen": "video generation pipeline runs on a single desktop GPU (Gotham Rising + channel Shorts were made with it)",
-    "comfyui": "ComfyUI-friendly local workflows for image and video gen on one desktop GPU",
-    "stable_diffusion": "local Stable Diffusion / image pipelines without cloud queues",
-    "open_source_github": "MIT-licensed on GitHub — clone it, run it locally, no cloud account",
-    "upscaling": "image and video upscaling to 4K/8K locally",
-    "rag": "RAG over your own documents, indexed locally with LlamaIndex + Postgres",
-    "embeddings": "local embeddings (Ollama / Qwen) for RAG — vectors stay on your machine",
-    "three_tier_brain": "three-tier neural routing — reflexes fire under 100ms, instinct in one LLM call, deliberation only when the problem actually needs it",
-    "swarms": "parallel Claude/Ollama agents in isolated git worktrees with a real dependency DAG",
-    "coding": "local coding agents with real tools — edit, test, and ship without sending your repo to the cloud",
-    "voice": "voice interface so you can talk to it",
-    "voice_cloning": "local voice cloning / TTS (Piper, Bark, RVC-style) — no cloud voice API",
-    "load_balancing": "multi-model / GPU-aware load balancing for local inference",
-    "ollama_native": "uses Ollama as the default LLM backend, with a pluggable abstraction so you're not locked in",
-    "open_source": "MIT-licensed, self-hostable, no telemetry",
-}
 
-# Words/phrases in a thread that suggest a feature is relevant. Order matters
-# (first match wins) — put specific angles before broad ones.
-RELEVANCE_KEYWORDS = [
-    (r"\b(rvc|so[\s-]?vits|voice\s*clon(e|ing)|xtts|openvoice)\b", "voice_cloning"),
-    (r"\b(piper|bark\s*tts|coqui|local\s*tts)\b", "voice_cloning"),
-    (r"\b(whisper|speech[\s-]?to[\s-]?text|stt)\b", "voice"),
-    (r"\b(voice|tts|text[\s-]?to[\s-]?speech)\b", "voice"),
-    (r"\b(embedd(ing|ings)|qwen3?\s*embed|nomic[\s-]?embed|vector\s*embed)\b", "embeddings"),
-    (r"\b(rag|retrieval|llamaindex|vector\s*db|chat\s*with\s*docs)\b", "rag"),
-    (r"\b(load\s*balanc|multi[\s-]?gpu|vllm|tensor\s*parallel|model\s*router)\b", "load_balancing"),
-    (r"\b(comfy\s*ui|comfyui)\b", "comfyui"),
-    (r"\b(stable\s*diffusion|automatic1111|a1111|forge\s*ui|sdxl|flux\.1)\b", "stable_diffusion"),
-    (r"\b(video\s*gen|text2video|hunyuan|wan\s*2|sora|runway|offline\s*video)\b", "video_gen"),
-    (r"\b(coding\s*agent|code\s*agent|aider|continue\.dev|local\s*copilot|ai\s*coding)\b", "coding"),
-    (r"\b(screen\s*control|computer\s*use|browser\s*agent|automate\s*click|gui\s*agent|agent\s*tools)\b", "screen_control"),
-    (r"\b(swarm|multi[\s-]?agent|parallel\s*agent|crewai|autogen)\b", "swarms"),
-    (r"\b(upscal(e|ing)|esrgan|4k|8k)\b", "upscaling"),
-    (r"\b(react\s*loop|tool\s*use|agent\s*router|routing\s*engine)\b", "three_tier_brain"),
-    (r"\b(github\.com|open[\s-]?source|self[\s-]?host(able|ed)?\s*ai\s*workstation)\b", "open_source_github"),
-    (r"\b(ollama|local\s*llm|llama\.cpp|self\s*host(ed)?|local\s*ai|offline\s*ai)\b", "local_ai"),
-]
-
-# Framing prepended to PITCH.md when generating outward-facing copy. The
-# old version of this block carried voice rules + a forbidden-phrases
-# blocklist + an opinionated grading rubric — all of which kneecapped
-# friendlier model families and forced every output through Gemma4's
-# guarded register. Now we trust the model's natural voice and let
-# PITCH.md carry the facts. If a model's natural voice drifts off-tone,
-# nudge the file, not the code.
 # Operator identity for outward-facing copy. A fresh install must NEVER post under
 # a real person's name, so this defaults to a generic, name-free reference. Set
 # GUAARDVARK_OPERATOR_NAME in your .env to personalize the voice (recommended — so
 # your outreach reads as a person, not a faceless brand).
 _OPERATOR_NAME = (os.environ.get("GUAARDVARK_OPERATOR_NAME") or "").strip()
-_ACCOUNT_REF = f"{_OPERATOR_NAME}'s Guaardvark account" if _OPERATOR_NAME else "the Guaardvark account"
-_VIDEO_OWNER_REF = (
-    f"{_OPERATOR_NAME}'s own Guaardvark YouTube videos" if _OPERATOR_NAME
-    else "the Guaardvark channel's own YouTube videos"
-)
 
-_OUTWARD_FACING_FRAMING = (
-    f"You are writing a comment or post under {_ACCOUNT_REF}.\n"
-    """The pitch sheet below is the source of truth — don't invent features
+
+def _product_name() -> str:
+    """The profile's name, or a neutral stand-in when none is set."""
+    return profile.load().name or "the project"
+
+
+def _account_ref() -> str:
+    name = profile.load().name
+    if not name:
+        return f"{_OPERATOR_NAME}'s account" if _OPERATOR_NAME else "your own account"
+    return f"{_OPERATOR_NAME}'s {name} account" if _OPERATOR_NAME else f"the {name} account"
+
+
+def _video_owner_ref() -> str:
+    name = profile.load().name
+    if not name:
+        return f"{_OPERATOR_NAME}'s own YouTube videos" if _OPERATOR_NAME else "your own YouTube videos"
+    return (
+        f"{_OPERATOR_NAME}'s own {name} YouTube videos" if _OPERATOR_NAME
+        else f"the {name} channel's own YouTube videos"
+    )
+
+
+# Framing prepended to the pitch sheet when generating outward-facing copy.
+# It carries no voice rules, no forbidden-phrase list and no opinionated
+# rubric: those kneecapped friendlier model families and forced every output
+# through one guarded register. The model writes in its own voice and the
+# pitch sheet carries the facts. If a model's natural voice drifts off-tone,
+# nudge the sheet, not the code.
+_OUTWARD_FACING_FRAMING = """The pitch sheet below is the source of truth — don't invent features
 that aren't in it, don't fabricate URLs, don't claim more than what's
 written. Within those guardrails, write in your own voice.
 
@@ -163,7 +121,6 @@ than to force a mention.
 
 Return JSON: {"draft": "<comment text>", "grade": 0.0-1.0, "reason": "<one line>"}.
 """
-)
 
 # Framing for SELF-SHARE posts (we're submitting our own link to a community,
 # not commenting on someone else's thread). Distinct from _OUTWARD_FACING_FRAMING
@@ -172,27 +129,22 @@ Return JSON: {"draft": "<comment text>", "grade": 0.0-1.0, "reason": "<one line>
 # model to refuse a legitimate share task ("there's no thread, so I'll skip").
 # We also leave the JSON SHAPE to the user prompt so reddit can ask for
 # {title, body} and discord/etc can ask for {draft}.
-_SHARE_FRAMING_SYSTEM = (
-    f"You are writing a SELF-SHARE post under {_ACCOUNT_REF}.\n"
-    """This is a fresh top-level post (or message), NOT a reply to an existing
+_SHARE_FRAMING_SYSTEM = """This is a fresh top-level post (or message), NOT a reply to an existing
 thread. The pitch sheet below is the source of truth — don't invent
 features that aren't in it, don't fabricate URLs, don't claim more than
 what's written. Within those guardrails, write in your own voice.
 
-Self-grade the draft 0.0-1.0 on "does this introduce Guaardvark in a way
+Self-grade the draft 0.0-1.0 on "does this introduce {name} in a way
 that respects the target community's vibe and doesn't read as low-effort
 spam?". 0.7+ is post-worthy. The user prompt specifies the exact JSON
 schema to return — follow that schema, not a generic one.
 """
-)
 
 
-# Framing for REPLIES on Guaardvark's OWN YouTube videos. Different audience
+# Framing for REPLIES on the account's OWN YouTube videos. Different audience
 # (already engaged, watched the video) so different posture (no pitch,
-# no link, no marketing gate). Same factual ground from PITCH.md.
-_REPLY_FRAMING = (
-    f"You are writing a REPLY to a comment left on one of {_VIDEO_OWNER_REF}.\n"
-    """The viewer already watched and engaged — you
+# no link, no marketing gate). Same factual ground from the pitch sheet.
+_REPLY_FRAMING = """The viewer already watched and engaged — you
 are NOT pitching to a stranger. Be human about it. Don't paste the link,
 don't recap the video, don't sell. Answer questions if asked, take critique
 on the merits, acknowledge kindness briefly without overselling gratitude.
@@ -207,50 +159,52 @@ off-topic, wholly generic praise), return draft="" and grade=0.0.
 
 Return JSON: {"draft": "<reply text>", "grade": 0.0-1.0, "reason": "<one line>"}.
 """
-)
 
 
 def _pitch_sheet() -> str:
-    """PITCH.md when present; otherwise a sheet from the one-line pitch and
-    FEATURE_BLURBS, so a fresh install's drafter still reads the facts the
-    framing calls the source of truth."""
+    """PITCH.md when present; otherwise a sheet built from the profile. ""
+    when neither exists: there is nothing to promote."""
     pitch = _load_pitch_md().strip()
     if pitch:
         return pitch
-    features = "\n".join(f"- {blurb}" for blurb in FEATURE_BLURBS.values())
-    return f"{GUAARDVARK_PITCH}\n\nWhat it does:\n{features}"
+    return profile.load().pitch_sheet()
 
 
 def _compose_outward_facing_system() -> str:
-    """Build the system message: framing + PITCH.md. Re-read on every call
-    via the mtime-cached loader, so edits to PITCH.md propagate without
-    restarting the worker."""
+    """Build the system message: framing + pitch sheet. Both are re-read on
+    every call (mtime-cached), so edits propagate without restarting the worker."""
+    framing = f"You are writing a comment or post under {_account_ref()}.\n{_OUTWARD_FACING_FRAMING}"
     pitch = _pitch_sheet()
     if not pitch:
-        return _OUTWARD_FACING_FRAMING
-    return f"{_OUTWARD_FACING_FRAMING}\n\n--- PITCH SHEET ---\n{pitch}\n"
+        return framing
+    return f"{framing}\n\n--- PITCH SHEET ---\n{pitch}\n"
 
 
 def _compose_reply_system() -> str:
     """Same idea as _compose_outward_facing_system but for replies-on-own-video."""
+    framing = f"You are writing a REPLY to a comment left on one of {_video_owner_ref()}.\n{_REPLY_FRAMING}"
     pitch = _pitch_sheet()
     if not pitch:
-        return _REPLY_FRAMING
-    return f"{_REPLY_FRAMING}\n\n--- PITCH SHEET (factual reference only) ---\n{pitch}\n"
+        return framing
+    return f"{framing}\n\n--- PITCH SHEET (factual reference only) ---\n{pitch}\n"
 
 
 def _compose_share_system() -> str:
     """Same idea as _compose_outward_facing_system but for self-share posts."""
+    framing = (
+        f"You are writing a SELF-SHARE post under {_account_ref()}.\n"
+        + _SHARE_FRAMING_SYSTEM.format(name=_product_name())
+    )
     pitch = _pitch_sheet()
     if not pitch:
-        return _SHARE_FRAMING_SYSTEM
-    return f"{_SHARE_FRAMING_SYSTEM}\n\n--- PITCH SHEET ---\n{pitch}\n"
+        return framing
+    return f"{framing}\n\n--- PITCH SHEET ---\n{pitch}\n"
 
 
 # Back-compat: anywhere in the codebase that imported these constants
-# directly still works. The value is now framing-only (no facts) — callers
-# that want the full pitch should use draft_outreach_text, which always
-# composes facts in via PITCH.md.
+# directly still works. The value is framing-only (no facts and no account
+# line) — callers that want the full prompt should use draft_outreach_text,
+# which always composes the pitch sheet in.
 OUTWARD_FACING_SYSTEM_BLOCK = _OUTWARD_FACING_FRAMING
 REPLY_TO_OWN_VIDEO_SYSTEM_BLOCK = _REPLY_FRAMING
 
@@ -268,16 +222,16 @@ TONE_GUIDES = {
 }
 
 
-# Per-platform framing for self-share posts (link to guaardvark.com or Gotham Rising).
+# Per-platform framing for self-share posts; {name} is the profile's name.
 SHARE_FRAMING = {
     "reddit": (
         "Write a Reddit post title (under 100 chars) and body (under 400 chars) "
-        "introducing Guaardvark to a relevant subreddit. The title must be a real "
+        "introducing {name} to a relevant subreddit. The title must be a real "
         "hook, not a pitch. The body explains what it is in plain language and what "
         "specifically might interest THIS subreddit's audience. End with the link."
     ),
     "discord": (
-        "Write a 2–4 sentence Discord message introducing Guaardvark to a topical "
+        "Write a 2–4 sentence Discord message introducing {name} to a topical "
         "channel. Conversational. Mention what specifically might interest this "
         "channel's audience. Drop the link inline."
     ),
@@ -297,14 +251,14 @@ NO_PROMO_RULE_PATTERNS = [
 
 
 def find_relevant_feature(text: str) -> str | None:
-    """Return the first feature key whose keyword matches the text, or None."""
-    if not text:
-        return None
-    lowered = text.lower()
-    for pattern, feature in RELEVANCE_KEYWORDS:
-        if re.search(pattern, lowered, re.IGNORECASE):
-            return feature
-    return None
+    """Key of the first profile feature with a keyword in the text, or None."""
+    return profile.find_relevant_feature(text)
+
+
+def drafter_model() -> str:
+    """The model outreach drafts are written with: the default chat model."""
+    from backend.config import get_default_llm
+    return get_default_llm()
 
 
 def _ollama_json_chat(system: str, user: str, model: Optional[str] = None) -> Dict[str, Any]:
@@ -314,8 +268,7 @@ def _ollama_json_chat(system: str, user: str, model: Optional[str] = None) -> Di
     around the parse because models occasionally truncate or wrap.
     """
     if model is None:
-        from backend.config import get_default_llm
-        model = get_default_llm()
+        model = drafter_model()
 
     from backend.utils.ollama_resource_manager import think_payload
     try:
@@ -361,7 +314,7 @@ def _build_reply_prompt(
     tone: Optional[str] = None,
 ) -> str:
     """Compose the user-side prompt for drafting a REPLY to an incoming
-    comment on Guaardvark's own video. Used with REPLY_TO_OWN_VIDEO_SYSTEM_BLOCK.
+    comment on the account's own video. Used with REPLY_TO_OWN_VIDEO_SYSTEM_BLOCK.
 
     No feature-blurb / no link / no UTM tags — replies don't pitch.
     """
@@ -384,14 +337,14 @@ Return JSON: {{"draft": "<reply text>", "grade": 0.0-1.0, "reason": "<one line>"
 def _requested_feature_block(requested_feature: Optional[str], fits: str) -> str:
     """Prompt lines asking the drafter to lead with a feature a person chose.
 
-    A FEATURE_BLURBS key is shown with its blurb; anything else is passed as
+    A profile feature key is shown with its blurb; anything else is passed as
     the person wrote it. ``fits`` names what the feature has to suit ("this
     thread", "this community"). Returns "" when no feature was requested.
     """
     feature = (requested_feature or "").strip()[:200]
     if not feature:
         return ""
-    blurb = FEATURE_BLURBS.get(feature.lower())
+    blurb = profile.feature_blurbs().get(feature.lower())
     label = f"{feature} ({blurb})" if blurb else feature
     return (
         f"\nREQUESTED FEATURE: {label}\n"
@@ -412,34 +365,32 @@ def _build_user_prompt(
 ) -> str:
     """Compose the user-side prompt for the LLM.
 
-    Facts about Guaardvark live in the system message (the pitch sheet,
-    PITCH.md); the drafter picks the talking point that fits the thread
-    from it, unless a person passed `requested_feature` for it to lead with.
-    This side carries the thread, that request and the output contract.
+    Facts about the product live in the system message (the pitch sheet);
+    the drafter picks the talking point that fits the thread from it,
+    unless a person passed `requested_feature` for it to lead with. This
+    side carries the thread, that request and the output contract.
 
-    `include_link=True` asks for a natural cite of `link_url` (default
-    GitHub for YouTube comments, site otherwise). Low-grade spam still
-    fails the gate.
+    `include_link=True` asks for a natural cite of `link_url`. Low-grade
+    spam still fails the gate.
     """
     tone_guide = TONE_GUIDES.get((tone or "default").lower(), "").strip()
     tone_block = f"\nTONE OVERRIDE: {tone_guide}\n" if tone_guide else ""
-
-    cite = (link_url or "").strip() or (GITHUB_URL if (platform or "").lower() == "youtube" else SITE_URL)
+    name = _product_name()
 
     if include_link:
         closing_line = (
             f"Draft a comment for this thread. Lead with real value about "
-            f"the topic, then include a link to {cite} where it fits "
-            f"naturally — one short mention of Guaardvark plus the URL. "
-            f"Prefer the GitHub repo when the viewer might want to try or "
+            f"the topic, then include a link to {(link_url or '').strip()} where it fits "
+            f"naturally — one short mention of {name} plus the URL. "
+            f"Prefer the repo link when the viewer might want to try or "
             f"clone the project. If you can't make the link feel natural, "
             f"set grade < 0.7 (the human reviewer would rather hold than "
             f"ship spam)."
         )
     else:
         closing_line = (
-            "Draft a comment for this thread. Add real value first; a "
-            "Guaardvark mention is optional and only fits sometimes."
+            f"Draft a comment for this thread. Add real value first; a "
+            f"mention of {name} is optional and only fits sometimes."
         )
 
     feature_block = _requested_feature_block(requested_feature, "this thread")
@@ -460,9 +411,9 @@ Respond with JSON: {{"draft": "...", "grade": 0.0-1.0, "reason": "..."}}.
 
 
 def _draft_already_has_cta(draft_text: str, link_url: str) -> bool:
-    """True if draft already cites the CTA link or a known Guaardvark surface."""
+    """True if draft already cites the CTA link, the profile's site or its repo."""
     lower = (draft_text or "").lower()
-    if "guaardvark.com" in lower or "github.com/guaardvark" in lower:
+    if any(link in lower for link in profile.load().own_links()):
         return True
     needle = (link_url or "").strip().lower()
     if needle and needle in lower:
@@ -518,11 +469,11 @@ def _build_share_prompt(
     link_url: str,
     requested_feature: Optional[str] = None,
 ) -> str:
-    """User-side prompt for self-share posts. Facts come from PITCH.md via
-    the system message; this side carries the platform/target/link and a
+    """User-side prompt for self-share posts. Facts come from the pitch sheet
+    via the system message; this side carries the platform/target/link and a
     feature a person asked the post to lead with, if any.
     """
-    framing = SHARE_FRAMING.get(platform, SHARE_FRAMING["reddit"])
+    framing = SHARE_FRAMING.get(platform, SHARE_FRAMING["reddit"]).format(name=_product_name())
     feature_block = _requested_feature_block(requested_feature, "this community")
     return f"""\
 PLATFORM: {platform}
@@ -534,6 +485,11 @@ INSTRUCTIONS:
 {feature_block}
 Respond with JSON: {{"title": "...", "body": "...", "grade": 0.0-1.0, "reason": "..."}} for reddit, or {{"draft": "...", "grade": 0.0-1.0, "reason": "..."}} for other platforms.
 """
+
+
+def _not_drafted(reason: str) -> dict:
+    """The shape of a draft result when no draft was made."""
+    return {"comment": "", "draft": "", "grade": 0.0, "rationale": reason, "reason": reason}
 
 
 def draft_outreach_text(
@@ -551,10 +507,14 @@ def draft_outreach_text(
     """Unified entry point for all outreach LLM calls.
 
     The system message is always the mode's framing plus the pitch sheet
-    (PITCH.md) when one is present. Returns parsed JSON dict with keys:
+    (PITCH.md, else the profile). Returns parsed JSON dict with keys:
     - comment/draft: the text
     - grade: 0.0-1.0
     - rationale/reason: explanation
+
+    A comment or share with no pitch sheet at all (no profile, no PITCH.md)
+    is not drafted: the result carries draft="" and the reason. A share, or
+    a comment asked to carry a link, with no link to give does the same.
 
     Args:
         platform: "reddit", "discord", "facebook", "youtube", etc.
@@ -567,23 +527,28 @@ def draft_outreach_text(
             feature key; it is not put in the prompt — the drafter chooses
             its angle from the pitch sheet.
         requested_feature: comment and share modes. A feature a person
-            asked the draft to lead with (a FEATURE_BLURBS key or their own
+            asked the draft to lead with (a profile feature key or their own
             words). The prompt asks the drafter to lead with it when it fits
             and to grade below 0.3, saying why, when it does not. None leaves
             the angle to the pitch sheet.
         llm: optional LLM callable (for testing)
         campaign: UTM campaign tag (default "v253")
         include_link: comment-mode only. When True the user prompt asks the
-            persona to include ``link_url`` (default GitHub for YouTube,
-            site otherwise) where it fits naturally.
+            persona to include ``link_url`` (default: the profile's repo on
+            YouTube, its site otherwise) where it fits naturally.
         link_url: CTA URL when include_link is True.
     """
     if llm is None:
         llm = _ollama_json_chat
-    
+
+    if mode in ("share", "comment") and not _pitch_sheet():
+        return _not_drafted(profile.no_product_reason())
+
     if mode == "share":
         target = context.get("target", "(unspecified)")
-        share_link = context.get("link_url", SITE_URL)
+        share_link = (context.get("link_url") or "").strip() or profile.site_url()
+        if not share_link:
+            return _not_drafted(profile.no_link_reason())
         prompt = _build_share_prompt(platform, target, share_link, requested_feature)
         # Use the share-specific system block — the comment-focused one
         # (_compose_outward_facing_system) tells the model to skip when
@@ -614,9 +579,9 @@ def draft_outreach_text(
         draft_text = result.get("draft", "") or result.get("reply", "")
         # Replies skip the UTM-tag pass entirely — we're not handing out
         # links here. Return early so the apply_utm_tags call below is
-        # bypassed (it would no-op on text with no guaardvark.com links
-        # anyway, but skipping is cleaner and avoids future surprises if
-        # someone adds a link auto-detector to apply_utm_tags).
+        # bypassed (it would no-op on text with no profile links anyway,
+        # but skipping is cleaner and avoids future surprises if someone
+        # adds a link auto-detector to apply_utm_tags).
         return {
             "comment": draft_text,
             "draft": draft_text,
@@ -631,10 +596,10 @@ def draft_outreach_text(
             body = context.get("body", "")
             thread_context = f"{title}\n\n{body}"
 
-        cta = (link_url or context.get("link_url") or "").strip()
-        if not cta:
-            cta = GITHUB_URL if (platform or "").lower() == "youtube" else SITE_URL
-        
+        cta = (link_url or context.get("link_url") or "").strip() or profile.cta_url(platform)
+        if include_link and not cta:
+            return _not_drafted(profile.no_link_reason())
+
         prompt = _build_user_prompt(
             platform=platform,
             thread_context=thread_context,
@@ -655,10 +620,10 @@ def draft_outreach_text(
         # be a link drop, which is exactly what we don't want).
         if include_link and draft_text.strip() and not _draft_already_has_cta(draft_text, cta):
             draft_text = draft_text.rstrip() + f"\n\n{cta}"
-    
-    # Apply UTM tags to any guaardvark.com links
+
+    # Apply UTM tags to any link into the profile's own hosts
     draft_text = apply_utm_tags(draft_text, platform=platform, campaign=campaign)
-    
+
     return {
         "comment": draft_text,
         "draft": draft_text,
@@ -668,24 +633,28 @@ def draft_outreach_text(
     }
 
 
-GUAARDVARK_DOMAIN_PATTERN = re.compile(r"^([a-z0-9-]+\.)?guaardvark\.com$", re.IGNORECASE)
+def apply_utm_tags(
+    text: str, *, platform: str, campaign: str, hosts: Optional[Iterable[str]] = None,
+) -> str:
+    """Inject UTM params on any URL in text whose host is one of ``hosts``
+    (default: the profile's site host) or a subdomain of one.
 
-
-def apply_utm_tags(text: str, *, platform: str, campaign: str) -> str:
-    """Inject UTM params on any guaardvark.com (or *.guaardvark.com) URL in text.
-    
-    Skips non-guaardvark domains (we don't tag third-party links).
-    Preserves existing query params.
+    Third-party links are left alone, as is everything when the profile has
+    no site. Existing query params are preserved.
     """
+    own_hosts = tuple(hosts) if hosts is not None else tuple(profile.link_hosts())
+    if not own_hosts or not text:
+        return text
+
     def _tag(match):
         url = match.group(0)
         parsed = urlparse(url)
-        if not GUAARDVARK_DOMAIN_PATTERN.match(parsed.netloc):
+        if not host_matches(parsed.hostname, *own_hosts):
             return url
         params = dict(parse_qsl(parsed.query, keep_blank_values=True))
         params.setdefault("utm_source", platform)
         params.setdefault("utm_medium", "outreach")
         params.setdefault("utm_campaign", campaign)
         return urlunparse(parsed._replace(query=urlencode(params)))
-    
+
     return re.sub(r"https?://[^\s\)\]>'\"]+", _tag, text)

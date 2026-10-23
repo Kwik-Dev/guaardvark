@@ -4,8 +4,10 @@ import logging
 import math
 import os
 import random
+import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -151,6 +153,8 @@ def _emit_progress(job_id: str, progress: int, message: str, status: str = "proc
 # Shares of the full pipeline's progress bar the parse and training steps fill.
 PIPELINE_PARSE_PROGRESS = (5, 20)
 PIPELINE_TRAIN_PROGRESS = (30, 80)
+PIPELINE_EXPORT_PROGRESS = (80, 90)
+PIPELINE_IMPORT_PROGRESS = (90, 100)
 
 
 def parsed_datasets_dir() -> Path:
@@ -258,6 +262,116 @@ def parse_transcripts_task(self, job_id: str, input_path: str, recursive: bool =
         if not in_pipeline:
             _update_job_status(job_id, status="failed", error_message=str(e))
             _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
+        raise
+
+
+@shared_task(bind=True, name='training.build_folder_dataset')
+def build_folder_dataset_task(self, job_id: str, folder: str, kinds=None,
+                              pairs_per_1000_words: float = 3, target_pairs="enough",
+                              include_large_files=None):
+    """Build a messages dataset from a folder of notes (folder_dataset).
+
+    Scan, scrub, chunk, ask the local model for pairs, filter, write. A cancel
+    is noticed between chunks and writes nothing. Generation goes through the
+    chat model like any chat call, so it waits behind a render the way chat
+    does and claims no GPU of its own."""
+    import time
+    from backend.services.training import folder_dataset as fd
+    from backend.services.training.pair_generator import PairGenerator
+
+    started = time.monotonic()
+    try:
+        _update_job_status(job_id, status="running", pipeline_stage="building",
+                           started_at=utcnow(), celery_task_id=self.request.id)
+        _emit_progress(job_id, 0, "Scanning the folder...", "start")
+
+        prepared = fd.prepare(folder, kinds, include_large=include_large_files or ())
+        scrub = prepared["scrub"]
+        _emit_progress(job_id, 4, f"Read {prepared['files']} files ({prepared['words']} words); "
+                                  f"scrubbed {scrub['total']} items")
+        if not prepared["docs"]:
+            raise ValueError("Nothing to read: the folder has no notes of the chosen kinds "
+                             "that the import rules let in")
+
+        all_chunks = fd.chunk_docs(prepared["docs"])
+        chunks, selection = fd.select_passages(all_chunks, fd.resolve_target(target_pairs), pairs_per_1000_words)
+        _emit_progress(job_id, 8, f"Split into {len(all_chunks)} passages; writing pairs for "
+                                  f"{len(chunks)} of them from {selection['files_contributing']} files...")
+
+        generator = PairGenerator()
+        row_written = {"progress": None, "at": 0.0}
+
+        def on_progress(done, total, pairs):
+            progress = 8 + 84 * done // max(1, total)
+            metrics = {"chunks_done": done, "chunks": total, "pairs": pairs}
+            _emit_progress(job_id, progress, f"Writing pairs: chunk {done} of {total}, {pairs} pairs so far",
+                           metrics=metrics)
+            # Activity and the Jobs table read the row; write it when the
+            # percent moves, and every 30 s so the pair count stays current.
+            now = time.monotonic()
+            if progress != row_written["progress"] or now - row_written["at"] >= 30:
+                row_written.update(progress=progress, at=now)
+                _update_job_status(job_id, progress=progress, metrics_json=json.dumps(metrics))
+
+        pairs = fd.generate(chunks, pairs_per_1000_words, generator,
+                            should_stop=_job_stop_check(job_id), on_progress=on_progress)
+
+        _emit_progress(job_id, 93, f"Filtering {len(pairs)} pairs...")
+        kept, dropped = fd.filter_pairs(pairs)
+        if not kept:
+            raise ValueError(f"No pairs survived the filter ({len(pairs)} written, "
+                             f"dropped: {dropped})")
+
+        name = fd.dataset_name(folder)
+        report = {
+            "folder": folder,
+            "kinds": prepared["kinds"],
+            "pairs_per_1000_words": pairs_per_1000_words,
+            "files": prepared["files"],
+            "words": prepared["words"],
+            "skipped": prepared["skipped"],
+            "unreadable": prepared["unreadable"],
+            "scrub": scrub,
+            "chunks": len(chunks),
+            "selection": selection,
+            "pairs_written": len(pairs),
+            "pairs_kept": len(kept),
+            "dropped": dropped,
+            "kinds_kept": {k: sum(1 for p in kept if p["kind"] == k)
+                           for k in ("specific", "reasoning", "multi_hop", "summary")},
+            "model": getattr(generator._llm, "model", None),
+            "model_calls": generator.calls,
+            "unparsed_answers": generator.unparsed,
+            "generation_seconds": round(generator.seconds, 1),
+            "seconds": round(time.monotonic() - started, 1),
+        }
+        output_path, report_path = fd.write(kept, report, name)
+        _update_job_status(job_id, status="completed", pipeline_stage="building",
+                           completed_at=utcnow(), progress=100,
+                           config_json=json.dumps({
+                               "input_path": folder,
+                               "output_path": output_path,
+                               "report_path": report_path,
+                               "pairs_count": len(kept),
+                               "files": prepared["files"],
+                               "chunks": len(chunks),
+                               "passages_available": selection["passages_available"],
+                               "target_pairs": selection["target_pairs"],
+                               "large_files_left_out": len(prepared["skipped"]["large_files"]),
+                               "scrubbed": scrub["total"],
+                               "dropped": dropped,
+                           }))
+        _emit_progress(job_id, 100, f"Completed: {len(kept)} pairs in {name}.jsonl", "complete")
+        return {"output_path": output_path, "report_path": report_path, "pairs_count": len(kept)}
+
+    except fd.BuildCancelled:
+        logger.info(f"Folder dataset build {job_id} cancelled; nothing written")
+        _emit_progress(job_id, 0, "Cancelled; nothing written", "cancelled")
+        return {"cancelled": True}
+    except Exception as e:
+        logger.error(f"Error in build_folder_dataset_task: {e}", exc_info=True)
+        _update_job_status(job_id, status="failed", error_message=str(e))
+        _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
         raise
 
 
@@ -447,6 +561,40 @@ EVAL_GATE = {
 WORSE_THAN_BASE = "failed: worse than base"
 
 
+def _held_out_by_source(rows: list, target: int):
+    """Row indices to hold out, whole source files at a time, or None.
+
+    A folder build writes several pairs per chunk and several chunks per file,
+    so a random row split puts near-copies of one passage on both sides and the
+    held-out loss flatters the adapter. When every row names its source file
+    (metadata.source_path), files are drawn in a seeded order until the held
+    rows reach the target, never above EVAL_SPLIT["max_rows"] and never every
+    file. None (and a random row split) for other datasets, or when whole files
+    cannot give at least EVAL_SPLIT["min_rows"]."""
+    by_file = {}
+    for i, raw in enumerate(rows):
+        try:
+            row = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        meta = row.get("metadata") if isinstance(row, dict) else None
+        source = meta.get("source_path") if isinstance(meta, dict) else None
+        if not isinstance(source, str) or not source:
+            return None
+        by_file.setdefault(source, []).append(i)
+    if len(by_file) < 2:
+        return None
+    files = sorted(by_file)
+    random.Random(EVAL_SPLIT["seed"]).shuffle(files)
+    held = set()
+    for source in files[:-1]:
+        if len(held) >= target:
+            break
+        if len(held) + len(by_file[source]) <= EVAL_SPLIT["max_rows"]:
+            held.update(by_file[source])
+    return held if len(held) >= EVAL_SPLIT["min_rows"] else None
+
+
 def _hold_out_split(data_path: str, out_dir: Path, fraction: float):
     """Split a text dataset into training rows and held-out rows.
 
@@ -482,7 +630,13 @@ def _hold_out_split(data_path: str, out_dir: Path, fraction: float):
         )
         return data_path, None, report
 
-    held_out = set(random.Random(EVAL_SPLIT["seed"]).sample(range(len(rows)), held))
+    held_out = _held_out_by_source(rows, held)
+    if held_out is not None:
+        report["split"] = "by source file"
+    else:
+        held_out = set(random.Random(EVAL_SPLIT["seed"]).sample(range(len(rows)), held))
+        report["split"] = "random rows"
+    held = len(held_out)
     out_dir.mkdir(parents=True, exist_ok=True)
     train_path = out_dir / "train.jsonl"
     eval_path = out_dir / "heldout.jsonl"
@@ -584,6 +738,8 @@ def _dataset_data_path(dataset_name: str, dataset_path: str, combined_path: Path
 
 # One optimiser step sees batch_size * this many rows.
 GRADIENT_ACCUMULATION_STEPS = 4
+# The batch size of a job with no device profile and no batch_size of its own.
+DEFAULT_BATCH_SIZE = 2
 
 # A job that leaves "steps" out trains for about this many passes over its
 # training rows: the usual range for a LoRA fine-tune of a chat model on a
@@ -609,6 +765,19 @@ def default_max_steps(rows: int, batch_size: int) -> int:
 
 class TrainingCancelled(Exception):
     """The job was cancelled or deleted before its trainer started."""
+
+
+class TrainingLibrariesUnavailable(RuntimeError):
+    """The training libraries are missing or incomplete, so the run was
+    refused before it started; the message says what and where to fix it."""
+
+
+def _training_libraries_refusal():
+    """training_libraries.unavailable_reason, read at call time. The routes
+    refuse a job on it too; the task asks again because the libraries can
+    change while the task waits in the queue."""
+    from backend.services import training_libraries
+    return training_libraries.unavailable_reason()
 
 
 def _job_stop_check(job_id: str):
@@ -676,6 +845,8 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
                         in_pipeline: bool = False):
     """Fine-tune the job's base model on its dataset and record the result.
 
+    While the training libraries are missing or incomplete the job is failed
+    with the reason before anything else runs (TrainingLibrariesUnavailable).
     A job without data_path in its config trains on its dataset (dataset_id),
     resolved by dataset_training_files. Without "steps" it trains for
     default_max_steps of its rows. The base model is the declared entry's
@@ -700,6 +871,17 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
     emit = _pipeline_emitter(job_id, in_pipeline, PIPELINE_TRAIN_PROGRESS)
     trained_name = None
     stopped = _job_stop_check(job_id)
+
+    # Before the GPU wait and the trainer, and outside the handler below, so
+    # a refused job keeps its checkpoint and can be resumed once repaired. A
+    # cancel that landed first stays a cancel.
+    unavailable = _training_libraries_refusal()
+    if unavailable:
+        if not _claim_job(job_id, status="failed", error_message=unavailable, pid=None):
+            _emit_progress(job_id, 0, "Training cancelled", "cancelled")
+            return {"cancelled": True}
+        _emit_progress(job_id, 0, f"Error: {unavailable}", "error")
+        raise TrainingLibrariesUnavailable(unavailable)
 
     try:
         if in_pipeline:
@@ -750,7 +932,7 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
             raise ValueError("data_path not found in job config")
 
         learning_rate = job_config.get("lr", 2e-4)
-        batch_size = job_config.get("batch_size", device_profile.max_batch_size if device_profile else 2)
+        batch_size = job_config.get("batch_size", device_profile.max_batch_size if device_profile else DEFAULT_BATCH_SIZE)
         lora_rank = job_config.get("rank", 16)
         max_seq_length = job_config.get("seq_length", device_profile.max_seq_length if device_profile else 2048)
 
@@ -947,50 +1129,152 @@ def finetune_model_task(self, job_id: str, config: dict, resume: bool = False,
 
 
 class ExportNotVerified(RuntimeError):
-    """Export to Ollama has not been verified for the job's base model."""
+    """Export to Ollama cannot run for the job now; export_block says why
+    (not verified for its base model, or the GGUF converter not ready)."""
+
+
+def export_block(base_model: str, lora_path: str = None):
+    """Why a job's adapter may not be exported now, as (code, reason), or None.
+    Export stays off for a base model until it has been run live and its entry
+    says verified, and goes through GGUF, so it waits for the GGUF converter
+    to be installed and checked with the model's family
+    (training_gguf_converter.refusal_for)."""
+    from backend.services import training_base_models, training_gguf_converter
+    where = f" The trained adapter stays at {lora_path}." if lora_path else ""
+    if not training_base_models.export_verified(base_model):
+        return "EXPORT_NOT_VERIFIED", f"Export to Ollama is not verified for {base_model} yet.{where}"
+    blocked = training_gguf_converter.refusal_for(training_base_models.get(base_model))
+    if blocked:
+        code, reason = blocked
+        return code, f"{reason}{where}"
+    return None
 
 
 def export_refusal(base_model: str, lora_path: str = None):
-    """Why a job's adapter may not be exported yet, or None. Export stays off
-    for a base model until it has been run live and its entry says verified."""
-    from backend.services import training_base_models
-    if training_base_models.export_verified(base_model):
-        return None
-    where = f" The trained adapter stays at {lora_path}." if lora_path else ""
-    return f"Export to Ollama is not verified for {base_model} yet.{where}"
+    """export_block's reason alone, or None."""
+    block = export_block(base_model, lora_path)
+    return block[1] if block else None
 
 
-# Ollama's spelling of each quantization the export form offers, for
-# `ollama create --quantize` on a safetensors folder; None means unquantised.
-# The levels are the ones Ollama documents for importing safetensors; the
-# others in the form have no safetensors path and are refused.
+def _unsupported_import_reason(version: str) -> str:
+    return (f"The installed Ollama {version} cannot import the merged model as safetensors: it "
+            "takes safetensors only through its MLX engine, which does not take this model on "
+            "this system. Export through GGUF instead (Settings > Training libraries > GGUF "
+            "converter).")
+
+
+# What each Ollama version measured here does with a merged safetensors folder
+# (`ollama create --quantize <level>` on <run>/merged), the route a run folder
+# merged before Export went through GGUF still imports by. A version that
+# cannot import it is refused before `ollama create`, with its reason; a version
+# not listed is tried.
+OLLAMA_SAFETENSORS_IMPORT = {
+    "0.40.1": {
+        "imports": False,
+        "reason": _unsupported_import_reason("0.40.1"),
+        "measured": (
+            "2026-10-12, Linux with an NVIDIA GPU, Qwen2.5-1.5B merged with a LoRA adapter "
+            "(merge 9.5 s, 2.9 GB): --quantize q4_K_M refused as unsupported (it takes int4, "
+            "int8, nvfp4, mxfp4, mxfp8); int4 and unquantised refused with 'unsupported MLX "
+            "architecture: Qwen2ForCausalLM'; --force only wrote a client-side copy the "
+            "server never listed."
+        ),
+    },
+}
+# The two refusals that measurement saw, mapped to the same plain reason when an
+# unlisted version answers with them.
+_OLLAMA_IMPORT_ERRORS = ("unsupported --quantize", "unsupported MLX architecture")
+_OLLAMA_VERSION_MAX_AGE_S = 60.0
+_ollama_version = {"at": None, "version": None}
+
+
+def ollama_server_version():
+    """The running Ollama server's version from its /api/version, or None when
+    it does not answer. Asked at most once a minute."""
+    now = time.monotonic()
+    if _ollama_version["at"] is not None and now - _ollama_version["at"] < _OLLAMA_VERSION_MAX_AGE_S:
+        return _ollama_version["version"]
+    version = None
+    try:
+        import requests
+        from backend.utils.ollama_resource_manager import get_ollama_base_url
+        version = requests.get(f"{get_ollama_base_url()}/api/version", timeout=3).json().get("version")
+    except Exception as e:  # noqa: BLE001 — an unknown version keeps today's behaviour
+        logger.debug(f"Ollama version not read: {e}")
+    _ollama_version.update(at=now, version=version)
+    return version
+
+
+def ollama_create_error(tail: str) -> str:
+    """The job error for a failed `ollama create`: an import refusal measured
+    here gets the plain reason (Ollama's own text kept after it)."""
+    if any(marker in tail for marker in _OLLAMA_IMPORT_ERRORS):
+        return f"{_unsupported_import_reason(ollama_server_version() or 'here')} ({tail})"
+    return f"ollama create failed: {tail}"
+
+
+def ollama_import_refusal():
+    """Why the installed Ollama cannot take a merged export, or None (also when its version is unknown or unmeasured)."""
+    entry = OLLAMA_SAFETENSORS_IMPORT.get(ollama_server_version() or "")
+    if entry and not entry["imports"]:
+        return entry["reason"]
+    return None
+
+
+# Ollama's spelling of each level for `ollama create --quantize` on a merged
+# safetensors folder (_create_from_merged); None means unquantised. The levels
+# are the ones Ollama documents for importing safetensors. Export itself offers
+# the GGUF converter's levels (training_gguf_converter.LEVELS).
 OLLAMA_QUANTIZE = {"q4_k_m": "q4_K_M", "q4_k_s": "q4_K_S", "q8_0": "q8_0", "f16": None}
 # Folding a 1-3 GB adapter into its base on the CPU takes minutes; this
 # bounds a merge that hangs.
 MERGE_TIME_LIMIT_SECONDS = 3600
 
 
-@shared_task(bind=True, name='training.export_gguf')
-def export_gguf_task(self, job_id: str, model_dir: str, quantization: str = 'q4_k_m'):
-    """First export step: fold the job's LoRA adapter into its bf16 base model
-    (model_dir/merged, safetensors) in an offline subprocess on the CPU.
-    import_ollama_task then registers that folder with `ollama create
-    --quantize`. Refused, before the job is touched, until export is verified
-    for the job's base model."""
-    logger.info(f"Starting export_gguf_task for job {job_id}")
+def export_gguf_name(model_dir: Path, level: str) -> Path:
+    """Where Export writes a run's GGUF file at a level."""
+    return Path(model_dir) / f"{Path(model_dir).name}-{level}.gguf"
 
+
+@shared_task(bind=True, name='training.export_gguf')
+def export_gguf_task(self, job_id: str, model_dir: str, quantization: str = None,
+                     in_pipeline: bool = False, then_import: bool = False):
+    """First export step: fold the job's LoRA adapter into its bf16 base model
+    (model_dir/merged, safetensors) in an offline subprocess on the CPU, then
+    convert that folder to one GGUF file at the chosen level with the GGUF
+    converter (training_gguf_converter), also on the CPU. import_ollama_task
+    then registers the file with `ollama create`, and only after that deletes
+    merged/ (_drop_merged); every export merges afresh. Refused, before the
+    job is touched, until export is verified for the job's base model and the
+    converter is installed; a level the converter does not offer is refused
+    with the choices. quantization None means its default level.
+
+    On its own an export ends the job completed (or failed). then_import: the
+    first step of the export-to-Ollama chain, so the job stays running for
+    import_ollama_task to finish. in_pipeline: called by
+    full_training_pipeline_task, which owns the job's status, timestamps and
+    Celery task id; the export then reports its stage and progress only."""
+    logger.info(f"Starting export_gguf_task for job {job_id}")
+    emit = _pipeline_emitter(job_id, in_pipeline, PIPELINE_EXPORT_PROGRESS)
+
+    from backend.services import training_gguf_converter
     from flask import current_app
     with current_app.app_context():
         job = db.session.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
         base_model = job.base_model if job else None
+        previous_gguf = job.gguf_path if job else None
     refusal = export_refusal(base_model, str(Path(model_dir) / "lora"))
     if refusal:
         # Before the job is touched, so it keeps its completed status.
         raise ExportNotVerified(refusal)
+    level = training_gguf_converter.level_for(quantization)
 
     try:
-        _update_job_status(job_id, status="running", pipeline_stage="exporting", started_at=utcnow(), celery_task_id=self.request.id)
-        _emit_progress(job_id, 0, "Starting export...", "start")
+        if in_pipeline:
+            _update_job_status(job_id, pipeline_stage="exporting")
+        else:
+            _update_job_status(job_id, status="running", pipeline_stage="exporting", started_at=utcnow(), celery_task_id=self.request.id)
+        emit(0, "Starting export...", "start")
 
         from backend.services import training_base_models, training_runner
         _, base_path = training_base_models.resolve_for_training(base_model)
@@ -1000,38 +1284,122 @@ def export_gguf_task(self, job_id: str, model_dir: str, quantization: str = 'q4_
             raise FileNotFoundError(f"No trained adapter at {lora_dir}")
         merged = model_dir_path / "merged"
 
-        _emit_progress(job_id, 10, "Merging the adapter into the base model...", "processing")
+        emit(10, "Merging the adapter into the base model...")
         training_runner.run(
             "merge",
             {"base_model": base_path, "lora_dir": str(lora_dir), "out_dir": str(merged),
              "parent_pid": os.getpid()},
             workdir=model_dir_path, time_limit_s=MERGE_TIME_LIMIT_SECONDS)
 
-        _update_job_status(job_id, pipeline_stage="exporting", progress=100)
-        _emit_progress(job_id, 100, f"Merged model saved to {merged}", "complete")
-        logger.info(f"Export task completed for job {job_id}: {merged}")
-        return {"merged_path": str(merged)}
+        label = training_gguf_converter.LEVELS[level]["label"]
+        emit(60, f"Converting the merged model to GGUF ({label})...")
+        gguf = training_gguf_converter.convert(
+            merged, export_gguf_name(model_dir_path, level), level,
+            log_path=model_dir_path / training_runner.LOG_NAME)
+        _drop_other_export(previous_gguf, model_dir_path, gguf)
+
+        finished = not (in_pipeline or then_import)
+        if in_pipeline:
+            _update_job_status(job_id, pipeline_stage="exporting", progress=PIPELINE_EXPORT_PROGRESS[1],
+                               gguf_path=str(gguf), quantization_level=level)
+        elif then_import:
+            _update_job_status(job_id, pipeline_stage="exporting", progress=100,
+                               gguf_path=str(gguf), quantization_level=level)
+        else:
+            _update_job_status(job_id, status="completed", pipeline_stage="exporting", progress=100,
+                               completed_at=utcnow(), gguf_path=str(gguf), quantization_level=level)
+        size_gb = gguf.stat().st_size / 1e9
+        emit(100, f"GGUF saved to {gguf} ({size_gb:.2f} GB)", "complete" if finished else "processing")
+        logger.info(f"Export task completed for job {job_id}: {gguf}")
+        return {"merged_path": str(merged), "gguf_path": str(gguf), "quantization": level}
 
     except Exception as e:
         logger.error(f"Error in export_gguf_task: {e}", exc_info=True)
-        _update_job_status(job_id, status="failed", error_message=str(e))
-        _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
+        if not in_pipeline:
+            _update_job_status(job_id, status="failed", error_message=str(e))
+            _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
         raise
 
 
-def ollama_modelfile(entry: dict, merged_dir: Path) -> str:
-    """The Modelfile registering a merged model with Ollama: the folder, the
-    chat template and stop words its base model entry declares, and the
-    app's default sampling."""
+def _drop_other_export(previous: str, model_dir: Path, current: Path) -> None:
+    """Delete the GGUF an earlier export of this run wrote at another level,
+    so a re-export leaves one file. Only a file Export itself names is touched."""
+    from backend.services import training_gguf_converter
+    if not previous:
+        return
+    previous_path = Path(previous)
+    ours = {export_gguf_name(model_dir, level) for level in training_gguf_converter.LEVELS}
+    if previous_path != current and previous_path in ours and previous_path.is_file():
+        previous_path.unlink()
+        logger.info(f"Removed the earlier export {previous_path}")
+
+
+def _drop_merged(model_dir: Path, gguf: Path) -> int:
+    """Delete the run's merged copy (model_dir/merged, the bf16 base with the
+    adapter folded in) once Ollama has registered the GGUF converted from it,
+    and return the bytes freed. Only a GGUF Export wrote in this folder
+    counts. Nothing else in the run folder is touched (lora/, checkpoints/,
+    heldout/ and the GGUF stay), and the next export merges again."""
+    from backend.services import training_gguf_converter
+    model_dir = Path(model_dir)
+    merged = model_dir / "merged"
+    ours = {export_gguf_name(model_dir, level).resolve() for level in training_gguf_converter.LEVELS}
+    if Path(gguf).resolve() not in ours or merged.is_symlink() or not merged.is_dir():
+        return 0
+    freed = 0
+    for root, _, files in os.walk(merged):
+        for name in files:
+            try:
+                freed += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                pass
+    try:
+        shutil.rmtree(merged)
+    except OSError as e:
+        logger.warning(f"Could not remove the merged copy {merged}: {e}")
+        return 0
+    logger.info(f"Removed the merged copy {merged} ({freed / 1e9:.2f} GB) once Ollama "
+                f"registered {Path(gguf).name}")
+    return freed
+
+
+def ollama_modelfile(entry: dict, source: Path) -> str:
+    """The Modelfile registering an exported model with Ollama: the GGUF file
+    (or a merged folder), the chat template and stop words its base model
+    entry declares, and the app's default sampling."""
     from backend.services import sampling_profiles
     template = entry["ollama_template"]
     stops = "\n".join(f'PARAMETER stop "{stop}"' for stop in entry.get("ollama_stop", ()))
     params = sampling_profiles.profile_modelfile_params(sampling_profiles.DEFAULT_PROFILE)
-    return f'FROM {merged_dir}\n\nTEMPLATE """{template}"""\n\n{stops}\n{params}\n'
+    return f'FROM {source}\n\nTEMPLATE """{template}"""\n\n{stops}\n{params}\n'
 
 
-def _create_from_merged(job_id: str, model_dir: Path, merged: Path, model_name: str) -> dict:
-    """`ollama create <name> --quantize <level> -f Modelfile` for a merged folder."""
+def _create_from_gguf(job_id: str, model_dir: Path, gguf: Path, entry: dict, model_name: str,
+                      level: str, emit=None) -> dict:
+    """`ollama create <name> -f Modelfile` for an exported GGUF file. Ollama
+    imports the file at the level it was converted to; it does not quantize a
+    GGUF import. emit is the import's progress reporter."""
+    from backend.services import training_gguf_converter
+    emit = emit or _pipeline_emitter(job_id, False, PIPELINE_IMPORT_PROGRESS)
+    emit(20, f"Writing the Modelfile for {model_name}...")
+    modelfile = model_dir / "Modelfile"
+    modelfile.write_text(ollama_modelfile(entry, gguf), encoding="utf-8")
+
+    command = ["ollama", "create", model_name, "-f", str(modelfile)]
+    label = training_gguf_converter.LEVELS.get(level, {}).get("label") or level.upper() or "GGUF"
+    emit(50, f"Registering {model_name} with Ollama ({label})...")
+    result = subprocess.run(command, capture_output=True, text=True, cwd=str(model_dir),
+                            timeout=MERGE_TIME_LIMIT_SECONDS)
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "").strip()[-500:]
+        raise RuntimeError(f"ollama create failed: {tail}")
+    return {"ollama_model_name": model_name, "quantization": level, "gguf_path": str(gguf)}
+
+
+def _create_from_merged(job_id: str, model_dir: Path, merged: Path, model_name: str,
+                        emit=None) -> dict:
+    """`ollama create <name> --quantize <level> -f Modelfile` for a merged folder.
+    emit is the import's progress reporter."""
     from backend.services import training_base_models
     from flask import current_app
     with current_app.app_context():
@@ -1041,11 +1409,15 @@ def _create_from_merged(job_id: str, model_dir: Path, merged: Path, model_name: 
     entry = training_base_models.get(base_model)
     if entry is None:
         raise ValueError(f"{base_model} is not a declared base model; its chat template is unknown.")
+    blocked = ollama_import_refusal()
+    if blocked:
+        raise RuntimeError(blocked)
     if quantization not in OLLAMA_QUANTIZE:
         offered = ", ".join(sorted(OLLAMA_QUANTIZE))
         raise ValueError(f"Ollama cannot quantize a merged model to {quantization}; choose one of {offered}.")
 
-    _emit_progress(job_id, 20, f"Writing the Modelfile for {model_name}...", "processing")
+    emit = emit or _pipeline_emitter(job_id, False, PIPELINE_IMPORT_PROGRESS)
+    emit(20, f"Writing the Modelfile for {model_name}...")
     modelfile = model_dir / "Modelfile"
     modelfile.write_text(ollama_modelfile(entry, merged), encoding="utf-8")
 
@@ -1053,12 +1425,11 @@ def _create_from_merged(job_id: str, model_dir: Path, merged: Path, model_name: 
     command = ["ollama", "create", model_name, "-f", str(modelfile)]
     if level:
         command += ["--quantize", level]
-    _emit_progress(job_id, 50, f"Registering {model_name} with Ollama ({level or 'f16'})...", "processing")
+    emit(50, f"Registering {model_name} with Ollama ({level or 'f16'})...")
     result = subprocess.run(command, capture_output=True, text=True, cwd=str(model_dir),
                             timeout=MERGE_TIME_LIMIT_SECONDS)
     if result.returncode != 0:
-        tail = (result.stderr or result.stdout or "").strip()[-500:]
-        raise RuntimeError(f"ollama create failed: {tail}")
+        raise RuntimeError(ollama_create_error((result.stderr or result.stdout or "").strip()[-500:]))
     return {"ollama_model_name": model_name, "quantization": level or "f16"}
 
 
@@ -1097,21 +1468,58 @@ def _generate_modelfile_from_template(template_name: str, gguf_path: Path, mmpro
 
 
 @shared_task(bind=True, name='training.import_ollama')
-def import_ollama_task(self, job_id: str, model_dir: str, model_name: str):
+def import_ollama_task(self, job_id: str, model_dir: str, model_name: str, in_pipeline: bool = False):
+    """Register an exported model with Ollama and finish the job.
+
+    in_pipeline: called by full_training_pipeline_task, which owns the job's
+    status, timestamps and Celery task id; the import then reports its stage,
+    progress and model name only."""
     logger.info(f"Starting import_ollama_task for job {job_id}")
+    emit = _pipeline_emitter(job_id, in_pipeline, PIPELINE_IMPORT_PROGRESS)
+
+    def finish():
+        if in_pipeline:
+            _update_job_status(job_id, pipeline_stage="importing", progress=PIPELINE_IMPORT_PROGRESS[1],
+                               ollama_model_name=model_name)
+        else:
+            _update_job_status(job_id, status="completed", pipeline_stage="importing",
+                               completed_at=utcnow(), progress=100, ollama_model_name=model_name)
 
     try:
-        _update_job_status(job_id, status="running", pipeline_stage="importing", started_at=utcnow(), celery_task_id=self.request.id)
-        _emit_progress(job_id, 0, "Starting Ollama import...", "start")
+        if in_pipeline:
+            _update_job_status(job_id, pipeline_stage="importing")
+        else:
+            _update_job_status(job_id, status="running", pipeline_stage="importing", started_at=utcnow(), celery_task_id=self.request.id)
+        emit(0, "Starting Ollama import...", "start")
 
         model_dir_obj = Path(model_dir)
 
+        from backend.services import training_base_models
+        from flask import current_app
+        with current_app.app_context():
+            job = db.session.query(TrainingJob).filter(TrainingJob.job_id == job_id).first()
+            base_model = job.base_model if job else None
+            exported = Path(job.gguf_path) if job and job.gguf_path else None
+            level = ((job.quantization_level if job else None) or "").lower()
+        entry = training_base_models.get(base_model)
+        if entry is not None and exported is not None and exported.is_file():
+            created = _create_from_gguf(job_id, model_dir_obj, exported, entry, model_name, level, emit)
+            # Only now: until Ollama has the model, a failed step keeps the merged copy.
+            freed = _drop_merged(model_dir_obj, exported)
+            finish()
+            done = f"Ollama import complete: {model_name}"
+            if freed:
+                done += f" (removed the merged copy, {freed / 1e9:.1f} GB)"
+            emit(100, done, "complete")
+            logger.info(f"Import task completed for job {job_id}: {model_name} from {exported}")
+            return created
+
+        # A run folder merged before Export went through GGUF holds only merged/.
         merged = model_dir_obj / "merged"
         if (merged / "config.json").is_file():
-            created = _create_from_merged(job_id, model_dir_obj, merged, model_name)
-            _update_job_status(job_id, status="completed", pipeline_stage="importing",
-                               completed_at=utcnow(), progress=100, ollama_model_name=model_name)
-            _emit_progress(job_id, 100, f"Ollama import complete: {model_name}", "complete")
+            created = _create_from_merged(job_id, model_dir_obj, merged, model_name, emit)
+            finish()
+            emit(100, f"Ollama import complete: {model_name}", "complete")
             logger.info(f"Import task completed for job {job_id}: {model_name}")
             return created
 
@@ -1130,7 +1538,7 @@ def import_ollama_task(self, job_id: str, model_dir: str, model_name: str):
         if not main_gguf:
             main_gguf = gguf_files[0]
 
-        _emit_progress(job_id, 20, f"Creating Modelfile for {model_name}...", "processing")
+        emit(20, f"Creating Modelfile for {model_name}...")
 
         template_name = _detect_model_architecture(model_name, main_gguf.name)
 
@@ -1145,7 +1553,7 @@ def import_ollama_task(self, job_id: str, model_dir: str, model_name: str):
         with open(modelfile_path, 'w') as f:
             f.write(modelfile_content)
 
-        _emit_progress(job_id, 50, f"Importing {model_name} to Ollama...", "processing")
+        emit(50, f"Importing {model_name} to Ollama...")
         
         import subprocess
         result = subprocess.run(
@@ -1157,23 +1565,18 @@ def import_ollama_task(self, job_id: str, model_dir: str, model_name: str):
         
         if result.returncode != 0:
             raise RuntimeError(f"Ollama import failed: {result.stderr}")
-        
-        _update_job_status(job_id,
-                          status="completed",
-                          pipeline_stage="importing",
-                          completed_at=utcnow(),
-                          progress=100,
-                          ollama_model_name=model_name)
-        
-        _emit_progress(job_id, 100, f"Ollama import complete: {model_name}", "complete")
+
+        finish()
+        emit(100, f"Ollama import complete: {model_name}", "complete")
         
         logger.info(f"Import task completed for job {job_id}: {model_name}")
         return {"ollama_model_name": model_name}
         
     except Exception as e:
         logger.error(f"Error in import_ollama_task: {e}", exc_info=True)
-        _update_job_status(job_id, status="failed", error_message=str(e))
-        _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
+        if not in_pipeline:
+            _update_job_status(job_id, status="failed", error_message=str(e))
+            _emit_progress(job_id, 0, f"Error: {str(e)}", "error")
         raise
 
 
@@ -1181,8 +1584,13 @@ def import_ollama_task(self, job_id: str, model_dir: str, model_name: str):
              soft_time_limit=259200, time_limit=345600)
 def full_training_pipeline_task(self, job_id: str, config: dict):
     logger.info(f"Starting full_training_pipeline_task for job {job_id}")
-    
+
     try:
+        # Every pipeline trains; refused before it parses or filters anything.
+        unavailable = _training_libraries_refusal()
+        if unavailable:
+            raise TrainingLibrariesUnavailable(unavailable)
+
         _update_job_status(job_id, status="running", started_at=utcnow())
         _emit_progress(job_id, 0, "Starting full training pipeline...", "processing")
 
@@ -1298,7 +1706,8 @@ def full_training_pipeline_task(self, job_id: str, config: dict):
         
         export_result = export_gguf_task(job_id,
                                         model_dir,
-                                        job_config.get("quantization", "q4_k_m"))
+                                        job_config.get("quantization"),
+                                        in_pipeline=True)
         
         _update_job_status(job_id, pipeline_stage="importing")
         _emit_progress(job_id, 90, "Step 5/5: Importing to Ollama...", "processing")
@@ -1307,7 +1716,7 @@ def full_training_pipeline_task(self, job_id: str, config: dict):
         if not model_name:
             model_name = f"guaardvark-{job.base_model.replace('/', '-').replace(':', '-')}"
         
-        import_result = import_ollama_task(job_id, model_dir, model_name)
+        import_result = import_ollama_task(job_id, model_dir, model_name, in_pipeline=True)
         
         _update_job_status(job_id,
                           status="completed",

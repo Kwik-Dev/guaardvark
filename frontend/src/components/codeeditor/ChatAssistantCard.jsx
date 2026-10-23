@@ -61,8 +61,10 @@ import DashboardCardWrapper from "../dashboard/DashboardCardWrapper";
 import MessageList from "../chat/MessageList";
 import CodeDiffViewer from "./CodeDiffViewer";
 import AICommandPalette from "./AICommandPalette";
+import { extractApplyableCode } from "./applyableCode";
 import * as codeIntelligenceService from "../../api/codeIntelligenceService";
 import * as chatService from "../../api/chatService";
+import { CODE_EDITOR_SESSION_ID } from "../../api/chatService";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
 import { buildSmartContext } from "../../utils/smartContextBuilder";
 import { parseCodeStructure, generateStructureSummary } from "../../utils/codeStructureParser";
@@ -106,9 +108,11 @@ const ChatAssistantCard = React.forwardRef(
       lastAnalysis: null,
     });
 
-    // Real-time analysis state
+    // Real-time analysis state. Off by default: when on, every pause in typing
+    // sends the file to the model (one chat request per pause) and runs a
+    // syntax check; the switch's tooltip says so.
     const [realTimeAnalysis, setRealTimeAnalysis] = useState({
-      enabled: true,
+      enabled: false,
       errors: [],
       warnings: [],
       suggestions: [],
@@ -299,10 +303,15 @@ const ChatAssistantCard = React.forwardRef(
         ]);
 
         if (analysisResult.success && validationResult.success) {
+          // /validate is a real syntax check; when it could not parse the
+          // language it says so, and that note is shown instead of "no issues".
+          const unchecked = validationResult.mode === "unchecked" && validationResult.validation
+            ? [{ message: validationResult.validation }]
+            : [];
           setRealTimeAnalysis(prev => ({
             ...prev,
             errors: validationResult.errors || [],
-            warnings: validationResult.warnings || [],
+            warnings: [...(validationResult.warnings || []), ...unchecked],
             suggestions: analysisResult.suggestions || [],
             lastUpdate: new Date(),
           }));
@@ -503,7 +512,7 @@ USER QUESTION: ${userMessage}
 Please provide a helpful, specific response about the selected code. Analyze the code in context and answer the user's question in detail.`;
 
           updateLoadingProgress(50, "Sending to AI assistant...");
-          const chatResult = await chatService.sendQuery(selectionPrompt, ['coding', 'selection', 'analysis', currentTab?.language || 'javascript'], null, null, rulesCutoffEnabled);
+          const chatResult = await chatService.sendQuery(selectionPrompt, ['coding', 'selection', 'analysis', currentTab?.language || 'javascript'], null, CODE_EDITOR_SESSION_ID, rulesCutoffEnabled);
           updateLoadingProgress(75, "Processing AI response...");
 
           if (!chatResult) {
@@ -577,20 +586,31 @@ Please provide a helpful, specific response about the selected code. Analyze the
             const target = codeContext.selectedText || enhancedContext.content;
             const editResult = await codeIntelligenceService.editCodeIntelligent(target, instructions, enhancedContext, rulesCutoffEnabled);
             if (editResult.success) {
-              // Atomic state update to avoid race conditions
-              setPendingCodeEdit({
-                newCode: editResult.editedCode,
-                description: `Smart Edit: ${instructions}`,
-                command: 'edit',
-                targetText: codeContext.selectedText,
-                isSelection: Boolean(codeContext.selectedText),
-                editRange: codeContext.selectionRange // Include selection range for precise editing
-              });
-              response = {
-                message: `Code edited successfully using advanced context. ${codeContext.selectedText ? 'Applied to selected text.' : 'Applied to entire file.'} Click "Apply Changes" to update.`,
-                success: true,
-                type: "edit_ready"
-              };
+              // The reply is prose with code in it; only a fenced block may be
+              // applied. No block means the reply is shown and nothing is offered.
+              const code = extractApplyableCode(editResult.editedCode, currentTab?.language);
+              if (code) {
+                const scope = codeContext.selectedText ? 'the selected text' : 'the whole file';
+                setPendingCodeEdit({
+                  newCode: code,
+                  description: `Edit: ${instructions} (replaces ${scope}; Ctrl+Z in the editor undoes it)`,
+                  command: 'edit',
+                  targetText: codeContext.selectedText,
+                  isSelection: Boolean(codeContext.selectedText),
+                  editRange: codeContext.selectionRange // Include selection range for precise editing
+                });
+                response = {
+                  message: `Edit ready for ${scope}. Preview shows the diff; Apply puts it in the editor.`,
+                  success: true,
+                  type: "edit_ready"
+                };
+              } else {
+                response = {
+                  message: editResult.editedCode || "The assistant returned no reply.",
+                  success: true,
+                  type: "edit_response"
+                };
+              }
             } else {
               response = {
                 message: `Code editing failed: ${editResult.error}`,
@@ -642,17 +662,27 @@ Please provide a helpful, specific response about the selected code. Analyze the
           }
 
           if (commandType !== 'secure' && result) {
-            if (result.success && (result.refactoredCode || result.tests)) {
-              // Atomic state update to avoid race conditions
+            const label = commandType.charAt(0).toUpperCase() + commandType.slice(1);
+            const reply = result.refactoredCode || result.tests || '';
+            // These commands send the whole file and Apply replaces the whole
+            // file, so only a fenced code block from the reply may be applied.
+            const code = result.success ? extractApplyableCode(reply, currentTab?.language) : null;
+            if (code) {
               setPendingCodeEdit({
-                newCode: result.refactoredCode || result.tests,
-                description: `${commandType.charAt(0).toUpperCase() + commandType.slice(1)}: Applied to ${codeContext.selectedText ? 'selected code' : 'entire file'}`,
+                newCode: code,
+                description: `${label}: replaces the whole file (Ctrl+Z in the editor undoes it)`,
                 command: commandType
               });
               response = {
-                message: `${commandType.charAt(0).toUpperCase() + commandType.slice(1)} completed successfully. Click "Apply Changes" to update your code.`,
+                message: `${label} ready. Preview shows the diff; Apply replaces the whole file.`,
                 success: true,
                 type: "command_ready"
+              };
+            } else if (result.success) {
+              response = {
+                message: reply || `${label} returned no reply.`,
+                success: true,
+                type: "command_response"
               };
             } else {
               response = {
@@ -732,7 +762,7 @@ USER QUESTION: ${userMessage}
 Provide a helpful, specific response. Reference actual code when relevant. If modifications are requested, generate complete, working code.`;
 
             updateLoadingProgress(60, "Sending to AI assistant...");
-            const chatResult = await chatService.sendQuery(contextPrompt, ['coding', 'assistance', currentTab.language || 'javascript'], null, null, rulesCutoffEnabled);
+            const chatResult = await chatService.sendQuery(contextPrompt, ['coding', 'assistance', currentTab.language || 'javascript'], null, CODE_EDITOR_SESSION_ID, rulesCutoffEnabled);
 
             if (!chatResult) {
               throw new Error('Chat service returned null or undefined response');
@@ -798,7 +828,7 @@ Provide a helpful, specific response. Reference actual code when relevant. If mo
               noFilePrompt = `You are an AI coding assistant. ${userMessage}`;
             }
 
-            const chatResult = await chatService.sendQuery(noFilePrompt, ['coding', 'general'], null, null, rulesCutoffEnabled);
+            const chatResult = await chatService.sendQuery(noFilePrompt, ['coding', 'general'], null, CODE_EDITOR_SESSION_ID, rulesCutoffEnabled);
 
             if (!chatResult) {
               throw new Error('Chat service returned null or undefined response for general conversation');
@@ -873,10 +903,9 @@ Provide a helpful, specific response. Reference actual code when relevant. If mo
       if (last?.pending && last?.role === 'user' && !pendingProcessed.current.has(last.id)) {
         pendingProcessed.current.add(last.id);
         const msgSkipRag = last.skipRag || false;
-        // Clear the pending/skipRag flags so it renders as a normal user message
-        setChatMessages(prev => prev.map(m =>
-          m.id === last.id ? { ...m, pending: false, skipRag: undefined } : m
-        ));
+        // handleSendMessage adds the user message itself, so the pending copy
+        // goes; keeping it showed the question twice.
+        setChatMessages(prev => prev.filter(m => m.id !== last.id));
         // Send through the chat pipeline — skip RAG for editor right-click actions
         handleSendMessage(last.content, { skipRag: msgSkipRag });
       }
@@ -1286,7 +1315,7 @@ Provide a helpful, specific response. Reference actual code when relevant. If mo
                 </Typography>
               </Stack>
               <Stack direction="row" spacing={0.5} alignItems="center">
-                <Tooltip title="Real-time Analysis" arrow>
+                <Tooltip title="Real-time analysis: 2 s after you stop typing, syntax-check the file and send it to the model for suggestions (one model request per pause; files over 5,000 characters are skipped)" arrow>
                   <FormControlLabel
                     control={
                       <Switch

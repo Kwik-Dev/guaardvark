@@ -124,7 +124,7 @@ def handle_voice_stream_end(data):
     logger.info(f"Voice stream ended for session: {session_id}, processing {len(audio_bytes)} bytes")
 
     try:
-        from faster_whisper.audio import decode_audio
+        from backend.utils.faster_whisper_utils import decode_audio
         from backend.utils.faster_whisper_utils import transcribe_audio_faster, FASTER_WHISPER_AVAILABLE
 
         if FASTER_WHISPER_AVAILABLE:
@@ -249,6 +249,8 @@ def handle_chat_abort(data):
     try:
         from backend.services.unified_chat_engine import set_abort_flag
         set_abort_flag(session_id)
+        from backend.api.unified_chat_api import release_turn_slot
+        release_turn_slot(session_id)
         logger.info(f"Abort requested for chat session: {session_id}")
         emit("chat:aborted", {"session_id": session_id})
     except Exception as e:
@@ -268,10 +270,19 @@ def handle_tool_approval_response(data):
         return
     try:
         from backend.services.unified_chat_engine import set_approval_response
-        set_approval_response(session_id, approved, scope=scope, tools=tools)
+        applied = set_approval_response(
+            session_id, approved, scope=scope, tools=tools,
+            request_id=data.get("request_id"), approval_id=data.get("approval_id"),
+        )
+        if not applied:
+            emit("chat:tool_approval_ignored", {
+                "session_id": session_id,
+                "approval_id": data.get("approval_id"),
+                "error": "No approval card matching this answer is waiting.",
+            })
         logger.info(
             f"Tool approval response received for session {session_id}: "
-            f"approved={approved} scope={scope}"
+            f"approved={approved} scope={scope} applied={applied}"
         )
         
         # Check if this session is Suspended and needs to be resumed
@@ -525,14 +536,35 @@ def _handle_chat_send_local(payload):
         return
     session_id = payload.get("session_id") or str(uuid.uuid4())
     message = (payload.get("message") or "").strip()
-    image_data = payload.get("image")
+    from backend.socketio_instance import chat_attachments
+    attached_images = chat_attachments(payload)
+    image_data = attached_images[0] if attached_images else None
     if not message and not image_data:
         return
 
     if not message and image_data:
-        message = "Describe this image."
+        message = "Describe these images." if len(attached_images) > 1 else "Describe this image."
 
     options = payload.get("options", {})
+    if not isinstance(options, dict):
+        options = {}
+    # The server alone decides what the engine sees as attached this turn:
+    # the first picture is the primary one, the rest ride along for the model.
+    options.pop("attached_images", None)
+    options.pop("attached_image_urls", None)
+    # Saved for chat history exactly as POST /api/chat/unified does: one URL per
+    # picture, None where a save failed, the first one is the turn's image_url.
+    from backend.api.unified_chat_api import _save_chat_image
+    image_urls = [_save_chat_image(img) for img in attached_images]
+    image_url = image_urls[0] if image_urls else None
+    if len(attached_images) > 1:
+        options["attached_images"] = attached_images
+        if any(image_urls):
+            options["attached_image_urls"] = image_urls
+    # Named here so the brain's turn decision and its telemetry row say where
+    # the turn came from; AgentBrain reuses an id it is given.
+    options["surface"] = "cluster"
+    options.setdefault("request_id", str(uuid.uuid4()))
     is_voice_message = bool(payload.get("is_voice_message", False))
     project_id = payload.get("project_id")
     if project_id is not None:
@@ -597,32 +629,23 @@ def _handle_chat_send_local(payload):
             return
 
     def _run():
+        import contextlib
+        from backend.services import job_arbiter
         begin_turn(session_id, turn_mark)
+        # Job order on: background work holds while this turn runs.
+        interactive_turn = contextlib.ExitStack()
+        interactive_turn.enter_context(
+            job_arbiter.interactive("voice_chat" if is_voice_message else "chat", session_id)
+        )
         try:
             logger.info(f"[SOCKET-CHAT][BRIDGE-LOCAL] BACKEND THREAD START session={session_id}")
 
             # Direct tool / slash intercept ( /imagine etc ) — do this BEFORE routing
             # to brain or legacy. Guarantees bypass for slash commands in socket path too.
             try:
-                from backend.services.slash_command_executor import resolve_slash_direct_tool
-                from backend.services.unified_chat_engine import UnifiedChatEngine
-                from backend.utils.llm_service import get_llm_for_startup
-                from backend.tools.tool_registry_init import initialize_all_tools
-                d_tool, d_params = resolve_slash_direct_tool(options)
-                if d_tool:
-                    logger.info(f"[SOCKET-BRIDGE] Direct slash/direct intercept for {d_tool} before router")
-                    reg = initialize_all_tools()
-                    llm = None
-                    try:
-                        llm = get_llm_for_startup()
-                    except Exception:
-                        pass
-                    eng = UnifiedChatEngine(registry=reg, llm_instance=llm or object())
-                    eng.app = app
-                    rid = str(uuid.uuid4())
-                    disp = message or f"/{options.get('slash_command', d_tool)}"
-                    with app.app_context():
-                        eng._run_direct_tool_execution(d_tool, d_params, session_id, emit_fn, rid, disp, options)
+                from backend.services.slash_command_executor import run_direct_tool_turn
+                if run_direct_tool_turn(options, message, session_id, emit_fn, app,
+                                        project_id=project_id, log_tag="SOCKET-BRIDGE"):
                     return  # direct path handled
             except Exception as _dir_e:
                 logger.debug(f"Direct intercept (bridge) skipped: {_dir_e}")
@@ -632,18 +655,32 @@ def _handle_chat_send_local(payload):
                     session_id=session_id, message=message,
                     options=options, emit_fn=emit_fn, app=app,
                     project_id=project_id, image_data=image_data,
+                    image_url=image_url, is_voice_message=is_voice_message,
                 )
             else:
                 engine.chat(session_id, message, options, emit_fn, app=app,
                             project_id=project_id, image_data=image_data,
-                            is_voice_message=is_voice_message)
+                            image_url=image_url, is_voice_message=is_voice_message)
         except Exception as _e:
             logger.error("[BRIDGE-LOCAL] engine error: %s", _e, exc_info=True)
             emit_fn("chat:error", {"error": str(_e)})
         finally:
+            interactive_turn.close()
             end_turn(session_id)
 
-    threading.Thread(target=_run, daemon=True, name=f"bridge-chat-{session_id[:8]}").start()
+    # One turn per session, shared with POST /api/chat/unified: the previous
+    # turn (stopped by begin_new_turn above) gets a moment to exit first.
+    from backend.api.unified_chat_api import start_turn_thread
+    if start_turn_thread(session_id, _run, f"bridge-chat-{session_id[:8]}") is None:
+        logger.warning("[BRIDGE-LOCAL] session %s: previous turn still running; refused", session_id)
+        try:
+            _sio.emit("chat:error", {
+                "session_id": session_id,
+                "error": "A previous request for this session is still running and didn't "
+                         "respond to the abort signal. Stop it, or start a new chat.",
+            }, room=session_id)
+        except Exception as _e:
+            logger.warning("[BRIDGE-LOCAL] emit chat:error failed: %s", _e)
 
 
 @socketio.on("chat:send")
@@ -655,8 +692,8 @@ def handle_chat_send(payload):
     # decoded. Packets over the Socket.IO buffer never get this far (see
     # SOCKET_MAX_HTTP_BUFFER_SIZE), which is why the buffer is sized above it.
     if isinstance(payload, dict):
-        from backend.socketio_instance import chat_attachment_too_large
-        reason = chat_attachment_too_large(payload.get("image"))
+        from backend.socketio_instance import chat_attachment_too_large, chat_attachments
+        reason = chat_attachment_too_large(chat_attachments(payload))
         if reason:
             emit("chat:error", {
                 "error": reason,
@@ -666,7 +703,6 @@ def handle_chat_send(payload):
             return
     try:
         from flask import current_app, request as _req
-        import os as _os
         if current_app.config.get("CLUSTER_ENABLED", False):
             from backend.services.cluster_routing import get_routing_store
             from backend.services.fleet_map import get_fleet_map
@@ -678,15 +714,15 @@ def handle_chat_send(payload):
             if table is not None:
                 model_name = (payload or {}).get("model") if isinstance(payload, dict) else None
                 route = store.route_for_chat(model_name, fleet=get_fleet_map())
-                local_id = _os.environ.get("CLUSTER_NODE_ID", "unknown")
+                from backend.utils.node_identity import local_node_id
+                local_id = local_node_id()
                 if (route is not None and route.primary is not None
                         and route.primary != local_id):
                     node = InterconnectorNode.query.filter_by(
                         node_id=route.primary).first()
                     if node is not None and node.online:
-                        api_key = getattr(node, "api_key", None) or node.node_id
                         target = NodeTarget(node_id=node.node_id, host=node.host,
-                                            port=node.port, api_key=api_key)
+                                            port=node.port)
                         bridge = SocketIOBridgeRegistry.get_or_create(_req.sid, target)
                         bridge.forward_send(payload)
                         return
@@ -698,43 +734,51 @@ def handle_chat_send(payload):
 
 # ---- Cluster-foundation handlers (Task 14) ---------------------------------
 
+# Socket sessions opened by another machine with a signed handshake:
+# sid -> {"node": its node id, "master": whether it is the fleet's master}.
+_peer_sessions: dict = {}
+
+
 def _cluster_auth_check(auth):
     """Returns True if the handshake should be accepted.
     Cluster OFF: always True (preserve solo behavior).
-    Cluster ON: api_key → node peer; no cluster headers → local browser."""
+    Cluster ON: a handshake signed by an enrolled machine
+    (backend/utils/node_auth.py) is a peer; one that carries the old
+    api_key, or a bad signature, is refused; neither means a local browser."""
     from flask import current_app, request as _req
     if not current_app.config.get("CLUSTER_ENABLED", False):
         return True  # solo — no auth enforcement
-    key = None
-    if isinstance(auth, dict):
-        key = auth.get("api_key")
-    if key is None:
-        key = _req.headers.get("X-Guaardvark-API-Key")
-    if key:
-        if _is_valid_node_api_key(key):
-            try:
-                join_room("cluster:masters-broadcast")
-            except Exception:
-                pass
-            return True
-        return False  # key present but invalid
+    if isinstance(auth, dict) and auth.get("gx_sig"):
+        from backend.utils import node_auth
+        try:
+            cert = node_auth.verify_socket_auth(auth)
+        except Exception as exc:
+            logger.warning("[CLUSTER] refused a peer handshake: %s", getattr(exc, "reason", exc))
+            return False
+        _peer_sessions[_req.sid] = {
+            "node": cert.node,
+            "master": node_auth.is_master_certificate(cert),
+        }
+        try:
+            join_room("cluster:masters-broadcast")
+        except Exception:
+            pass
+        return True
+    if (isinstance(auth, dict) and auth.get("api_key")) or _req.headers.get("X-Guaardvark-API-Key"):
+        logger.warning("[CLUSTER] refused a peer handshake without a signature")
+        return False
     # No cluster headers/auth = local browser session — allow
     return not _looks_like_node_handshake(_req)
 
 
-def _is_valid_node_api_key(key: str) -> bool:
-    """Check if the api_key matches any known InterconnectorNode.
-    Note: the schema may or may not have an api_key column — check before asserting."""
+def _session_is_fleet_master() -> bool:
+    """True when this socket session is the fleet's master, by its signed handshake."""
+    from flask import request as _req
     try:
-        from backend.models import InterconnectorNode
-        # Legacy: if api_key field doesn't exist on the model, fall back to node_id match
-        if hasattr(InterconnectorNode, "api_key"):
-            return InterconnectorNode.query.filter_by(api_key=key).first() is not None
-        # Otherwise treat key as node_id-based auth (no hardening — matches whatever auth
-        # the Interconnector uses today)
-        return InterconnectorNode.query.filter_by(node_id=key).first() is not None
-    except Exception:
+        sid = _req.sid
+    except (AttributeError, RuntimeError):
         return False
+    return bool(_peer_sessions.get(sid, {}).get("master"))
 
 
 def _looks_like_node_handshake(request) -> bool:
@@ -747,7 +791,7 @@ def _looks_like_node_handshake(request) -> bool:
 
 @socketio.on("connect")
 def on_connect(auth=None):
-    """Gate cluster node-to-node handshakes behind api_key; browser sessions pass through."""
+    """Gate cluster node-to-node handshakes behind a signature; browser sessions pass through."""
     if not _cluster_auth_check(auth):
         return False
     return True
@@ -758,6 +802,15 @@ def handle_cluster_routing_table(data):
     """Worker-side receiver. Validates sender, persists the table."""
     import os as _os
     _logger = logging.getLogger(__name__)
+
+    # Only a session the master opened with its own signed handshake may
+    # replace this machine's routing.
+    if not _session_is_fleet_master():
+        _logger.warning("[CLUSTER] rejected routing_table from a session that is not the master")
+        return
+    if not isinstance(data, dict):
+        _logger.warning("[CLUSTER] malformed routing_table payload")
+        return
 
     expected_master = _os.environ.get("CLUSTER_MASTER_NODE_ID")
     if expected_master and data.get("computed_by") != expected_master:
@@ -780,6 +833,7 @@ def handle_cluster_routing_table(data):
 def handle_disconnect():
     """Clean up any open cluster bridge when a client disconnects."""
     from flask import request
+    _peer_sessions.pop(getattr(request, "sid", None), None)
     try:
         from backend.services.cluster_socketio_bridge import SocketIOBridgeRegistry
         SocketIOBridgeRegistry.close_for_session(request.sid)

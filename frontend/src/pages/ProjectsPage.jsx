@@ -493,7 +493,7 @@ function ProjectsPage() {
                               flexWrap: "wrap",
                               gap: 0.5,
                               fontSize: "0.75rem",
-                              color: "text.disabled",
+                              color: "text.secondary",
                             }}
                           >
                             <Typography variant="caption">
@@ -508,6 +508,11 @@ function ProjectsPage() {
                             <Typography variant="caption">
                               Rules: {project.rule_count ?? 0}
                             </Typography>
+                            {project.video_count > 0 && (
+                              <Typography variant="caption">
+                                Videos: {project.video_count}
+                              </Typography>
+                            )}
                           </Box>
                         </Grid>
                         <Grid item xs={3} sx={{ textAlign: "right" }}>
@@ -599,28 +604,32 @@ function ProjectsPage() {
                       <TableCell>{formatDate(project.updated_at)}</TableCell>
                       <TableCell align="right" sx={{ pr: 2 }}>
                         <Tooltip title="Edit Project">
-                          <IconButton
-                            size="small"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleOpenEditDialog(project);
-                            }}
-                            disabled={isSaving}
-                          >
-                            <EditIcon fontSize="small" />
-                          </IconButton>
+                          <span>
+                            <IconButton
+                              size="small"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleOpenEditDialog(project);
+                              }}
+                              disabled={isSaving}
+                            >
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                          </span>
                         </Tooltip>
                         <Tooltip title="Delete Project">
-                          <IconButton
-                            size="small"
-                            onClick={(e) => handleOpenDeleteDialog(project, e)}
-                            disabled={isSaving}
-                          >
-                            <CloseIcon
-                              fontSize="small"
-                              sx={{ color: "text.secondary" }}
-                            />
-                          </IconButton>
+                          <span>
+                            <IconButton
+                              size="small"
+                              onClick={(e) => handleOpenDeleteDialog(project, e)}
+                              disabled={isSaving}
+                            >
+                              <CloseIcon
+                                fontSize="small"
+                                sx={{ color: "text.secondary" }}
+                              />
+                            </IconButton>
+                          </span>
                         </Tooltip>
                       </TableCell>
                     </TableRow>
@@ -721,7 +730,7 @@ function ProjectsPage() {
                   helperText="Select existing client or type a new name to create one."
                   error={
                     !formClientValue &&
-                    formName.trim() /* Only show error if trying to save */
+                    Boolean(formName.trim()) /* Only show error if trying to save */
                   }
                 />
               )}

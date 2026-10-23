@@ -456,6 +456,7 @@ def register_memory_tools() -> List[str]:
         from backend.tools.memory_tools import (
             SaveMemoryTool,
             SearchMemoryTool,
+            UpdateMemoryTool,
             DeleteMemoryTool
         )
 
@@ -469,6 +470,11 @@ def register_memory_tools() -> List[str]:
         _tool_categories["search_memory"] = category
         logger.debug("Registered: SearchMemoryTool")
         
+        register_tool(UpdateMemoryTool())
+        registered.append("update_memory")
+        _tool_categories["update_memory"] = category
+        logger.debug("Registered: UpdateMemoryTool")
+
         register_tool(DeleteMemoryTool())
         registered.append("delete_memory")
         _tool_categories["delete_memory"] = category
@@ -489,12 +495,17 @@ def register_rag_tools() -> List[str]:
     category = "knowledge"
 
     try:
-        from backend.tools.rag_tools import KnowledgeSearchTool
+        from backend.tools.rag_tools import IndexDocumentTool, KnowledgeSearchTool
 
         register_tool(KnowledgeSearchTool())
         registered.append("search_knowledge_base")
         _tool_categories["search_knowledge_base"] = category
         logger.debug("Registered: KnowledgeSearchTool")
+
+        register_tool(IndexDocumentTool())
+        registered.append("index_document")
+        _tool_categories["index_document"] = category
+        logger.debug("Registered: IndexDocumentTool")
 
         # Navigation surface. Search alone is a lookup primitive: without these there
         # is no way to ask what the corpus contains, what a document is made of, or

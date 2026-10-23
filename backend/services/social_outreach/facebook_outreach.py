@@ -40,7 +40,7 @@ _POLL_S = 1.0
 # Characters of the comment looked for in the comment list after the submit.
 _NEEDLE_CHARS = 60
 
-# Labels of the box that writes a top-level comment ("Comment as guaardvark",
+# Labels of the box that writes a top-level comment ("Comment as <your Page>",
 # "Write a comment…", "Write a public comment…"); reply boxes are left out.
 _TOP_LEVEL_LABEL = re.compile(r"^(comment as\b|write a (public )?comment)", re.IGNORECASE)
 

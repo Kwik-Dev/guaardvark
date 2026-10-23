@@ -159,3 +159,52 @@ def build_slash_user_message(slash_command: str, args: str) -> str:
     if not cmd.startswith("/"):
         cmd = f"/{cmd}"
     return f"{cmd} {args}".strip() if args else cmd
+
+
+def run_direct_tool_turn(
+    options: Optional[Dict[str, Any]],
+    message: str,
+    session_id: str,
+    emit_fn,
+    app,
+    project_id: Optional[int] = None,
+    log_tag: str = "chat",
+) -> bool:
+    """Run a slash command or direct_tool as the whole turn, before any routing.
+
+    The one pre-router bypass for POST /api/chat/unified and Socket.IO
+    chat:send: the named registry tool runs through the engine's direct path
+    (approval card, tool events, history) with no model involved. Returns
+    False when the options name no direct tool, True once the turn has run.
+    Errors propagate to the caller.
+    """
+    tool_name, params = resolve_slash_direct_tool(options)
+    if not tool_name:
+        return False
+    import uuid
+
+    from backend.services.unified_chat_engine import UnifiedChatEngine
+    from backend.tools.tool_registry_init import initialize_all_tools
+    from backend.utils.llm_service import get_llm_for_startup
+
+    logger.info(f"[{log_tag}] Direct slash/direct intercept for {tool_name} before router")
+    registry = initialize_all_tools()
+    llm = None
+    try:
+        llm = get_llm_for_startup()
+    except Exception:
+        pass  # the direct path does not call the model
+    engine = UnifiedChatEngine(tool_registry=registry, llm_instance=llm or object())
+    engine.app = app
+    engine._project_id = project_id
+    request_id = str(uuid.uuid4())
+    display = message or f"/{options.get('slash_command', tool_name)}"
+    try:
+        from backend.services.turn_router import direct_turn
+        with app.app_context():
+            direct_turn(display, tool_name, surface=options.get("surface"), request_id=request_id)
+    except Exception as turn_err:
+        logger.debug(f"direct turn not recorded: {turn_err}")
+    with app.app_context():
+        engine._run_direct_tool_execution(tool_name, params, session_id, emit_fn, request_id, display, options)
+    return True

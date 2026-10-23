@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { Link as RouterLink } from "react-router-dom";
 import {
+  Alert,
   Box,
   Button,
   Chip,
@@ -40,6 +41,8 @@ import StopCircleIcon from "@mui/icons-material/StopCircle";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import AddCommentIcon from "@mui/icons-material/AddComment";
 import AddIcon from "@mui/icons-material/Add";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import EditIcon from "@mui/icons-material/Edit";
 import SaveIcon from "@mui/icons-material/Save";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
@@ -47,7 +50,7 @@ import TravelExploreIcon from "@mui/icons-material/TravelExplore";
 import * as outreachApi from "../api/outreachService";
 
 // Per-platform character soft-caps used by the pre-flight panel.
-// Sources: reddit (10000 comment), youtube (~10000), twitter (280), discord (2000),
+// Sources: reddit (10000 comment), youtube (~10000), discord (2000),
 // facebook (~5000), internal note (no cap — display only).
 const PLATFORM_LIMITS = {
   reddit: { max: 10000, label: "Reddit comment" },
@@ -55,7 +58,6 @@ const PLATFORM_LIMITS = {
   youtube: { max: 10000, label: "YouTube comment" },
   discord: { max: 2000, label: "Discord message" },
   facebook: { max: 5000, label: "Facebook post" },
-  twitter: { max: 280, label: "Tweet" },
   internal: { max: 0, label: "Internal note" },
 };
 
@@ -68,28 +70,64 @@ const TONE_OPTIONS = [
   { value: "humorous", label: "Humorous (dry, used sparingly)" },
 ];
 
-// `auto: true` = an approved draft is posted (tick_process_approved_drafts:
-// Reddit/YouTube/Facebook BiDi posters, the agent loop for X comments,
-// the Discord cog). For the others the queue is the only output, flagged in
-// the modal so an approved draft that never goes anywhere is no surprise.
+// How an approved draft goes out (backend platforms.py, also in status.posting_modes):
+// "watched" = one post at a time, started with Post now on the Approvals page while
+// the person watches the Agent Screen; "bot" = the Discord bot sends it; null = the
+// queue is the only output, flagged in the modal so that is no surprise. X and
+// LinkedIn are not offered: outreach never posts to them (a person's own
+// LinkedIn posts go through Social Accounts).
 const PLATFORM_OPTIONS = [
-  { value: "reddit", label: "Reddit comment", auto: true },
-  { value: "youtube", label: "YouTube comment", auto: true },
-  { value: "discord", label: "Discord message", auto: true },
-  { value: "twitter", label: "Twitter / X comment", auto: true },
-  { value: "facebook", label: "Facebook comment", auto: true },
-  { value: "internal", label: "Internal note", auto: false },
+  { value: "reddit", label: "Reddit comment", posts: "watched" },
+  { value: "youtube", label: "YouTube comment", posts: "watched" },
+  { value: "discord", label: "Discord message", posts: "bot" },
+  { value: "facebook", label: "Facebook comment", posts: "watched" },
+  { value: "internal", label: "Internal note", posts: null },
 ];
 
 // Terminal statuses the History panel lists ("all" shows these together).
 const HISTORY_STATUSES = ["posted", "aborted", "rejected", "unsupported"];
 
 const CHAT_EXAMPLES = [
-  "comment on youtube videos about Ollama",
-  "market Guaardvark on reddit about ComfyUI",
-  "/outreach youtube ollama",
+  "comment on youtube videos about local LLMs",
+  "find reddit threads about image generation and draft replies",
+  "/outreach youtube <topic>",
   "/outreach status",
 ];
+
+// The "What you promote" form, as the page edits it. Keywords are typed as
+// one comma-separated line per feature and split on save.
+const EMPTY_PROFILE_FORM = {
+  name: "",
+  pitch: "",
+  site_url: "",
+  repo_url: "",
+  account_handle: "",
+  videos: [],
+  features: [],
+};
+
+function profileToForm(p) {
+  return {
+    ...EMPTY_PROFILE_FORM,
+    ...(p || {}),
+    videos: (p?.videos || []).map((v) => ({ label: v.label || "", url: v.url || "" })),
+    features: (p?.features || []).map((f) => ({
+      key: f.key || "",
+      blurb: f.blurb || "",
+      keywords: (f.keywords || []).join(", "),
+    })),
+  };
+}
+
+function formToProfile(form) {
+  return {
+    ...form,
+    features: form.features.map((f) => ({
+      ...f,
+      keywords: f.keywords.split(",").map((k) => k.trim()).filter(Boolean),
+    })),
+  };
+}
 
 function countWords(text) {
   if (!text) return 0;
@@ -119,6 +157,11 @@ const OutreachPage = () => {
   const [tone, setTone] = useState("default");
   const [platform, setPlatform] = useState("reddit");
   const [snippets, setSnippets] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileForm, setProfileForm] = useState(EMPTY_PROFILE_FORM);
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [profileError, setProfileError] = useState(null);
   const [loadingQueue, setLoadingQueue] = useState(false);
   const [loadingSnippets, setLoadingSnippets] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -183,6 +226,8 @@ const OutreachPage = () => {
       setApproved(Array.isArray(rows) ? rows : []);
     } catch (e) {
       console.warn(`approved fetch failed: ${e.message}`);
+      // The approved list would read as empty; say it did not load.
+      setError(`approved fetch failed: ${e.message}`);
     }
   }, []);
 
@@ -201,6 +246,7 @@ const OutreachPage = () => {
       setHistory(Array.isArray(rows) ? rows : []);
     } catch (e) {
       console.warn(`history fetch failed: ${e.message}`);
+      setError(`history fetch failed: ${e.message}`);
     } finally {
       setLoadingHistory(false);
     }
@@ -217,11 +263,21 @@ const OutreachPage = () => {
     }
   }, []);
 
+  const fetchProfile = useCallback(async () => {
+    try {
+      const out = await outreachApi.fetchProfile();
+      setProfile(out?.profile || null);
+    } catch (e) {
+      setError(`profile fetch failed: ${e.message}`);
+    }
+  }, []);
+
   useEffect(() => {
     fetchStatus();
     fetchQueue();
     fetchApproved();
     fetchSnippets();
+    fetchProfile();
     fetchHistory();
     const t = setInterval(() => {
       fetchStatus();
@@ -230,7 +286,52 @@ const OutreachPage = () => {
       fetchHistory();
     }, 15000);
     return () => clearInterval(t);
-  }, [fetchStatus, fetchQueue, fetchApproved, fetchSnippets, fetchHistory]);
+  }, [fetchStatus, fetchQueue, fetchApproved, fetchSnippets, fetchProfile, fetchHistory]);
+
+  const profileConfigured = Boolean(profile?.name && profile?.pitch);
+
+  const openProfileDialog = () => {
+    setProfileForm(profileToForm(profile));
+    setProfileError(null);
+    setProfileOpen(true);
+  };
+
+  const setProfileField = (field, value) => {
+    setProfileForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const setProfileRow = (list, index, field, value) => {
+    setProfileForm((prev) => ({
+      ...prev,
+      [list]: prev[list].map((row, i) => (i === index ? { ...row, [field]: value } : row)),
+    }));
+  };
+
+  const addProfileRow = (list, row) => {
+    setProfileForm((prev) => ({ ...prev, [list]: [...prev[list], row] }));
+  };
+
+  const removeProfileRow = (list, index) => {
+    setProfileForm((prev) => ({ ...prev, [list]: prev[list].filter((_, i) => i !== index) }));
+  };
+
+  const handleSaveProfile = async () => {
+    setProfileBusy(true);
+    setProfileError(null);
+    try {
+      const out = await outreachApi.saveProfile(formToProfile(profileForm));
+      setProfile(out?.profile || null);
+      setProfileOpen(false);
+      setInfo(out?.configured
+        ? "Profile saved. Drafts, links and snippets now come from it."
+        : "Profile saved. Add a name and a pitch before drafting: nothing is drafted without them.");
+      await fetchSnippets();
+    } catch (e) {
+      setProfileError(e.message);
+    } finally {
+      setProfileBusy(false);
+    }
+  };
 
   const selectQueueItem = (row) => {
     setSelected(row);
@@ -258,8 +359,8 @@ const OutreachPage = () => {
     setBusy(true);
     setError(null); setInfo(null);
     try {
-      await outreachApi.approveDraft(selected.id, draft);
-      setInfo(`Approved draft #${selected.id}. Will go out on the next outreach pass.`);
+      const row = await outreachApi.approveDraft(selected.id, draft);
+      setInfo(`Approved draft #${selected.id}. ${row?.next || ""}`.trim());
       setSelected(null);
       setDraft("");
       await fetchQueue();
@@ -527,19 +628,6 @@ const OutreachPage = () => {
     }
   };
 
-  const handleSupervisedToggle = async () => {
-    if (!status) return;
-    setBusy(true);
-    try {
-      await outreachApi.setSupervised(!status.supervised);
-      await fetchStatus();
-    } catch (e) {
-      setError(`supervised toggle failed: ${e.message}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const closeNewDraftModal = async () => {
     if (ndBusy) return;
     if (ndSeededId) {
@@ -607,9 +695,8 @@ const OutreachPage = () => {
               <Chip
                 size="small"
                 icon={<VisibilityIcon />}
-                color={status.supervised ? "warning" : "default"}
-                label={status.supervised ? "Supervised (queue only)" : "Unsupervised"}
-                onClick={handleSupervisedToggle}
+                color="warning"
+                label="Every post needs your approval"
                 variant="outlined"
               />
               {status.cadence && Object.entries(status.cadence).map(([p, c]) => (
@@ -656,7 +743,7 @@ const OutreachPage = () => {
           <Tooltip title="Refresh">
             <IconButton
               size="small"
-              onClick={() => { fetchStatus(); fetchQueue(); fetchApproved(); fetchHistory(); fetchSnippets(); }}
+              onClick={() => { fetchStatus(); fetchQueue(); fetchApproved(); fetchHistory(); fetchSnippets(); fetchProfile(); }}
             >
               <RefreshIcon />
             </IconButton>
@@ -670,9 +757,9 @@ const OutreachPage = () => {
         )}
         {status && (
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1, fontSize: "0.7rem" }}>
-            {status.supervised
-              ? "Supervised: scout/draft runs queue comments here — Approve before anything posts."
-              : "Unsupervised: eligible drafts (grade ≥ 0.7, cadence OK) auto-queue for the ~60s poster. Use with care."}
+            Scout/draft runs queue comments here and nothing posts until you approve it. Approved
+            Reddit, YouTube and Facebook drafts post one at a time from the Approvals page, with
+            Post now, while you watch the Agent Screen; the Discord bot sends Discord drafts.
           </Typography>
         )}
       </Paper>
@@ -688,12 +775,61 @@ const OutreachPage = () => {
 
       <Box sx={{
         display: "grid",
-        gridTemplateColumns: { xs: "1fr", lg: "320px 1fr 320px" },
+        gridTemplateColumns: { xs: "minmax(0, 1fr)", lg: "320px minmax(0, 1fr) 320px" },
         gap: 2,
         alignItems: "start",
       }}>
         {/* ── Source / Context Zone ─────────────────────────────────── */}
         <Stack spacing={2}>
+          <Paper sx={{ p: 2 }}>
+            <Stack direction="row" alignItems="center" sx={{ mb: 1 }}>
+              <Typography variant="subtitle2" sx={{ flex: 1 }}>
+                What you promote
+              </Typography>
+              {profile && (
+                <Button
+                  size="small"
+                  variant={profileConfigured ? "text" : "outlined"}
+                  startIcon={profileConfigured ? <EditIcon /> : <AddIcon />}
+                  onClick={openProfileDialog}
+                  sx={{ textTransform: "none", py: 0.25 }}
+                >
+                  {profileConfigured ? "Edit" : "Set up"}
+                </Button>
+              )}
+            </Stack>
+            {!profile ? (
+              <CircularProgress size={20} />
+            ) : profileConfigured ? (
+              <Stack spacing={0.5}>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>{profile.name}</Typography>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}
+                >
+                  {profile.pitch}
+                </Typography>
+                <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap", gap: 0.5 }}>
+                  {profile.site_url && <Chip size="small" variant="outlined" label="site" sx={{ height: 18, fontSize: "0.65rem" }} />}
+                  {profile.repo_url && <Chip size="small" variant="outlined" label="repo" sx={{ height: 18, fontSize: "0.65rem" }} />}
+                  {profile.account_handle && <Chip size="small" variant="outlined" label={`@${profile.account_handle}`} sx={{ height: 18, fontSize: "0.65rem" }} />}
+                  <Chip size="small" variant="outlined" label={`${profile.videos?.length || 0} video${profile.videos?.length === 1 ? "" : "s"}`} sx={{ height: 18, fontSize: "0.65rem" }} />
+                  <Chip size="small" variant="outlined" label={`${profile.features?.length || 0} feature${profile.features?.length === 1 ? "" : "s"}`} sx={{ height: 18, fontSize: "0.65rem" }} />
+                </Stack>
+                {!profile.site_url && (
+                  <Typography variant="caption" color="warning.main">
+                    No site URL: self-share and linked comments are skipped until one is set.
+                  </Typography>
+                )}
+              </Stack>
+            ) : (
+              <Typography variant="body2" color="text.secondary">
+                Nothing to promote yet. Drafts, self-share and snippets stay empty until you add a name and a pitch.
+              </Typography>
+            )}
+          </Paper>
+
           <Paper sx={{ p: 2 }}>
             <Stack direction="row" alignItems="center" sx={{ mb: 1 }}>
               <Typography variant="subtitle2" sx={{ flex: 1 }}>
@@ -727,7 +863,7 @@ const OutreachPage = () => {
                   </Button>
                 </span>
               </Tooltip>
-              <Tooltip title="Scout YouTube for videos matching feature keyword profiles (Ollama, ComfyUI, voice, coding agents, …), then draft GitHub-linked comments into this queue">
+              <Tooltip title="Scout YouTube for videos matching your profile's feature keywords, then draft comments with your repo link into this queue">
                 <span style={{ flex: 1, minWidth: "30%" }}>
                   <Button
                     fullWidth
@@ -769,13 +905,18 @@ const OutreachPage = () => {
               sx={{ mb: 1, "& .MuiFormHelperText-root": { fontSize: "0.65rem", mx: 0 } }}
               inputProps={{ "aria-label": "Pass topics" }}
             />
-            <Typography variant="caption" color="text.disabled" sx={{ display: "block", mb: 1, fontSize: "0.65rem" }}>
-              YouTube pass scouts feature categories then drafts comments with the GitHub link for your approval.
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1, fontSize: "0.65rem" }}>
+              YouTube pass scouts your profile's feature keywords then drafts comments with your repo link for your approval.
             </Typography>
             {approved.length > 0 && (
               <Paper variant="outlined" sx={{ mb: 1, p: 1 }}>
                 <Typography variant="caption" sx={{ fontWeight: 600, display: "block", mb: 0.5 }}>
-                  Approved — posting next ({approved.length})
+                  Approved — waiting ({approved.length})
+                </Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5, fontSize: "0.65rem" }}>
+                  Start Reddit, YouTube and Facebook posts from the{" "}
+                  <Link component={RouterLink} to="/approvals" underline="hover">Approvals page</Link>
+                  {" "}with Post now; the Discord bot sends Discord drafts.
                 </Typography>
                 <List dense disablePadding sx={{ maxHeight: 140, overflowY: "auto" }}>
                   {approved.map((r) => (
@@ -890,28 +1031,40 @@ const OutreachPage = () => {
             <Typography variant="subtitle2" sx={{ mb: 1 }}>Snippet bank</Typography>
             {loadingSnippets ? (
               <CircularProgress size={20} />
-            ) : snippets ? (
+            ) : snippets && (snippets.pitch || snippets.site_url || snippets.repo_url || snippets.videos?.length || Object.keys(snippets.feature_blurbs || {}).length) ? (
               <Stack spacing={0.5}>
-                <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.pitch)}>Insert pitch</Button>
-                <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.site_url)}>Insert site URL</Button>
-                <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.github_url)}>Insert GitHub</Button>
-                <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.gotham_rising_url)}>Insert Gotham Rising demo</Button>
-                {snippets.short_a_url && (
-                  <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.short_a_url)}>Insert channel Short A</Button>
+                {snippets.pitch && (
+                  <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.pitch)}>Insert pitch</Button>
                 )}
-                {snippets.short_b_url && (
-                  <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.short_b_url)}>Insert channel Short B</Button>
+                {snippets.site_url && (
+                  <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.site_url)}>Insert site URL</Button>
                 )}
-                <Divider sx={{ my: 1 }} />
-                <Typography variant="caption" color="text.secondary">Feature blurbs</Typography>
-                {snippets.feature_blurbs && Object.entries(snippets.feature_blurbs).map(([k, v]) => (
-                  <Tooltip key={k} title={v} placement="left">
-                    <Button size="small" sx={{ justifyContent: "flex-start", textTransform: "none" }} onClick={() => insertSnippet(v)}>
-                      {k}
-                    </Button>
-                  </Tooltip>
+                {snippets.repo_url && (
+                  <Button size="small" variant="outlined" onClick={() => insertSnippet(snippets.repo_url)}>Insert repo URL</Button>
+                )}
+                {(snippets.videos || []).map((v, i) => (
+                  <Button key={`${v.url}-${i}`} size="small" variant="outlined" onClick={() => insertSnippet(v.url)}>
+                    Insert {v.label || `video ${i + 1}`}
+                  </Button>
                 ))}
+                {Object.keys(snippets.feature_blurbs || {}).length > 0 && (
+                  <>
+                    <Divider sx={{ my: 1 }} />
+                    <Typography variant="caption" color="text.secondary">Feature blurbs</Typography>
+                    {Object.entries(snippets.feature_blurbs).map(([k, v]) => (
+                      <Tooltip key={k} title={v} placement="left">
+                        <Button size="small" sx={{ justifyContent: "flex-start", textTransform: "none" }} onClick={() => insertSnippet(v)}>
+                          {k}
+                        </Button>
+                      </Tooltip>
+                    ))}
+                  </>
+                )}
               </Stack>
+            ) : snippets ? (
+              <Typography variant="body2" color="text.secondary">
+                Fill in "What you promote" to get snippets here.
+              </Typography>
             ) : (
               <Typography variant="body2" color="text.secondary">Snippets unavailable.</Typography>
             )}
@@ -1069,7 +1222,9 @@ const OutreachPage = () => {
                 Reject
               </Button>
               <Typography variant="caption" color="text.secondary" sx={{ mt: 1 }}>
-                Approve marks the draft so the next outreach pass posts it. Reject removes it from the queue.
+                Approve posts nothing. An approved Reddit, YouTube or Facebook draft is posted from the
+                Approvals page with Post now while you watch the Agent Screen; the Discord bot sends
+                Discord drafts. Reject removes it from the queue.
               </Typography>
             </Stack>
           </Paper>
@@ -1108,9 +1263,11 @@ const OutreachPage = () => {
             />
           ))}
           <Tooltip title="Refresh now">
-            <IconButton size="small" onClick={fetchHistory} disabled={loadingHistory}>
-              <RefreshIcon fontSize="small" />
-            </IconButton>
+            <span>
+              <IconButton size="small" onClick={fetchHistory} disabled={loadingHistory}>
+                <RefreshIcon fontSize="small" />
+              </IconButton>
+            </span>
           </Tooltip>
         </Stack>
         {loadingHistory && history.length === 0 ? (
@@ -1173,11 +1330,11 @@ const OutreachPage = () => {
                             {row.target_url} <OpenInNewIcon fontSize="inherit" />
                           </Link>
                         ) : (
-                          <Typography variant="caption" color="text.disabled" sx={{ flex: 1 }}>
+                          <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
                             (no target url)
                           </Typography>
                         )}
-                        <Typography variant="caption" color="text.disabled">
+                        <Typography variant="caption" color="text.secondary">
                           #{row.id}
                         </Typography>
                       </Stack>
@@ -1231,7 +1388,7 @@ const OutreachPage = () => {
           )}
           <Box sx={{
             display: "grid",
-            gridTemplateColumns: { xs: "1fr", md: "260px 1fr" },
+            gridTemplateColumns: { xs: "minmax(0, 1fr)", md: "260px minmax(0, 1fr)" },
             gap: 2,
           }}>
             {/* Metadata column */}
@@ -1241,7 +1398,7 @@ const OutreachPage = () => {
                 <Select value={ndPlatform} label="Platform" onChange={(e) => setNdPlatform(e.target.value)}>
                   {PLATFORM_OPTIONS.map(p => (
                     <MenuItem key={p.value} value={p.value}>
-                      {p.label}{p.auto ? "" : " (no auto-post yet)"}
+                      {p.label}{p.posts ? "" : " (not posted)"}
                     </MenuItem>
                   ))}
                 </Select>
@@ -1291,10 +1448,11 @@ const OutreachPage = () => {
                 onChange={(e) => setNdThreadId(e.target.value)}
                 fullWidth
               />
-              {!PLATFORM_OPTIONS.find(p => p.value === ndPlatform)?.auto && (
+              {!PLATFORM_OPTIONS.find(p => p.value === ndPlatform)?.posts && (
                 <CollapsibleAlert severity="info" sx={{ py: 0.5, fontSize: "0.7rem" }}>
-                  No auto-post backend for {ndPlatform} yet — approving will queue the row but not ship it.
+                  Nothing here posts to {ndPlatform}; approving keeps the row but does not ship it.
                 </CollapsibleAlert>
+
               )}
               <Divider sx={{ my: 0.5 }} />
               <Typography variant="caption" color="text.secondary">
@@ -1374,6 +1532,190 @@ const OutreachPage = () => {
         </DialogActions>
       </Dialog>
 
+      {/* ── What you promote ────────────────────────────────────────── */}
+      <Dialog
+        open={profileOpen}
+        onClose={() => { if (!profileBusy) setProfileOpen(false); }}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle sx={{ pb: 1 }}>
+          What you promote
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.5 }}>
+            Stays on this machine (data/social_outreach/profile.json). Drafts cite only what is here; the pitch sheet in data/agent/PITCH.md, when present, takes precedence over the pitch and features.
+          </Typography>
+        </DialogTitle>
+        <DialogContent dividers>
+          {profileError && (
+            <Alert severity="error" sx={{ mb: 2 }} onClose={() => setProfileError(null)}>
+              {profileError}
+            </Alert>
+          )}
+          <Stack spacing={1.5}>
+            <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
+              <TextField
+                size="small"
+                label="Name"
+                placeholder="What you call it"
+                value={profileForm.name}
+                onChange={(e) => setProfileField("name", e.target.value)}
+                fullWidth
+                inputProps={{ maxLength: 80 }}
+              />
+              <TextField
+                size="small"
+                label="Account handle"
+                placeholder="the account you post from, without @"
+                value={profileForm.account_handle}
+                onChange={(e) => setProfileField("account_handle", e.target.value)}
+                fullWidth
+                inputProps={{ maxLength: 80 }}
+              />
+            </Stack>
+            <TextField
+              size="small"
+              label="Pitch"
+              placeholder="One or two sentences on what it is and who it is for."
+              value={profileForm.pitch}
+              onChange={(e) => setProfileField("pitch", e.target.value)}
+              multiline
+              minRows={2}
+              maxRows={6}
+              fullWidth
+              inputProps={{ maxLength: 2000 }}
+            />
+            <Stack direction={{ xs: "column", md: "row" }} spacing={1.5}>
+              <TextField
+                size="small"
+                label="Site URL"
+                placeholder="https://"
+                value={profileForm.site_url}
+                onChange={(e) => setProfileField("site_url", e.target.value)}
+                fullWidth
+                helperText="Where comments and self-share posts point. Links to it get UTM tags."
+              />
+              <TextField
+                size="small"
+                label="Repo URL"
+                placeholder="https://"
+                value={profileForm.repo_url}
+                onChange={(e) => setProfileField("repo_url", e.target.value)}
+                fullWidth
+                helperText="Preferred over the site on YouTube."
+              />
+            </Stack>
+
+            <Divider />
+            <Stack direction="row" alignItems="center">
+              <Typography variant="subtitle2" sx={{ flex: 1 }}>Videos</Typography>
+              <Button
+                size="small"
+                startIcon={<AddIcon />}
+                disabled={profileForm.videos.length >= 20}
+                onClick={() => addProfileRow("videos", { label: "", url: "" })}
+                sx={{ textTransform: "none" }}
+              >
+                Add video
+              </Button>
+            </Stack>
+            {profileForm.videos.length === 0 && (
+              <Typography variant="caption" color="text.secondary">
+                Each one becomes an insert button in the snippet bank.
+              </Typography>
+            )}
+            {profileForm.videos.map((v, i) => (
+              <Stack key={`video-${i}`} direction="row" spacing={1} alignItems="flex-start">
+                <TextField
+                  size="small"
+                  label="Label"
+                  value={v.label}
+                  onChange={(e) => setProfileRow("videos", i, "label", e.target.value)}
+                  sx={{ width: { xs: "40%", md: 220 } }}
+                  inputProps={{ maxLength: 80 }}
+                />
+                <TextField
+                  size="small"
+                  label="URL"
+                  placeholder="https://"
+                  value={v.url}
+                  onChange={(e) => setProfileRow("videos", i, "url", e.target.value)}
+                  fullWidth
+                />
+                <Tooltip title="Remove">
+                  <IconButton size="small" onClick={() => removeProfileRow("videos", i)} sx={{ mt: 0.25 }}>
+                    <DeleteOutlineIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
+            ))}
+
+            <Divider />
+            <Stack direction="row" alignItems="center">
+              <Typography variant="subtitle2" sx={{ flex: 1 }}>Features</Typography>
+              <Button
+                size="small"
+                startIcon={<AddIcon />}
+                disabled={profileForm.features.length >= 40}
+                onClick={() => addProfileRow("features", { key: "", blurb: "", keywords: "" })}
+                sx={{ textTransform: "none" }}
+              >
+                Add feature
+              </Button>
+            </Stack>
+            <Typography variant="caption" color="text.secondary">
+              The blurb is what a draft may say about the feature. Keywords (comma-separated, whole words) are what a thread has to mention for the scouts to pick it up; the first feature whose keyword matches wins, so list the specific ones first.
+            </Typography>
+            {profileForm.features.map((f, i) => (
+              <Stack key={`feature-${i}`} direction="row" spacing={1} alignItems="flex-start">
+                <TextField
+                  size="small"
+                  label="Key"
+                  placeholder="local_ai"
+                  value={f.key}
+                  onChange={(e) => setProfileRow("features", i, "key", e.target.value)}
+                  sx={{ width: { xs: "30%", md: 160 } }}
+                  inputProps={{ maxLength: 40 }}
+                />
+                <TextField
+                  size="small"
+                  label="Blurb"
+                  value={f.blurb}
+                  onChange={(e) => setProfileRow("features", i, "blurb", e.target.value)}
+                  fullWidth
+                  inputProps={{ maxLength: 300 }}
+                />
+                <TextField
+                  size="small"
+                  label="Keywords"
+                  placeholder="ollama, local llm"
+                  value={f.keywords}
+                  onChange={(e) => setProfileRow("features", i, "keywords", e.target.value)}
+                  sx={{ width: { xs: "40%", md: 260 } }}
+                />
+                <Tooltip title="Remove">
+                  <IconButton size="small" onClick={() => removeProfileRow("features", i)} sx={{ mt: 0.25 }}>
+                    <DeleteOutlineIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
+            ))}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setProfileOpen(false)} disabled={profileBusy}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            startIcon={profileBusy ? <CircularProgress size={14} /> : <SaveIcon />}
+            onClick={handleSaveProfile}
+            disabled={profileBusy}
+          >
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={postingStopConfirmOpen} onClose={() => setPostingStopConfirmOpen(false)}>
         <DialogTitle>
           {status?.posting_stopped ? "Resume public posting?" : "Stop all public posting?"}
@@ -1381,7 +1723,7 @@ const OutreachPage = () => {
         <DialogContent>
           <DialogContentText>
             {status?.posting_stopped
-              ? "Posts can go out again. Held Connections publishes stay on the Approvals page until someone approves them; approved outreach drafts post on the usual schedule while outreach is enabled."
+              ? "Posts can go out again. Held Connections publishes stay on the Approvals page until someone approves them; approved outreach drafts can be posted again while outreach is enabled (Reddit, YouTube and Facebook with Post now on the Approvals page)."
               : "Nothing is posted publicly from this install until you resume: no outreach replies or shares, and no Connections publishes, including scheduled, chat and MCP requests. Queued Connections publishes are held on the Approvals page and need approving again; approved outreach drafts stay approved. A post already being sent may still go out. This is separate from the outreach Enabled switch."}
           </DialogContentText>
         </DialogContent>
@@ -1406,7 +1748,7 @@ const OutreachPage = () => {
           <DialogContentText>
             {status?.enabled
               ? "This turns the kill switch off: scheduled ticks and new passes stop. Approved drafts will not post until you enable again."
-              : "This turns outreach on. Supervised mode still requires Approve before posts go out."}
+              : "This turns outreach on. Every draft still waits for your approval, and Reddit, YouTube and Facebook posts start only from Post now on the Approvals page."}
           </DialogContentText>
         </DialogContent>
         <DialogActions>

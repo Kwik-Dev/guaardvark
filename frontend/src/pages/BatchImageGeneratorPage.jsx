@@ -4,6 +4,7 @@
 
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
+  Alert,
   Box,
   Card,
   CardContent,
@@ -58,15 +59,20 @@ import PageLayout from '../components/layout/PageLayout';
 import CharacterPicker from '../components/filmcrew/CharacterPicker';
 import ImageLightbox from '../components/images/ImageLightbox';
 import BatchHistoryCard from '../components/images/BatchHistoryCard';
+import PromptTokenCounter from '../components/images/PromptTokenCounter';
 import GpuGateBanner from '../components/common/GpuGateBanner';
 import useJobsGate from '../hooks/useJobsGate';
 import { formatUiError } from '../utils/uiError';
+import { handleResponse } from '../api/apiClient';
 import { ActionButton, Hint, SettingChip } from '../components/settings/ui';
 import {
+  QWEN_IMAGE_21_GUIDANCE_MAX,
   ZIMAGE_GUIDANCE,
   ZIMAGE_PRESET_STEPS,
   ZIMAGE_STEPS,
   MAX_QUANTITY,
+  IMAGE_MAX_SEED,
+  parseImageSeed,
   buildFinalPrompts,
   clampQuantity,
   ignoresNegativeAndAnatomy,
@@ -74,6 +80,7 @@ import {
   isZimageModel,
   modelFamily,
   modelInstallNeed,
+  promptStyleFor,
   qualityPresetsForModel,
   resolveQualityPreset,
   stripCopyCounter,
@@ -111,7 +118,10 @@ const mapBatchResultsToImages = (batchStatus) => {
       thumbnail: r.thumbnail_path,
       imageFilename: getFilenameFromPath(r.image_path),
       thumbnailFilename: getFilenameFromPath(r.thumbnail_path),
+      // original_prompt is what the person typed; rewritten_prompt is the chat
+      // model's version when one replaced it before rendering (details only).
       prompt: r.metadata?.original_prompt || '',
+      rewrittenPrompt: r.metadata?.rewritten_prompt || '',
       metadata: r.metadata,
       batchId: batchStatus.batch_id,
     }));
@@ -122,6 +132,8 @@ const POLLABLE_STATUSES = new Set(['queued', 'pending', 'running']);
 const TERMINAL_BATCH_STATUSES = new Set(['completed', 'error', 'cancelled']);
 // Recent Batches reloads at most this often while a batch is landing images.
 const GALLERY_REFRESH_MS = 1500;
+// The queue polls every 2.5s: three misses in a row (~7.5s) is an outage, not a blip.
+const QUEUE_FAILURES_BEFORE_NOTICE = 3;
 
 const debugLog = (...args) => {
   if (import.meta.env.DEV) {
@@ -163,14 +175,23 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  // Typed seed; blank gives every image its own seed.
+  const [seedText, setSeedText] = useState('');
   const [imageModelsModalOpen, setImageModelsModalOpen] = useState(false);
   // Set by an Install button: Manage models opens on that row and starts it.
   const [installModelId, setInstallModelId] = useState(null);
   const [showPromptPreview, setShowPromptPreview] = useState(false);
+  // Where the offline generator renders ("cuda", "mps", "cpu"); from /batch-image/status.
+  // On a CUDA card the worker renders one picture at a time whatever Max Workers
+  // says (batch_image_generator: one pipeline on one card), so the page shows that.
+  const [generatorDevice, setGeneratorDevice] = useState(null);
   // Live queue panel (mirrors Video Gen) — stacked batches drain one-at-a-time
   const [queue, setQueue] = useState([]);
   const queueSignatureRef = useRef('');
-  const { gpuBusy, blockReason } = useJobsGate({ submitMode: 'queue' });
+  const queueFailuresRef = useRef(0);
+  // Why Recent Batches could not be loaded; shown instead of "No image batches found".
+  const [historyError, setHistoryError] = useState(null);
+  const { gpuBusy, blockReason, blockDetail } = useJobsGate({ submitMode: 'queue' });
 
   // Director intelligence (new) — expand high-level concept via media_director (same as MV)
   const [directorEnabled, setDirectorEnabled] = useState(false);
@@ -238,13 +259,18 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   ];
 
   // Model options — fetched from the backend (/batch-image/models) so the list
-  // never drifts from the canonical catalog. "Auto" routes per-prompt.
+  // never drifts from the canonical catalog. "Auto" renders with the Stills model
+  // chosen in Settings > Generation; with none chosen it routes per prompt.
   const AUTO_MODEL_OPTION = {
     value: 'auto',
     label: 'Auto — best per prompt ⭐',
-    description: 'Router picks the best downloaded model for each prompt',
+    description: 'Uses the Stills model chosen in Settings > Generation; with none chosen, the router picks the best downloaded model for each prompt',
   };
   const [modelOptions, setModelOptions] = useState([AUTO_MODEL_OPTION]);
+  // What Auto renders with today and how that model reads a prompt ('natural'
+  // or 'tags'), from /batch-image/models: the same selection the batch uses.
+  const [autoPromptStyle, setAutoPromptStyle] = useState(null);
+  const [autoModel, setAutoModel] = useState(null);
   // User LoRAs from Manage Image Models: rows from the same models call, and the
   // ids switched on for this run. Sent as adapters; the backend resolves files.
   const [userAdapters, setUserAdapters] = useState([]);
@@ -272,15 +298,19 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const loadImageModels = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/batch-image/models`);
-      const data = await response.json();
+      const data = await handleResponse(response, { quiet: true });
       if (data.success && data.data?.models) {
         const fetched = data.data.models.map(imageModelOption);
         setModelOptions([AUTO_MODEL_OPTION, ...fetched]);
+        if (data.data.auto_prompt_style) setAutoPromptStyle(data.data.auto_prompt_style);
+        setAutoModel(data.data.auto_model || null);
         setUnavailableModels(data.data.unavailable_models || []);
         setUserAdapters((data.data.adapters || []).filter((a) => a.is_downloaded));
       }
     } catch (e) {
       debugLog('Failed to load image models', e);
+      // Only "Auto" is left to pick from; say why instead of a near-empty list.
+      setError(`Image models could not be loaded: ${formatUiError(e) || 'the request failed'}. Only Auto is offered until they load.`);
     }
   }, []);
 
@@ -298,8 +328,20 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
   // Quality presets — family-aware (see utils/batchImageSettings for the tables).
   const isFlux = family === 'flux';
+  const isQwenImage21 = family === 'qwen-image-21';
+  // Stills rendered by a ComfyUI graph: one picture at a time, 1K native, and a
+  // guidance scale that is not SD-era CFG.
+  const comfyStills = isFlux || isQwenImage21;
   const isZimage = isZimageModel(params.model);
   const unusedNegAnat = ignoresNegativeAndAnatomy(params.model);
+  // A prose model (Z-Image, and Auto while it resolves to one) reads tag
+  // suffixes as scene content, so the backend never applies the content type
+  // to it (offline_image_generator.enhance_prompt_for_quality, natural branch).
+  const prosePrompts = promptStyleFor(params.model, modelOptions, autoPromptStyle) === 'natural';
+  const modelLabel = modelOptions.find(m => m.value === params.model)?.label || params.model;
+  const autoModelLabel = autoModel
+    ? (modelOptions.find(m => m.value === autoModel)?.name || autoModel)
+    : null;
   const isModernDit = family === 'auto' || family === 'zimage' || family.startsWith('krea');
   const qualityPresets = qualityPresetsForModel(params.model);
   // A selected character renders with its base model's steps and guidance (the
@@ -307,6 +349,13 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   // picked. Every mode but CSV sends the cast.
   const castLocked = castSubjectIds.length > 0 && inputMode !== 'csv';
   const castLockedNote = 'Set by the selected character\u2019s base model while a character is picked.';
+  // The worker renders one picture at a time on a CUDA card (one pipeline, one
+  // card), so Max Workers only applies elsewhere; the chip shows the real count.
+  const oneAtATime = generatorDevice === 'cuda' || comfyStills;
+  const effectiveWorkers = oneAtATime ? 1 : params.max_workers;
+  const oneAtATimeNote = comfyStills && generatorDevice !== 'cuda'
+    ? `${isFlux ? 'FLUX' : 'Qwen-Image 2.1'} renders one picture at a time.`
+    : 'One picture at a time on the graphics card.';
 
   // Generating never downloads a model. A picked model that is not installed
   // holds Start until Install finishes. A character renders with its own base
@@ -362,11 +411,19 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     { label: 'Flux max 9:16 (1088x1920)', width: 1088, height: 1920, pack: 'flux2mp' },
     { label: 'Flux max 3:2 (1728x1152)', width: 1728, height: 1152, pack: 'flux2mp' },
     { label: 'Flux max 2:3 (1152x1728)', width: 1152, height: 1728, pack: 'flux2mp' },
+    // Qwen-Image 2.1 2K pack: the official ComfyUI template notes native 2K
+    // (2048x2048) output and sides in multiples of 32; no side above 2048.
+    { label: 'Qwen 2K Square (2048x2048)', width: 2048, height: 2048, pack: 'qwen2k' },
+    { label: 'Qwen 2K 16:9 (2048x1152)', width: 2048, height: 1152, pack: 'qwen2k' },
+    { label: 'Qwen 2K 9:16 (1152x2048)', width: 1152, height: 2048, pack: 'qwen2k' },
+    { label: 'Qwen 2K 3:2 (2048x1376)', width: 2048, height: 1376, pack: 'qwen2k' },
+    { label: 'Qwen 2K 2:3 (1376x2048)', width: 1376, height: 2048, pack: 'qwen2k' },
   ];
 
   const dimensionPresetsForModel = (modelValue) => {
     const fam = modelFamily(modelValue);
     const flux = fam === 'flux';
+    const qwen = fam === 'qwen-image-21';
     const modernDit = fam === 'auto' || fam === 'zimage' || fam.startsWith('krea');
     const legacySd = fam === 'sd';
     return dimensionPresetsBase.filter((p) => {
@@ -375,6 +432,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       if (p.pack === '1k') return !legacySd;
       if (p.pack === '2k') return modernDit && !flux;
       if (p.pack === 'flux2mp') return flux;
+      if (p.pack === 'qwen2k') return qwen;
       return true;
     });
   };
@@ -415,20 +473,30 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           director_guidance: directorGuidance || undefined,
         })
       });
-      if (!resp.ok) throw new Error('expand failed');
-      const j = await resp.json();
+      let j = null;
+      try {
+        j = await resp.json();
+      } catch (e) {
+        j = null;
+      }
+      if (!resp.ok) {
+        throw new Error(errorMessageFrom(j, `HTTP ${resp.status}`));
+      }
       const plan = j?.data?.plan || j?.plan;
       const shots = (plan && plan.shots) || [];
       if (shots.length) {
         const lines = shots.map(s => (s.prompt || '').trim()).filter(Boolean);
         setBatchItems(lines.join('\n'));
         setInputMode('bulk'); // Director produces multiple -> switch to bulk
-        setSuccess(`Director expanded to ${lines.length} coherent shots (review & launch)`);
+        setSuccess(`Your idea became ${lines.length} shots. Read them over, edit any line, then Start.`);
       } else {
-        setError('Director returned no shots');
+        setError('The chat model gave no shots for this idea. Try a fuller description, or check that a chat model is running under Settings.');
       }
     } catch (e) {
-      setError('Director expand failed (ollama may be busy)');
+      setError(
+        'Could not turn the idea into shots. Check that a chat model is installed and running '
+        + `under Settings, then try again. (${e.message || e})`,
+      );
     } finally {
       setIsExpanding(false);
     }
@@ -455,6 +523,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       if (!data.success) {
         setError('Batch image generation service is not available');
       }
+      const device = data.data?.image_generator?.device;
+      if (typeof device === 'string') setGeneratorDevice(device);
     } catch (err) {
       setError('Failed to check service status');
     }
@@ -473,16 +543,19 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
       if (!response.ok) {
         console.error(`Failed to load batch history: HTTP ${response.status}`);
+        setHistoryError(`the backend answered HTTP ${response.status}`);
         return;
       }
 
       const contentType = response.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
         console.error('Response is not JSON:', contentType);
+        setHistoryError('the backend did not answer with batch data');
         return;
       }
 
       const data = await response.json();
+      setHistoryError(null);
 
       if (data.success) {
         let storedCleared = [];
@@ -497,6 +570,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       }
     } catch (err) {
       console.error('Failed to load batch history:', err);
+      setHistoryError(formatUiError(err) || 'the request failed');
     }
   }, []);
 
@@ -516,7 +590,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
   const fetchQueue = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/batch-image/queue`);
-      if (!response.ok) return;
+      if (!response.ok) throw new Error(`the backend answered HTTP ${response.status}`);
       const data = await response.json();
       const rows = data?.data?.queue ?? data?.queue ?? [];
       // Frontend-only dismissal: hide terminal rows the user cleared. Only
@@ -537,11 +611,17 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
       const signature = visible
         .map((q) => `${q.batch_id}:${q.status}:${q.completed_images ?? ''}/${q.total_images ?? ''}`)
         .join('|');
+      queueFailuresRef.current = 0;
       if (signature === queueSignatureRef.current) return;
       queueSignatureRef.current = signature;
       setQueue(visible);
     } catch (err) {
       console.debug('Failed to load image batch queue:', err);
+      // A poll: one miss stays quiet; a failure that persists is said once.
+      queueFailuresRef.current += 1;
+      if (queueFailuresRef.current === QUEUE_FAILURES_BEFORE_NOTICE) {
+        setError(`The batch queue is not updating: ${formatUiError(err) || 'the request failed'}.`);
+      }
     }
   }, []);
 
@@ -882,7 +962,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         newParams.steps = ZIMAGE_PRESET_STEPS[presetValue] ?? ZIMAGE_STEPS;
         newParams.guidance = ZIMAGE_GUIDANCE;
       }
-      if (fam === 'flux') {
+      if (fam === 'flux' || fam === 'qwen-image-21') {
         newParams.max_workers = 1; // VRAM safety — heavy Comfy graph
       }
       // The explicit High 2K preset is the only thing that puts the canvas at 2048².
@@ -1023,14 +1103,17 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
           enhanceHands,
           directorEnabled,
           directorGuidance,
+          seedText,
         };
 
+        const typedSeed = parseImageSeed(seedText);
         response = await fetch(`${API_BASE}/batch-image/generate/prompts`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             prompts: promptsToGenerate,
             ...params,
+            ...(typedSeed != null ? { seed: typedSeed } : {}),
             // Cast characters: backend resolves these to LoRA paths + trigger.
             subject_ids: castSubjectIds,
             // User LoRAs switched on below the model select.
@@ -1095,7 +1178,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         setSuccess(
           inputMode === 'blueprint'
             ? (data.data?.message || 'Blueprint batch queued. Results appear as generation completes.')
-            : 'Batch queued. Worker drains one batch at a time — keep stacking them.',
+            : 'Batch queued. Batches render one after another; you can queue more while this one runs.',
         );
         // Free the form so the next job can be composed immediately (like Video Gen).
         if (inputMode === 'single' || inputMode === 'bulk') {
@@ -1177,6 +1260,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         if (typeof cfg.enhanceHands === 'boolean') setEnhanceHands(cfg.enhanceHands);
         if (typeof cfg.directorEnabled === 'boolean') setDirectorEnabled(cfg.directorEnabled);
         if (typeof cfg.directorGuidance === 'string') setDirectorGuidance(cfg.directorGuidance);
+        setSeedText(typeof cfg.seedText === 'string' ? cfg.seedText : '');
         setSuccess(`Loaded "${name}" settings into control panel — adjust anything, then Start Generation.`);
       } else if (Array.isArray(rd.prompts)) {
         // rd.prompts is the EXPANDED list - one entry per generated image. A batch of
@@ -1275,6 +1359,8 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
     setLightboxImage({
       url,
       name: img.prompt || img.imageFilename || '',
+      caption: img.rewrittenPrompt ? `Sent to the model: ${img.rewrittenPrompt}` : '',
+      seed: img.metadata?.seed_used ?? null,
       fileIndex: index,
     });
   }, [activeBatch?.batch_id, buildBatchImageUrl]);
@@ -1387,7 +1473,20 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                 Generation Settings
               </Typography>
 
-              {/* Content Preset Selector - Primary control for better images */}
+              {/* Content Preset Selector. Only tag-style models take it; a prose
+                  model gets a one-line note instead of a control that does nothing. */}
+              {prosePrompts ? (
+                <Box sx={{ mb: 3 }}>
+                  <Hint>
+                    {family === 'auto'
+                      ? (autoModelLabel
+                        ? `Content Type is not used: Auto renders with ${autoModelLabel}, which reads the prompt as plain sentences.`
+                        : 'Content Type is not used: Auto picks a model that reads the prompt as plain sentences.')
+                      : `Content Type is not used by ${modelLabel}: it reads the prompt as plain sentences.`}
+                    {' '}Describe the scene in your own words. The content types only shape prompts for tag-style models.
+                  </Hint>
+                </Box>
+              ) : (
               <Box sx={{ mb: 3, p: 2, bgcolor: 'primary.50', borderRadius: 2, border: '1px solid', borderColor: 'primary.200' }}>
                 <Typography variant="subtitle2" sx={{ mb: 1.5, fontWeight: 600, color: 'primary.main' }}>
                   Content Type (for better quality)
@@ -1465,6 +1564,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   </Select>
                 </FormControl>
               </Box>
+              )}
 
               {/* Input Mode Selection */}
               <Box sx={{ mb: 3 }}>
@@ -1568,6 +1668,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                       }
                     }}
                   />
+                  <PromptTokenCounter prompts={finalPrompts} model={params.model} sx={{ mt: -1.5, mb: 1 }} />
                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                     Whole text = 1 prompt. Quantity duplicates it exactly for multiple images.
                   </Typography>
@@ -1597,6 +1698,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                       }
                     }}
                   />
+                  <PromptTokenCounter prompts={finalPrompts} model={params.model} sx={{ mt: -1.5, mb: 1 }} />
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
                     <Typography variant="caption" color="text.secondary">
                       {uniquePromptCount} prompts ready for generation (bulk mode)
@@ -1689,19 +1791,28 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                     sx={{ mt: 2 }}
                   />
                   <Box sx={{ mt: 1.5, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+                    {/* The backend adds the anatomy phrasing only on the tag path
+                        (offline_image_generator.enhance_prompt_for_quality); a prose
+                        model, and Auto while it resolves to one, skips it. */}
                     <SettingChip
                       label="Enhance anatomy"
                       on={enhanceAnatomy}
-                      disabled={unusedNegAnat}
+                      disabled={prosePrompts}
                       tooltip={
-                        unusedNegAnat
-                          ? 'This model does not use anatomy enhancement.'
+                        prosePrompts
+                          ? 'Not used here: this model reads the prompt as plain sentences, so anatomy tags would be drawn as scene content. Describe the pose in words instead.'
                           : 'Adds anatomy phrasing when the prompt is a person.'
                       }
                       onToggle={setEnhanceAnatomy}
                     />
-                    {unusedNegAnat && (
-                      <Hint>This model does not use a negative prompt or anatomy enhancement.</Hint>
+                    {(prosePrompts || unusedNegAnat) && (
+                      <Hint>
+                        {prosePrompts && unusedNegAnat
+                          ? 'This model does not use a negative prompt or anatomy enhancement.'
+                          : prosePrompts
+                            ? 'This model does not use anatomy enhancement.'
+                            : 'This model does not use a negative prompt.'}
+                      </Hint>
                     )}
                   </Box>
                 </Box>
@@ -1812,7 +1923,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                     </Box>
                     <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
                       <Chip
-                        label={`Model: ${modelOptions.find(m => m.value === params.model)?.label || params.model}${installBlocksStart ? ' (not installed)' : ''}`}
+                        label={`Model: ${modelLabel}${installBlocksStart ? ' (not installed)' : ''}`}
                         size="small"
                         variant="outlined"
                         color={installBlocksStart ? 'warning' : 'default'}
@@ -1838,9 +1949,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                         variant="outlined"
                       />
                       <Chip
-                        label={`Workers: ${params.max_workers}`}
+                        label={oneAtATime ? 'One at a time' : `Workers: ${effectiveWorkers}`}
                         size="small"
                         variant="outlined"
+                        title={oneAtATime ? oneAtATimeNote : undefined}
                       />
                     </Box>
                   </Box>
@@ -1961,8 +2073,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
                         <Grid item xs={12}>
                           {/* auto_enhance picks the prompt-enhancement rung at render time
-                              (stills_policy.resolve_enhance_mode). It never touches steps,
-                              guidance or size — those come from the model's recipe above. */}
+                              (stills_policy.resolve_enhance_mode): a chat-model prose rewrite
+                              for a natural-language model, tag stuffing for a tag-style one.
+                              It never touches steps, guidance or size — those come from the
+                              model's recipe above. */}
                           <FormControlLabel
                             control={
                               <Switch
@@ -1975,11 +2089,17 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                               <Box>
                                 <Typography variant="body2">Enhance prompts automatically</Typography>
                                 <Typography variant="caption" color="text.secondary">
-                                  {autoEnhance
-                                    ? (unusedNegAnat
-                                      ? 'Adds the content type\u2019s quality phrasing to each prompt. Anatomy tags and negatives are not used by this model. Steps and guidance are not changed.'
-                                      : 'Adds the content type\u2019s quality and anatomy phrasing (and negatives) to each prompt. Steps and guidance are not changed.')
-                                    : 'Off — prompts are sent as written.'}
+                                  {!autoEnhance
+                                    ? 'Off — prompts are sent as written.'
+                                    : prosePrompts
+                                      ? ('Rewrites each prompt into a fuller description with the chat model before rendering. '
+                                        + (params.style === 'realistic'
+                                          ? 'If no chat model answers, the prompt goes as typed. '
+                                          : `If no chat model answers, the prompt goes as typed plus one sentence asking for the ${params.style} look. `)
+                                        + 'Steps and guidance are not changed.')
+                                      : unusedNegAnat
+                                        ? 'Adds the content type\u2019s quality and anatomy phrasing to each prompt. This model ignores negative prompts. Steps and guidance are not changed.'
+                                        : 'Adds the content type\u2019s quality and anatomy phrasing (and negatives) to each prompt. Steps and guidance are not changed.'}
                                 </Typography>
                               </Box>
                             }
@@ -2011,19 +2131,34 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                             onChange={(e) => setQuantity(clampQuantity(e.target.value))}
                             inputProps={{ min: 1, max: MAX_QUANTITY }}
                           />
-                          <Button
-                            variant="outlined"
-                            size="small"
-                            onClick={handleDirectorExpand}
-                            disabled={isExpanding || !(batchItems || lookAndFeel).trim()}
-                            title="Media Director (shared with MusicVideo): expand concept into N distinct coherent prompts"
+                          {/* /batch-image/expand-concept: the chat model turns the idea above
+                              into one prompt per shot and fills the prompt box with them. */}
+                          <Tooltip
+                            arrow
+                            title="Turns the idea above into several different shots, one prompt each, written by the chat model. They replace the text above so you can read and edit them before you start."
                           >
-                            {isExpanding ? '…' : 'Director expand'}
-                          </Button>
-                          <FormControlLabel
-                            control={<Switch size="small" checked={directorEnabled} onChange={(e) => setDirectorEnabled(e.target.checked)} />}
-                            label="use director"
-                          />
+                            <span>
+                              <Button
+                                variant="outlined"
+                                size="small"
+                                onClick={handleDirectorExpand}
+                                disabled={isExpanding || !(batchItems || lookAndFeel).trim()}
+                              >
+                                {isExpanding ? 'Writing shots…' : 'Expand into shots'}
+                              </Button>
+                            </span>
+                          </Tooltip>
+                          {/* director_mode: stills_policy picks the chat-model rewrite for every
+                              prompt, whatever the model's default enhancement would be. */}
+                          <Tooltip
+                            arrow
+                            title="Has the chat model rewrite every prompt into a fuller description before rendering, instead of the quick tag phrasing. Prose models get this rewrite anyway when Enhance prompts is on."
+                          >
+                            <FormControlLabel
+                              control={<Switch size="small" checked={directorEnabled} onChange={(e) => setDirectorEnabled(e.target.checked)} />}
+                              label="Rewrite prompts with the chat model"
+                            />
+                          </Tooltip>
                         </Grid>
 
                         <Grid item xs={12} sm={6} md={4}>
@@ -2055,7 +2190,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                                 </MenuItem>
                               ))}
                             </Select>
-                            {(isFlux || isModernDit)
+                            {(comfyStills || isModernDit)
                               && (params.width * params.height > 1024 * 1024) && (
                               <Typography variant="caption" color="warning.main" sx={{ mt: 0.5, display: 'block' }}>
                                 High-res (&gt;1MP): more VRAM; may OOM on 16GB cards.
@@ -2104,7 +2239,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                             value={isZimage ? ZIMAGE_GUIDANCE : params.guidance}
                             onChange={(e, value) => setParams({ ...params, guidance: value })}
                             min={0}
-                            max={isFlux ? 6 : 20}
+                            max={isFlux ? 6 : isQwenImage21 ? QWEN_IMAGE_21_GUIDANCE_MAX : 20}
                             step={0.5}
                             marks
                             disabled={isZimage || castLocked}
@@ -2119,6 +2254,11 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                               Z-Image runs CFG-free — guidance is fixed at 0. Use Steps for quality.
                             </Typography>
                           )}
+                          {isQwenImage21 && !castLocked && (
+                            <Typography variant="caption" color="text.secondary">
+                              Qwen-Image 2.1 runs at guidance 1 on the official path. Raise it only together with a negative prompt.
+                            </Typography>
+                          )}
                           {family === 'auto' && (
                             <Typography variant="caption" color="text.secondary">
                               Auto routes per prompt. The usual pick (Z-Image) is CFG-free — keep 0 unless you expect an SDXL route.
@@ -2127,19 +2267,42 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                         </Grid>
 
                         <Grid item xs={12}>
+                          <TextField
+                            size="small"
+                            label="Seed"
+                            placeholder="random"
+                            value={seedText}
+                            inputProps={{ inputMode: 'numeric' }}
+                            onChange={(e) => setSeedText(e.target.value.replace(/\D/g, '').slice(0, String(IMAGE_MAX_SEED).length))}
+                            sx={{ width: 180 }}
+                          />
+                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                            {parseImageSeed(seedText) != null
+                              ? `The first image uses seed ${parseImageSeed(seedText)}, each next image the next number. Same prompt and settings give the same picture.`
+                              : seedText.trim()
+                                ? `Seeds go up to ${IMAGE_MAX_SEED}; this one is ignored.`
+                                : 'Blank: every image gets its own random seed. Open an image and press the dice to reuse its seed.'}
+                          </Typography>
+                        </Grid>
+
+                        <Grid item xs={12}>
                           <Typography gutterBottom>
-                            Max Workers: {params.max_workers}
-                            {String(params.model).startsWith('flux') ? ' (FLUX forces 1 on server)' : ''}
+                            Max Workers: {effectiveWorkers}
                           </Typography>
                           <Slider
-                            value={params.max_workers}
+                            value={effectiveWorkers}
                             onChange={(e, value) => setParams({ ...params, max_workers: value })}
                             min={1}
                             max={4}
                             step={1}
                             marks
-                            disabled={String(params.model).startsWith('flux')}
+                            disabled={oneAtATime}
                           />
+                          {oneAtATime && (
+                            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                              {oneAtATimeNote}
+                            </Typography>
+                          )}
                         </Grid>
 
                         <Grid item xs={12}>
@@ -2161,7 +2324,7 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
 
               {/* Action Buttons — queue mode: never blocked by an in-flight batch */}
               <Box sx={{ mt: 3, display: 'flex', flexDirection: 'column', gap: 1 }}>
-                <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
+                <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} blockDetail={blockDetail} queueMode />
                 {installNeed && (
                   <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
                     <Hint>
@@ -2477,6 +2640,10 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                           />
                           <ImageListItemBar
                             title={image.prompt ? image.prompt.substring(0, 30) + '...' : 'No prompt'}
+                            subtitle={[
+                              image.metadata?.seed_used != null ? `Seed ${image.metadata.seed_used}` : null,
+                              image.rewrittenPrompt ? 'Rewritten before rendering; open to read it' : null,
+                            ].filter(Boolean).join(' · ') || undefined}
                             actionIcon={
                               <IconButton
                                 sx={{ color: 'rgba(255, 255, 255, 0.54)' }}
@@ -2541,7 +2708,16 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
                   ))}
                 </Grid>
 
-                {batchHistory.length === 0 && (
+                {historyError && (
+                  <Alert
+                    severity="error"
+                    sx={{ mb: 1 }}
+                    action={<Button color="inherit" size="small" onClick={loadBatchHistory}>Retry</Button>}
+                  >
+                    Recent batches could not be loaded: {historyError}
+                  </Alert>
+                )}
+                {batchHistory.length === 0 && !historyError && (
                   <Box sx={{ textAlign: 'center', py: 4 }}>
                     <ImageIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
                     <Typography variant="body2" color="text.secondary">
@@ -2560,6 +2736,12 @@ const BatchImageGeneratorPage = ({ embedded = false }) => {
         <ImageLightbox
           imageUrl={lightboxImage.url}
           imageName={lightboxImage.name}
+          caption={lightboxImage.caption}
+          seed={lightboxImage.seed}
+          onUseSeed={(s) => {
+            setSeedText(String(s));
+            setSuccess(`Seed ${s} is in the Seed box. Clear it to get random seeds again.`);
+          }}
           onClose={closeLightbox}
           onPrev={handleLightboxPrev}
           onNext={handleLightboxNext}

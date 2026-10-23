@@ -15,7 +15,7 @@ import re
 from typing import Any, Callable, Optional
 
 from backend.services import nl_control_plane
-from backend.services.social_outreach import kill_switch, transitions
+from backend.services.social_outreach import kill_switch, platforms, transitions
 from backend.services.social_outreach.job_service import queue_outreach_run
 
 logger = logging.getLogger(__name__)
@@ -321,14 +321,13 @@ def _dispatch_refuse(classification: dict[str, Any]) -> dict[str, Any]:
 
 def _dispatch_status(classification: dict[str, Any]) -> dict[str, Any]:
     enabled = kill_switch.is_enabled()
-    supervised = kill_switch.is_supervised()
     cadence = kill_switch.cadence_status()
     recent_jobs = _recent_outreach_tasks(limit=5)
     queue_counts = _queue_counts(platform=classification.get("platform"))
 
     lines = [
         f"**Outreach:** {'Enabled' if enabled else 'Disabled'} "
-        f"({'supervised' if supervised else 'unsupervised'})",
+        "(every post waits for your approval)",
         "",
     ]
     for plat, value in (cadence or {}).items():
@@ -361,7 +360,7 @@ def _dispatch_status(classification: dict[str, Any]) -> dict[str, Any]:
         message="\n".join(lines),
         status={
             "enabled": enabled,
-            "supervised": supervised,
+            "supervised": True,
             "cadence": cadence,
             "queue_counts": queue_counts,
             "recent_jobs": recent_jobs,
@@ -468,17 +467,18 @@ def _dispatch_approve(classification: dict[str, Any]) -> dict[str, Any]:
                     error=f"draft {draft_id} not found",
                     message=f"Draft #{draft_id} not found.",
                 )
+            refusal = transitions.approval_refusal(int(draft_id))
             return _base(
                 classification,
                 ok=False,
-                error=f"cannot approve from status '{status}'",
-                message=f"Cannot approve #{draft_id} from status '{status}' (only from drafted).",
+                error=refusal,
+                message=f"Draft #{draft_id} was not approved: {refusal}.",
             )
         row = SocialOutreachLog.query.get(int(draft_id))
         return _base(
             classification,
             ok=True,
-            message=f"Approved draft #{draft_id} (status=approved).",
+            message=f"Approved draft #{draft_id}. {platforms.after_approval(row.platform)}",
             draft={"id": row.id, "status": row.status, "platform": row.platform},
         )
     except Exception as e:
@@ -650,17 +650,10 @@ def _queued_ok(
 ) -> dict[str, Any]:
     task_ids = [q.get("task_id") for q in queued if q.get("task_id")]
     topic_part = f" topics={topics}" if topics else ""
-    supervised = kill_switch.is_supervised()
-    if supervised:
-        post_note = (
-            "Scout/draft only — drafts land in the Outreach queue; "
-            "Approve before anything posts (supervised)."
-        )
-    else:
-        post_note = (
-            "Unsupervised: eligible drafts (grade ≥ 0.7, cadence OK) may "
-            "auto-approve for the ~60s poster. Review the Outreach queue."
-        )
+    post_note = (
+        "Scout/draft only — drafts land in the Outreach queue; "
+        "nothing posts until you approve it."
+    )
     summary = f"Queued outreach for {plat}/{act}{topic_part} → task(s) {task_ids}. {post_note}"
     return _base(
         classification,
@@ -668,6 +661,6 @@ def _queued_ok(
         queued=queued,
         task_ids=task_ids,
         message=summary,
-        supervised=supervised,
-        posts_require_approve=supervised,
+        supervised=True,
+        posts_require_approve=True,
     )

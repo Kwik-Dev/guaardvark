@@ -61,6 +61,7 @@ import OutputCard from "../components/codeeditor/OutputCard";
 import WordPressPagesCard from "../components/codeeditor/WordPressPagesCard";
 import {
   cardForShortcut,
+  editorActionForShortcut,
   findCardElement,
   findDocumentTab,
   isFindSymbolShortcut,
@@ -69,6 +70,8 @@ import {
 import { ContextualLoader } from "../components/common/LoadingStates";
 
 const FixedGridLayout = WidthProvider(ReactGridLayout);
+
+const BUILD_UNAVAILABLE_REASON = "Build needs a project folder on disk; projects here have none yet";
 
 const cardComponents = {
   filetree: FileTreeCard,
@@ -98,7 +101,12 @@ const CodeEditorPage = () => {
   const [fileTree, setFileTree] = useState([]);
   const [chatMessages, setChatMessages] = useState([]);
   const [searchResults, setSearchResults] = useState([]);
-  
+  // Run, Debug and Build results, shown on the Output card's Output tab.
+  const [runOutput, setRunOutput] = useState([]);
+  const appendOutput = useCallback((entry) => {
+    setRunOutput((prev) => [...prev, { timestamp: new Date().toISOString(), ...entry }]);
+  }, []);
+
   const [editorContext, setEditorContext] = useState(null);
   const editorRef = useRef(null);
 
@@ -132,29 +140,36 @@ const CodeEditorPage = () => {
       return;
     }
     let content = doc.content;
-    // Fetch content if not provided
+    // Fetch content if not provided. A failed fetch leaves the tab in the
+    // failed state with nothing in it; an empty string must never pass for
+    // the document's content, since Save would write it over the document.
+    let loadError = null;
     if (content === null || content === undefined) {
       try {
         const { getDocumentContent, getRepoFileContent } = await import("../api/documentService");
         const result = doc.source === 'live_repo'
           ? await getRepoFileContent(doc.relativePath || doc.filePath || "")
           : await getDocumentContent(doc.id);
-        content = typeof result === "string" ? result : result.content || result.data || "";
-      } catch {
-        content = "";
+        if (result && typeof result === "object" && result.error) {
+          loadError = result.error;
+        } else {
+          content = typeof result === "string" ? result : result.content ?? result.data ?? "";
+        }
+      } catch (err) {
+        loadError = err?.message || "fetch failed";
       }
     }
     const { getLanguageFromFilename } = await import("../utils/languageDetector");
-    const newTab = {
+    const { loadedTab, failedTab } = await import("../components/codeeditor/tabOrigin");
+    const baseTab = {
       id: `doc-${doc.id}-${Date.now()}`,
       filePath: doc.filePath || doc.filename,
-      content: content,
       language: getLanguageFromFilename(doc.filename),
-      isModified: false,
       source: doc.source || 'document',
       documentId: doc.source === 'live_repo' ? null : doc.id,
       readOnly: doc.source === 'live_repo',
     };
+    const newTab = loadError ? failedTab(baseTab, loadError) : loadedTab(baseTab, content);
     setOpenTabs(prev => {
       const updated = [...prev, newTab];
       setActiveTabIndex(updated.length - 1);
@@ -263,7 +278,6 @@ const CodeEditorPage = () => {
   };
 
   const {
-    RGL_WIDTH_PROP_PX,
     CONTAINER_PADDING_PX,
     CARD_MARGIN_PX,
     COLS_COUNT,
@@ -289,20 +303,6 @@ const CodeEditorPage = () => {
     return () => window.removeEventListener("resize", handleResize);
   }, [measureContainer]);
 
-  const outerBoxWidth = useMemo(() => {
-    if (containerSize.width && containerSize.width > 0) {
-      return containerSize.width;
-    }
-    return RGL_WIDTH_PROP_PX + 2 * CONTAINER_PADDING_PX;
-  }, [containerSize.width, RGL_WIDTH_PROP_PX, CONTAINER_PADDING_PX]);
-
-  const gridWidth = useMemo(() => {
-    if (containerSize.width && containerSize.width > 0) {
-      return Math.max(containerSize.width - 2 * CONTAINER_PADDING_PX, 1);
-    }
-    return RGL_WIDTH_PROP_PX;
-  }, [containerSize.width, CONTAINER_PADDING_PX, RGL_WIDTH_PROP_PX]);
-
   const maxRows = useMemo(() => {
     if (!containerSize.height) return null;
     const usableHeight = Math.max(containerSize.height - 2 * CONTAINER_PADDING_PX, 0);
@@ -317,11 +317,16 @@ const CodeEditorPage = () => {
     setEditorContext(context);
   }, []);
 
-  // Handle right-click chat actions from the editor (Ask Chat, Add to Chat, etc.)
-  const handleEditorChatAction = useCallback((action, selectedText, filePath) => {
+  // Handle right-click and lightbulb chat actions from the editor (Ask Chat,
+  // Fix This, Explain, Optimize, Add to Chat). `extra.problems` carries the
+  // editor's own marker messages when a quick fix asked for the help.
+  const handleEditorChatAction = useCallback((action, selectedText, filePath, extra = {}) => {
     if (!selectedText?.trim()) return;
 
     const codeBlock = "```" + (currentTab?.language || '') + "\n" + selectedText + "\n```";
+    const problems = Array.isArray(extra?.problems) && extra.problems.length > 0
+      ? `\n\nThe editor reports:\n${extra.problems.map((p) => `- ${p}`).join("\n")}`
+      : "";
 
     switch (action) {
       case 'ask': {
@@ -340,7 +345,19 @@ const CodeEditorPage = () => {
         const msg = {
           id: Date.now().toString(),
           role: 'user',
-          content: `Fix any issues in this code from ${filePath || 'the editor'}:\n\n${codeBlock}`,
+          content: `Fix any issues in this code from ${filePath || 'the editor'}:\n\n${codeBlock}${problems}`,
+          timestamp: new Date().toISOString(),
+          pending: true,
+          skipRag: true,
+        };
+        setChatMessages(prev => [...prev, msg]);
+        break;
+      }
+      case 'optimize': {
+        const msg = {
+          id: Date.now().toString(),
+          role: 'user',
+          content: `Optimize this code from ${filePath || 'the editor'} and explain what changed:\n\n${codeBlock}`,
           timestamp: new Date().toISOString(),
           pending: true,
           skipRag: true,
@@ -400,8 +417,12 @@ const CodeEditorPage = () => {
     };
   }, [currentTab?.content, currentTab?.id]);
 
+  // A folder the build API may run in. Projects carry no folder yet, so this
+  // is null and Build stays disabled with BUILD_UNAVAILABLE_REASON.
+  const buildTarget = null;
+
   const handleQuickAction = useCallback(async (action) => {
-    if (!currentTab?.content) {
+    if (action !== 'build' && !currentTab?.content) {
       console.warn('No active tab or content to perform action on');
       return;
     }
@@ -412,7 +433,7 @@ const CodeEditorPage = () => {
       /* eslint-disable no-case-declarations -- each case body is self-contained; wrapping every case in braces is noisier than this scoped suppression */
       switch (action) {
         case 'run':
-          startProcess(processId, 'Code Execution', 'Running code...');
+          startProcess(processId, 'Running code...', 'code');
           
           const language = currentTab.language || 'javascript';
           let result;
@@ -427,25 +448,19 @@ const CodeEditorPage = () => {
           
           if (result.success) {
             completeProcess(processId, 'Code executed successfully');
-            setSearchResults(prev => [...prev, {
-              type: 'output',
-              message: result.output,
-              timestamp: new Date(),
-              language: language
-            }]);
+            appendOutput({
+              type: result.exitCode ? 'error' : 'output',
+              label: `Run (${language})`,
+              message: result.output || result.error || '(no output)',
+            });
           } else {
             errorProcess(processId, result.error || 'Code execution failed');
-            setSearchResults(prev => [...prev, {
-              type: 'error',
-              message: result.error || result.stderr,
-              timestamp: new Date(),
-              language: language
-            }]);
+            appendOutput({ type: 'error', label: `Run (${language})`, message: result.error || result.stderr });
           }
           break;
 
         case 'format':
-          startProcess(processId, 'Code Formatting', 'Formatting code...');
+          startProcess(processId, 'Formatting code...', 'code');
           
           const formatResult = await codeExecutionService.formatCode(
             currentTab.content,
@@ -468,7 +483,7 @@ const CodeEditorPage = () => {
           break;
 
         case 'debug':
-          startProcess(processId, 'Code Debugging', 'Analyzing code...');
+          startProcess(processId, 'Analyzing code...', 'code');
           
           const lintResult = await codeExecutionService.lintCode(
             currentTab.content,
@@ -476,48 +491,45 @@ const CodeEditorPage = () => {
           );
           
           if (lintResult.success) {
-            completeProcess(processId, `Code analysis complete - Score: ${lintResult.score}`);
-            
-            const issues = [...lintResult.errors, ...lintResult.warnings];
-            issues.forEach(issue => {
-              setSearchResults(prev => [...prev, {
-                type: issue.severity === 2 ? 'error' : 'warning',
-                message: `Line ${issue.line}: ${issue.message}`,
-                timestamp: new Date(),
-                language: currentTab.language
-              }]);
+            const tool = lintResult.tool ? ` (${lintResult.tool})` : '';
+            completeProcess(processId, `Code analysis complete${tool} - Score: ${lintResult.score}`);
+
+            const issues = [
+              ...lintResult.errors.map((issue) => ({ ...issue, kind: 'error' })),
+              ...lintResult.warnings.map((issue) => ({ ...issue, kind: 'warning' })),
+            ];
+            const lines = issues.map((issue) => `${issue.kind === 'error' ? 'error' : 'warning'} line ${issue.line}:${issue.column || 1} ${issue.code ? `[${issue.code}] ` : ''}${issue.message}`);
+            if (lintResult.note) lines.push(lintResult.note);
+            appendOutput({
+              type: issues.some((issue) => issue.kind === 'error') ? 'error' : issues.length ? 'warning' : 'output',
+              label: `Debug${tool}`,
+              message: lines.length ? lines.join('\n') : 'No problems found.',
             });
           } else {
             errorProcess(processId, lintResult.error || 'Code analysis failed');
+            appendOutput({ type: 'error', label: 'Debug', message: lintResult.error || 'Code analysis failed' });
           }
           break;
 
-        case 'build':
-          startProcess(processId, 'Project Build', 'Building project...');
-          
-          const buildPath = projectId ? `${import.meta.env.VITE_API_URL || ''}/api/projects/${projectId}/build` : '/tmp';
-          const buildResult = await codeExecutionService.buildProject(buildPath);
-          
+        case 'build': {
+          // Projects have no folder on disk yet, so there is nothing to build;
+          // the toolbar keeps the button disabled with that reason.
+          if (!buildTarget) {
+            errorProcess(processId, BUILD_UNAVAILABLE_REASON);
+            break;
+          }
+          startProcess(processId, 'Building project...', 'code');
+          const buildResult = await codeExecutionService.buildProject(buildTarget);
+
           if (buildResult.success) {
             completeProcess(processId, `Build completed in ${buildResult.buildTime.toFixed(2)}s`);
-            
-            setSearchResults(prev => [...prev, {
-              type: 'output',
-              message: buildResult.output,
-              timestamp: new Date(),
-              language: 'build'
-            }]);
+            appendOutput({ type: 'output', label: 'Build', message: buildResult.output || '(no output)' });
           } else {
             errorProcess(processId, buildResult.error || 'Build failed');
-            
-            setSearchResults(prev => [...prev, {
-              type: 'error',
-              message: buildResult.error,
-              timestamp: new Date(),
-              language: 'build'
-            }]);
+            appendOutput({ type: 'error', label: 'Build', message: buildResult.error || 'Build failed' });
           }
           break;
+        }
 
         default:
           console.warn('Unknown action:', action);
@@ -527,7 +539,17 @@ const CodeEditorPage = () => {
       console.error(`Failed to execute ${action}:`, error);
       errorProcess(processId, `Failed to execute ${action}: ${error.message}`);
     }
-  }, [currentTab, openTabs, activeTabIndex, setOpenTabs, setSearchResults, startProcess, completeProcess, errorProcess, projectId]);
+  }, [currentTab, openTabs, activeTabIndex, setOpenTabs, appendOutput, startProcess, completeProcess, errorProcess, buildTarget]);
+
+  // Keyboard shortcuts for the toolbar actions, listened for on the editor
+  // card only, so Ctrl+R anywhere else on the page still reloads the browser.
+  const handleEditorShortcut = useCallback((event) => {
+    const action = editorActionForShortcut(event);
+    if (!action) return;
+    if (action === 'build' ? !buildTarget : !currentTab?.content) return;
+    event.preventDefault();
+    handleQuickAction(action);
+  }, [buildTarget, currentTab?.content, handleQuickAction]);
 
   const layoutProfiles = useMemo(() => {
     const leftCols = Math.round(COLS_COUNT * 0.2);
@@ -1256,7 +1278,7 @@ const CodeEditorPage = () => {
 
             {}
             <Box sx={{ display: "flex", alignItems: "center", gap: 0.25 }}>
-              <Tooltip title="Run Code (Ctrl+R)">
+              <Tooltip title="Run Code (Ctrl+R in the editor)">
                 <span>
                   <IconButton
                     onClick={() => handleQuickAction('run')}
@@ -1270,7 +1292,7 @@ const CodeEditorPage = () => {
                 </span>
               </Tooltip>
 
-              <Tooltip title="Format Code (Ctrl+Shift+F)">
+              <Tooltip title="Format Code (Ctrl+Shift+F in the editor)">
                 <span>
                   <IconButton
                     onClick={() => handleQuickAction('format')}
@@ -1283,7 +1305,7 @@ const CodeEditorPage = () => {
                 </span>
               </Tooltip>
 
-              <Tooltip title="Debug (F5)">
+              <Tooltip title="Debug: lint or syntax-check the file (F5 in the editor)">
                 <span>
                   <IconButton
                     onClick={() => handleQuickAction('debug')}
@@ -1296,14 +1318,18 @@ const CodeEditorPage = () => {
                 </span>
               </Tooltip>
 
-              <Tooltip title="Build (Ctrl+B)">
-                <IconButton
-                  onClick={() => handleQuickAction('build')}
-                  size="small"
-                  sx={{ p: 0.5 }}
-                >
-                  <Build sx={{ fontSize: '1rem' }} />
-                </IconButton>
+              <Tooltip title={buildTarget ? "Build (Ctrl+B)" : BUILD_UNAVAILABLE_REASON}>
+                <span>
+                  <IconButton
+                    onClick={() => handleQuickAction('build')}
+                    size="small"
+                    disabled={!buildTarget}
+                    aria-label="Build"
+                    sx={{ p: 0.5 }}
+                  >
+                    <Build sx={{ fontSize: '1rem' }} />
+                  </IconButton>
+                </span>
               </Tooltip>
             </Box>
 
@@ -1404,10 +1430,13 @@ const CodeEditorPage = () => {
           </MuiAlert>
         )}
 
+        {/* The grid takes the width it is given: WidthProvider measures this
+            box (sidebar toggles included) and layouts are in columns, so
+            saved layouts scale. A pixel min-width here would hold the page
+            at that width and the measurement with it. */}
         <Box
           sx={{
-            width: outerBoxWidth ? `${outerBoxWidth}px` : "100%",
-            minWidth: outerBoxWidth ? `${outerBoxWidth}px` : "100%",
+            width: "100%",
             overflow: "none",
             "& .react-grid-item": {
               transition: "transform 0.2s ease-out !important",
@@ -1432,7 +1461,6 @@ const CodeEditorPage = () => {
             }}
             cols={COLS_COUNT}
             rowHeight={ROW_HEIGHT_PX}
-            width={gridWidth}
             containerPadding={[CONTAINER_PADDING_PX / 10, CONTAINER_PADDING_PX / 10]}
             margin={[CARD_MARGIN_PX / 20, CARD_MARGIN_PX / 20]}
             isDraggable
@@ -1466,7 +1494,12 @@ const CodeEditorPage = () => {
               };
 
               return (
-                <div key={cardId} data-grid={adjustedLayoutItem} data-card-id={cardId}>
+                <div
+                  key={cardId}
+                  data-grid={adjustedLayoutItem}
+                  data-card-id={cardId}
+                  onKeyDown={cardId === 'editor' ? handleEditorShortcut : undefined}
+                >
                   {CardComponent ? (
                     <CardComponent
                       id={cardId}
@@ -1497,11 +1530,14 @@ const CodeEditorPage = () => {
                       {...(cardId === 'editor' && {
                         onEditorContextChange: handleEditorContextChange,
                         onChatAction: handleEditorChatAction,
+                        onRun: () => handleQuickAction('run'),
                         revealRequest,
                         onRevealDone: () => setRevealRequest(null),
                       })}
                       {...(cardId === 'output' && {
-                        currentTab: currentTab
+                        currentTab: currentTab,
+                        outputEntries: runOutput,
+                        onClearOutput: () => setRunOutput([]),
                       })}
                       {...(cardId === 'wordpress' && {
                         openTabs: openTabs,

@@ -116,40 +116,70 @@ def _discover_runtime_server() -> str | None:
         return None
 
 
-def get_server_url() -> str:
-    """Get the server URL. Resolution order:
+def _saved_config() -> tuple[dict, str | None]:
+    """(the saved CLI config, the file it came from), or ({}, None)."""
+    for path in (CONFIG_FILE, LEGACY_CONFIG_FILE):
+        saved = _read_json(path)
+        if saved is not None:
+            return saved, str(path)
+    return {}, None
+
+
+def _saved_or_default(key: str) -> tuple[Any, str]:
+    saved, path = _saved_config()
+    if key in saved:
+        return saved[key], f"saved file ({path})"
+    return DEFAULT_CONFIG.get(key), "default"
+
+
+def resolve_server_url() -> tuple[str, str]:
+    """(server URL, where it came from). Resolution order:
     1. GUAARDVARK_SERVER / LLX_SERVER env var
     2. Auto-discovery from ~/.guaardvark/runtime.json (written by start.sh)
     3. FLASK_PORT from repo .env via backend_bootstrap
     4. ~/.guaardvark/cli.json (or legacy ~/.llx/config.json) user config
     """
-    url = os.environ.get(ENV_SERVER) or os.environ.get(ENV_SERVER_ALT)
-    if url:
-        return url.rstrip("/")
+    for name in (ENV_SERVER, ENV_SERVER_ALT):
+        url = os.environ.get(name)
+        if url:
+            return url.rstrip("/"), f"env {name}"
     discovered = _discover_runtime_server()
     if discovered:
-        return discovered
+        return discovered, f"runtime file ({RUNTIME_FILE}, written by start.sh)"
     try:
         from llx.backend_bootstrap import read_flask_port_from_env, resolve_guaardvark_root
 
         root = resolve_guaardvark_root()
         env_port = read_flask_port_from_env(root)
         if env_port is not None and _health_check_port(env_port):
-            return f"http://localhost:{env_port}"
+            return f"http://localhost:{env_port}", f"install .env FLASK_PORT ({root}/.env)"
     except Exception:
         pass
-    return load_config()["server"]
+    value, source = _saved_or_default("server")
+    return value, source
+
+
+def get_server_url() -> str:
+    """Get the server URL (see resolve_server_url for the order)."""
+    return resolve_server_url()[0]
+
+
+def resolve_timeout() -> tuple[float, str]:
+    """(request timeout in seconds, where it came from)."""
+    for name in ("GUAARDVARK_TIMEOUT", "LLX_TIMEOUT"):
+        env_val = os.environ.get(name)
+        if env_val:
+            try:
+                return float(env_val), f"env {name}"
+            except ValueError:
+                pass
+    value, source = _saved_or_default("timeout")
+    return float(value if value is not None else 60), source
 
 
 def get_timeout() -> float:
     """Get request timeout in seconds from env or config."""
-    env_val = os.environ.get("GUAARDVARK_TIMEOUT") or os.environ.get("LLX_TIMEOUT")
-    if env_val:
-        try:
-            return float(env_val)
-        except ValueError:
-            pass
-    return float(load_config().get("timeout", 60))
+    return resolve_timeout()[0]
 
 
 def _is_loopback_url(url: str | None) -> bool:
@@ -166,7 +196,7 @@ def _is_loopback_url(url: str | None) -> bool:
 
 def _install_env_api_key() -> str | None:
     """GUAARDVARK_API_KEY from the local install's .env, where start.sh and
-    Settings → API key keep it."""
+    Settings → Access keep it."""
     try:
         from llx.launch_config import resolve_guaardvark_root
 
@@ -182,19 +212,56 @@ def _install_env_api_key() -> str | None:
         return None
 
 
-def get_api_key(server_url: str | None = None) -> str | None:
-    """Get the API key: env vars, then the CLI config, then (for a server on
-    this machine) the local install's .env, so a key created in Settings works
-    here without copying it."""
-    key = os.environ.get(ENV_API_KEY) or os.environ.get(ENV_API_KEY_ALT)
-    if key:
-        return key
-    configured = load_config().get("api_key")
-    if configured:
-        return configured
+def resolve_api_key(server_url: str | None = None) -> tuple[str | None, str]:
+    """(API key, where it came from): env vars, then the CLI config, then (for
+    a server on this machine) the local install's .env, so a key created in
+    Settings works here without copying it."""
+    for name in (ENV_API_KEY, ENV_API_KEY_ALT):
+        key = os.environ.get(name)
+        if key:
+            return key, f"env {name}"
+    saved, path = _saved_config()
+    if saved.get("api_key"):
+        return saved["api_key"], f"saved file ({path})"
     if _is_loopback_url(server_url):
-        return _install_env_api_key()
-    return None
+        key = _install_env_api_key()
+        if key:
+            return key, "install .env (GUAARDVARK_API_KEY)"
+    return None, "not set"
+
+
+def get_api_key(server_url: str | None = None) -> str | None:
+    """Get the API key (see resolve_api_key for the order)."""
+    return resolve_api_key(server_url)[0]
+
+
+def mask_secret(value: Any) -> str:
+    """A secret as it may be shown on screen: its first and last four
+    characters when it is long enough for that to hide most of it, else
+    just "set". Never the whole value."""
+    text = str(value or "")
+    if not text:
+        return "not set"
+    return f"{text[:4]}…{text[-4:]}" if len(text) >= 16 else "set"
+
+
+def effective_settings(server_url: str | None = None, server_source: str | None = None) -> list[tuple[str, str, str]]:
+    """(name, value as shown, source) for the settings the CLI actually uses.
+    server_url/server_source override the resolution when the caller was
+    given a server another way (the --server option). The API key is masked."""
+    if server_url is None:
+        server_url, server_source = resolve_server_url()
+    key, key_source = resolve_api_key(server_url)
+    timeout, timeout_source = resolve_timeout()
+    rows = [("server", server_url, server_source or "command line"),
+            ("api_key", mask_secret(key), key_source),
+            ("timeout", f"{timeout:g}", timeout_source)]
+    saved, _ = _saved_config()
+    for name in [k for k in DEFAULT_CONFIG if k not in ("server", "api_key", "timeout")] + \
+                [k for k in saved if k not in DEFAULT_CONFIG]:
+        value, source = _saved_or_default(name)
+        rows.append((name, mask_secret(value) if "key" in name or "token" in name else str(value), source))
+    return rows
 
 
 # --- Session persistence ---

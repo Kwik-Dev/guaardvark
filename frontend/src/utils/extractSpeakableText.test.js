@@ -85,13 +85,13 @@ This response acknowledges the user's request.`;
     });
   });
 
-  describe('length capping', () => {
-    it('caps long text to 3 sentences', () => {
+  describe('length', () => {
+    it('keeps every sentence of a long reply (speaking it in chunks is the caller\'s job)', () => {
       const input =
         'First sentence here. Second sentence here. Third sentence here. Fourth sentence here. Fifth sentence here.';
       const result = extractSpeakableText(input);
-      const sentenceCount = (result.match(/[.!?]/g) || []).length;
-      expect(sentenceCount).toBeLessThanOrEqual(3);
+      expect((result.match(/[.!?]/g) || []).length).toBe(5);
+      expect(result).toContain('Fifth sentence here.');
     });
   });
 

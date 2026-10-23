@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
+  Alert,
   Box,
   Button,
   Dialog,
@@ -20,8 +21,25 @@ import {
   startOAuth,
   updateConnection,
 } from "../../api/connectionsService";
+import { codeFromPaste } from "../social/oauthCode";
 
 const MASK_PLACEHOLDER = "••••••••••••••••";
+const REDIRECT_PLACEHOLDER = "{redirect_uri}";
+
+/** A setup step with the redirect URL this install uses written in. */
+const SetupStep = ({ text, redirectUri }) => {
+  const parts = text.split(REDIRECT_PLACEHOLDER);
+  return parts.map((part, i) => (
+    <React.Fragment key={i}>
+      {part}
+      {i < parts.length - 1 && (
+        <Box component="code" sx={{ wordBreak: "break-all", userSelect: "all" }}>
+          {redirectUri}
+        </Box>
+      )}
+    </React.Fragment>
+  ));
+};
 
 /**
  * Create or edit a connection. Fields are rendered from the provider spec, so
@@ -29,7 +47,11 @@ const MASK_PLACEHOLDER = "••••••••••••••••";
  */
 const ConnectionModal = ({ open, onClose, connection, providerSpec, onFeedback, onSaved }) => {
   const spec = providerSpec;
-  const isEdit = Boolean(connection?.id);
+  // A connection created in this dialog: an OAuth one stays open on it so
+  // the person can authorize straight away.
+  const [created, setCreated] = useState(null);
+  const current = created || connection;
+  const isEdit = Boolean(current?.id);
 
   const [accountSlug, setAccountSlug] = useState("default");
   const [displayName, setDisplayName] = useState("");
@@ -46,6 +68,7 @@ const ConnectionModal = ({ open, onClose, connection, providerSpec, onFeedback, 
 
   useEffect(() => {
     if (!open) return;
+    setCreated(null);
     setAccountSlug(connection?.account_slug || "default");
     setDisplayName(connection?.display_name || "");
     setConfig(connection?.config || {});
@@ -55,8 +78,9 @@ const ConnectionModal = ({ open, onClose, connection, providerSpec, onFeedback, 
     setOauthCode("");
   }, [open, connection]);
 
-  const configuredFields = connection?.credential_fields || [];
-  const isEnvManaged = connection?.credential_source === "env";
+  const configuredFields = current?.credential_fields || [];
+  const isEnvManaged = current?.credential_source === "env";
+  const tokenExpiry = current?.token_expires_at ? new Date(current.token_expires_at) : null;
 
   const handleSave = useCallback(async () => {
     setSaving(true);
@@ -72,8 +96,9 @@ const ConnectionModal = ({ open, onClose, connection, providerSpec, onFeedback, 
         ...secrets,
       };
       const saved = isEdit
-        ? await updateConnection(connection.id, payload)
+        ? await updateConnection(current.id, payload)
         : await createConnection(payload);
+      if (isOAuth) setCreated(saved);
       onFeedback?.({
         open: true,
         message: isEdit ? "Connection updated." : "Connection created.",
@@ -81,31 +106,37 @@ const ConnectionModal = ({ open, onClose, connection, providerSpec, onFeedback, 
       });
       onSaved?.(saved);
       if (!isOAuth) onClose?.();
+      else setSecrets({});
     } catch (e) {
       setError(e.message);
     } finally {
       setSaving(false);
     }
   }, [
-    spec, accountSlug, displayName, config, secrets, isEdit, connection,
+    spec, accountSlug, displayName, config, secrets, isEdit, current,
     isOAuth, onClose, onFeedback, onSaved,
   ]);
 
   const handleStartOAuth = useCallback(async () => {
     setError(null);
     try {
-      const result = await startOAuth(connection.id, redirectUri);
+      const result = await startOAuth(current.id, redirectUri);
       setOauth(result);
     } catch (e) {
       setError(e.message);
     }
-  }, [connection, redirectUri]);
+  }, [current, redirectUri]);
 
   const handleCompleteOAuth = useCallback(async () => {
+    const pasted = codeFromPaste(oauthCode, oauth?.state);
+    if (pasted.error) {
+      setError(pasted.error);
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      const result = await completeOAuth(connection.id, oauthCode.trim(), redirectUri);
+      const result = await completeOAuth(current.id, pasted.code, redirectUri);
       onFeedback?.({
         open: true,
         message: result.message || "Authorized.",
@@ -118,7 +149,7 @@ const ConnectionModal = ({ open, onClose, connection, providerSpec, onFeedback, 
     } finally {
       setSaving(false);
     }
-  }, [connection, oauthCode, redirectUri, onClose, onFeedback, onSaved]);
+  }, [current, oauth, oauthCode, redirectUri, onClose, onFeedback, onSaved]);
 
   if (!spec) return null;
 
@@ -143,6 +174,18 @@ const ConnectionModal = ({ open, onClose, connection, providerSpec, onFeedback, 
             </Typography>
           )}
 
+          {spec.setup_steps?.length > 0 && (
+            <Box component="ol" sx={{ m: 0, pl: 2.5 }}>
+              {spec.setup_steps.map((step) => (
+                <Typography component="li" variant="body2" key={step} sx={{ mb: 0.5 }}>
+                  <SetupStep text={step} redirectUri={redirectUri} />
+                </Typography>
+              ))}
+            </Box>
+          )}
+
+          {spec.notice && <Alert severity="info">{spec.notice}</Alert>}
+
           {spec.review_required && (
             <CollapsibleAlert severity="warning">
               This platform requires app review before its API can post on your
@@ -153,7 +196,7 @@ const ConnectionModal = ({ open, onClose, connection, providerSpec, onFeedback, 
           {isEnvManaged && (
             <CollapsibleAlert severity="info">
               This credential comes from the environment variable{" "}
-              <code>{connection.credential_env_key}</code> and is managed outside
+              <code>{current.credential_env_key}</code> and is managed outside
               the app.
             </CollapsibleAlert>
           )}
@@ -213,22 +256,39 @@ const ConnectionModal = ({ open, onClose, connection, providerSpec, onFeedback, 
                   }
                   helperText={
                     alreadySet
-                      ? `Configured (${connection.credential_hint}). Leave blank to keep.`
+                      ? `Configured (${current.credential_hint}). Leave blank to keep.`
                       : field.help
                   }
                 />
               );
             })}
 
+          {isOAuth && !isEdit && (
+            <Typography variant="body2" color="text.secondary">
+              Save first; the authorization step appears here once the connection exists.
+            </Typography>
+          )}
+
           {isOAuth && isEdit && (
             <Box>
+              {tokenExpiry && (
+                <Typography
+                  variant="body2"
+                  color={tokenExpiry < new Date() ? "error" : "text.secondary"}
+                  sx={{ mb: 1 }}
+                >
+                  {tokenExpiry < new Date() ? "Authorization expired" : "Authorization lasts until"}{" "}
+                  {tokenExpiry.toLocaleDateString()}.
+                </Typography>
+              )}
               <Button variant="outlined" onClick={handleStartOAuth} size="small">
                 Authorize with {spec.label}
               </Button>
               {oauth && (
                 <Stack spacing={1} sx={{ mt: 2 }}>
                   <Typography variant="body2">
-                    Open this URL, approve access, then paste the code below.
+                    Open this URL, approve access, then paste the address your browser lands
+                    on, or just the code in it.
                   </Typography>
                   <TextField
                     value={oauth.authorize_url}
@@ -237,7 +297,7 @@ const ConnectionModal = ({ open, onClose, connection, providerSpec, onFeedback, 
                     onFocus={(e) => e.target.select()}
                   />
                   <TextField
-                    label="Authorization code"
+                    label="Address or code"
                     value={oauthCode}
                     onChange={(e) => setOauthCode(e.target.value)}
                     size="small"

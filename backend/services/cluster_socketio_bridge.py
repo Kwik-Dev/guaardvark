@@ -16,6 +16,7 @@ import threading
 import socketio as sio
 
 from backend.services.cluster_proxy import NodeTarget
+from backend.utils.node_auth import socket_auth
 
 log = logging.getLogger(__name__)
 
@@ -41,10 +42,10 @@ class SocketIOChatBridge:
         # reconnection is off, so a dropped remote leaves a dead client behind.
         # Self-evict from the registry on disconnect to avoid leaking bridges.
         self._client.on("disconnect", self._on_remote_disconnect)
+        # The handshake is signed as this machine (backend/utils/node_auth.py).
         self._client.connect(
             self._target.base_url,
-            headers={"X-Guaardvark-API-Key": self._target.api_key},
-            auth={"api_key": self._target.api_key},
+            auth=socket_auth(),
             wait_timeout=3,
         )
         log.info("[BRIDGE] opened session=%s → node=%s",

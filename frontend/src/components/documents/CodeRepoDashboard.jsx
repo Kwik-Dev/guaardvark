@@ -1,8 +1,6 @@
 import React, { useState } from 'react';
 import {
   Box,
-  Card,
-  CardContent,
   Typography,
   Chip,
   Button,
@@ -13,12 +11,26 @@ import {
   Grid,
   IconButton,
   Divider,
+  Tooltip,
 } from '@mui/material';
 import { Code, Map, GitMerge, X as CloseIcon } from 'lucide-react';
 import { useTheme } from '@mui/material/styles';
 
+// The dialogs render in a portal, but React still bubbles their events up the
+// component tree into the folder window's title bar, where a double mousedown
+// minimizes the window and a right-click opens the folder menu.
+const keepEventsInDialog = {
+  onMouseDown: (e) => e.stopPropagation(),
+  onClick: (e) => e.stopPropagation(),
+  onDoubleClick: (e) => e.stopPropagation(),
+  onContextMenu: (e) => e.stopPropagation(),
+};
+
+// A repository folder's analysis, opened from a small INTEL button so it does
+// not take room above the folder's files.
 const CodeRepoDashboard = ({ folder }) => {
   const theme = useTheme();
+  const [intelOpen, setIntelOpen] = useState(false);
   const [mapOpen, setMapOpen] = useState(false);
   const [graphOpen, setGraphOpen] = useState(false);
 
@@ -66,21 +78,53 @@ const CodeRepoDashboard = ({ folder }) => {
   };
 
   return (
-    <Box sx={{ mb: 3 }}>
-      <Card variant="outlined" sx={{ borderLeft: `4px solid ${theme.palette.primary.main}` }}>
-        <CardContent>
-          <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', mb: 2 }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <Code size={24} color={theme.palette.primary.main} />
-              <Typography variant="h6">Code Repository Intelligence</Typography>
-            </Box>
-            <Typography variant="caption" color="text.secondary">
+    <>
+      <Tooltip title="Code Repository Intelligence: languages, frameworks, repository map and dependencies">
+        <Button
+          variant="outlined"
+          size="small"
+          onClick={(e) => {
+            e.stopPropagation();
+            setIntelOpen(true);
+          }}
+          aria-label={`Code Repository Intelligence for ${folder.name}`}
+          sx={{
+            ml: 0.5,
+            minWidth: 0,
+            height: 20,
+            px: 0.75,
+            py: 0,
+            fontSize: '0.6rem',
+            fontWeight: 'bold',
+            lineHeight: 1,
+            letterSpacing: '0.05em',
+          }}
+        >
+          INTEL
+        </Button>
+      </Tooltip>
+
+      <Dialog open={intelOpen} onClose={() => setIntelOpen(false)} maxWidth="md" fullWidth {...keepEventsInDialog}>
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
+            <Code size={24} color={theme.palette.primary.main} />
+            <Typography variant="h6" noWrap>Code Repository Intelligence</Typography>
+          </Box>
+          <IconButton onClick={() => setIntelOpen(false)} size="small" aria-label="Close">
+            <CloseIcon size={20} />
+          </IconButton>
+        </DialogTitle>
+        <Divider />
+        <DialogContent>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 2, mb: 2 }}>
+            <Typography variant="subtitle1" noWrap>{folder.name}</Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>
               Analyzed: {formatAnalyzedAt(analyzed_at)}
             </Typography>
           </Box>
 
           {folder.description && (
-            <Typography variant="body2" sx={{ mb: 2, whiteSpace: 'pre-wrap', maxHeight: '100px', overflowY: 'auto' }}>
+            <Typography variant="body2" sx={{ mb: 2, whiteSpace: 'pre-wrap', maxHeight: '200px', overflowY: 'auto' }}>
               {folder.description}
             </Typography>
           )}
@@ -115,7 +159,7 @@ const CodeRepoDashboard = ({ folder }) => {
             </Grid>
           </Grid>
 
-          <Box sx={{ display: 'flex', gap: 1, mt: 2 }}>
+          <Box sx={{ display: 'flex', gap: 1, mt: 2, flexWrap: 'wrap' }}>
             <Button
               variant="outlined"
               startIcon={<Map size={16} />}
@@ -135,11 +179,14 @@ const CodeRepoDashboard = ({ folder }) => {
               View Dependencies
             </Button>
           </Box>
-        </CardContent>
-      </Card>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setIntelOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Repository Map Dialog */}
-      <Dialog open={mapOpen} onClose={() => setMapOpen(false)} maxWidth="lg" fullWidth>
+      <Dialog open={mapOpen} onClose={() => setMapOpen(false)} maxWidth="lg" fullWidth {...keepEventsInDialog}>
         <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           Repository Map
           <IconButton onClick={() => setMapOpen(false)} size="small">
@@ -160,7 +207,7 @@ const CodeRepoDashboard = ({ folder }) => {
       </Dialog>
 
       {/* Dependency Graph Dialog */}
-      <Dialog open={graphOpen} onClose={() => setGraphOpen(false)} maxWidth="lg" fullWidth>
+      <Dialog open={graphOpen} onClose={() => setGraphOpen(false)} maxWidth="lg" fullWidth {...keepEventsInDialog}>
         <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           Dependency Graph
           <IconButton onClick={() => setGraphOpen(false)} size="small">
@@ -179,7 +226,7 @@ const CodeRepoDashboard = ({ folder }) => {
           <Button onClick={() => setGraphOpen(false)}>Close</Button>
         </DialogActions>
       </Dialog>
-    </Box>
+    </>
   );
 };
 

@@ -2,6 +2,9 @@
 
 The webhook URL is itself the credential — anyone holding it can post to the
 channel — so it is stored as a secret rather than in ``Connection.config``.
+Creating a webhook takes the Manage Webhooks permission on the channel, so
+it posts into a channel the person manages; that is why this connection alone
+may be set to post without a per-post approval (``posts_to_owned_channel``).
 """
 
 from __future__ import annotations
@@ -15,20 +18,28 @@ import requests
 
 from backend.services.connections.base import (
     AUTH_WEBHOOK_URL,
+    BOT_LABEL_AUTOMATIC,
     FAMILY_SOCIAL,
+    BotLabel,
     Capabilities,
     ConnCtx,
     CredentialField,
+    DeleteRequest,
+    DeleteResult,
     ProgressFn,
     ProviderSpec,
     PublishRequest,
     PublishResult,
+    RateLimit,
 )
 
 logger = logging.getLogger(__name__)
 
 TIMEOUT = 60
 MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+# Discord's JSON error code for a message that does not exist; a 404 for an
+# unknown webhook carries a different code.
+UNKNOWN_MESSAGE = 10008
 
 SPEC = ProviderSpec(
     provider="discord_webhook",
@@ -55,10 +66,30 @@ SPEC = ProviderSpec(
         supports_tags=False,
         visibilities=("public",),
         default_visibility="public",
+        # Discord publishes a global figure and reports per-route limits only
+        # in response headers, so this stays far under both.
+        rate_limits=(
+            RateLimit(
+                posts=10,
+                window_seconds=3600,
+                platform_limit="50 requests per second, plus per-route limits sent in response headers",
+                source="https://docs.discord.com/developers/topics/rate-limits",
+            ),
+        ),
+        bot_label=BotLabel(
+            kind=BOT_LABEL_AUTOMATIC,
+            how=(
+                "A webhook posts under its own name, not a member's account; Discord has "
+                "no automation setting for it."
+            ),
+            source="https://docs.discord.com/developers/resources/webhook",
+        ),
+        deletable=True,
     ),
     hint_field="webhook_url",
     docs_url="https://discord.com/developers/docs/resources/webhook",
     setup_help="Create a webhook on the target channel and paste its URL.",
+    posts_to_owned_channel=True,
 )
 
 
@@ -146,3 +177,29 @@ def publish(ctx: ConnCtx, req: PublishRequest, on_progress: ProgressFn) -> Publi
         remote_url=remote_url,
         message="Posted to Discord.",
     )
+
+
+def delete(ctx: ConnCtx, req: DeleteRequest) -> DeleteResult:
+    """A webhook can delete the messages it sent (Delete Webhook Message)."""
+    try:
+        url = _webhook_url(ctx).split("?", 1)[0].rstrip("/")
+        resp = requests.delete(f"{url}/messages/{req.remote_id}", timeout=TIMEOUT)
+    except ValueError as e:
+        return DeleteResult(ok=False, message=str(e))
+    except requests.RequestException as e:
+        return DeleteResult(ok=False, message=f"Could not reach Discord: {e}")
+    if resp.status_code == 404:
+        code = None
+        try:
+            code = (resp.json() or {}).get("code")
+        except ValueError:
+            pass
+        if code == UNKNOWN_MESSAGE:
+            return DeleteResult(ok=True, message="The message was already gone from the channel.")
+        return DeleteResult(
+            ok=False,
+            message="Discord no longer knows this webhook; delete the message in Discord itself.",
+        )
+    if resp.status_code >= 400:
+        return DeleteResult(ok=False, message=f"Discord returned {resp.status_code}.")
+    return DeleteResult(ok=True, message="Deleted from Discord.")

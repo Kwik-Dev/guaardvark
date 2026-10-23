@@ -27,6 +27,7 @@ import { BASE_URL } from "../../api/apiClient";
 import AgentResultDisplay from "./AgentResultDisplay";
 import { StatusChip } from "../../utils/familyColors";
 import ToolCallCard from "./ToolCallCard";
+import GeneratedMedia from "./GeneratedMedia";
 import ThinkingCard from "./ThinkingCard";
 import SynthesizedAnswerChip from "./SynthesizedAnswerChip";
 import { isSynthesizedMessage, isSynthesizedStep } from "./synthesizedAnswer";
@@ -38,6 +39,7 @@ import ImageLightbox from "../images/ImageLightbox";
 import NarrateButton from "../common/NarrateButton";
 import EntityContextMenu from "../common/EntityContextMenu";
 import useContextMenu from "../../hooks/useContextMenu";
+import copyText from "../../utils/copyText";
 import { agentNoteCaption } from "./agentNoteCaptions";
 
 
@@ -108,6 +110,14 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
   }, []);
   const isCommand = message.type === "command";
   const isProgress = message.type === "progress";
+  // Every picture the user attached to this turn (several), by position: an
+  // entry is null where the server could not save that picture, so the file
+  // names stay aligned with the pictures. The single-picture case keeps
+  // reading imageUrl below.
+  const attachedImageUrls = Array.isArray(message.imageUrls) && message.imageUrls.length > 1
+    ? message.imageUrls.map((u) => (typeof u === "string" && u ? u : null))
+    : [];
+  const showsSeveralImages = attachedImageUrls.some(Boolean);
   const isAgentLoop = message.isAgentLoop;
   const logo = useAppStore((s) => s.systemLogo);
   const [lightbox, setLightbox] = useState(null);
@@ -128,18 +138,8 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
 
   const handleCopy = useCallback(async () => {
     const text = typeof message.content === "string" ? message.content : JSON.stringify(message.content, null, 2);
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // fallback for non-HTTPS contexts
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
+    // copyText falls back to execCommand for non-HTTPS contexts.
+    if (await copyText(text)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     }
@@ -489,8 +489,40 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
           <Chip label="command" size="small" variant="outlined" color="info"
             sx={{ height: 18, fontSize: "0.65rem", mb: 0.5, fontFamily: "monospace" }} />
         )}
-        {/* Display image if present */}
-        {(message.imageUrl || message.relatedImageUrl) && (
+        {/* Display the attached pictures if present: all of them when the
+            user sent several, else the one (or the related image). */}
+        {showsSeveralImages ? (
+          <Box sx={{ mb: 1, display: "flex", flexWrap: "wrap", gap: 1 }}>
+            {attachedImageUrls.map((url, idx) => url && (
+              <Box key={`${idx}-${url}`}>
+                <CardMedia
+                  component="img"
+                  sx={{
+                    maxWidth: 300,
+                    maxHeight: 200,
+                    width: 'auto',
+                    height: 'auto',
+                    borderRadius: 1,
+                    border: '1px solid',
+                    borderColor: 'divider',
+                    objectFit: 'contain'
+                  }}
+                  image={guardedMediaSrc(url)}
+                  alt={message.imageFileNames?.[idx] || `Uploaded image ${idx + 1}`}
+                />
+                {message.imageFileNames?.[idx] && (
+                  <Chip
+                    icon={<ImageIcon />}
+                    label={message.imageFileNames[idx]}
+                    size="small"
+                    variant="outlined"
+                    sx={{ mt: 0.5 }}
+                  />
+                )}
+              </Box>
+            ))}
+          </Box>
+        ) : (message.imageUrl || message.relatedImageUrl) && (
           <Box sx={{ mb: 1 }}>
             <CardMedia
               component="img"
@@ -520,66 +552,12 @@ const MessageItem = ({ message, sessionId: sessionIdProp, onOrchestratorUpdate, 
         )}
 
         {/* Generated images and videos (from agent tool calls) */}
-        {message.generatedImages && message.generatedImages.length > 0 && (
-          <Box sx={{ mb: 1 }}>
-            {message.generatedImages.map((img, idx) => (
-              <Box key={idx} sx={{ mb: 1 }}>
-                {img.type === "video" ? (
-                  <Box
-                    component="video"
-                    controls
-                    autoPlay
-                    loop
-                    muted
-                    sx={{
-                      maxWidth: 400,
-                      maxHeight: 400,
-                      width: "auto",
-                      height: "auto",
-                      borderRadius: 1,
-                      border: "1px solid",
-                      borderColor: "divider",
-                      display: "block",
-                      cursor: "pointer",
-                    }}
-                    src={guardedMediaSrc(img.url)}
-                  />
-                ) : (
-                  <CardMedia
-                    component="img"
-                    sx={{
-                      maxWidth: 400,
-                      maxHeight: 400,
-                      width: "auto",
-                      height: "auto",
-                      borderRadius: 1,
-                      border: "1px solid",
-                      borderColor: "divider",
-                      objectFit: "contain",
-                      cursor: "pointer",
-                    }}
-                    image={guardedMediaSrc(img.url)}
-                    alt={img.alt || "Generated image"}
-                    onClick={() => {
-                      const images = message.generatedImages.filter(i => i.type !== "video").map(i => ({ url: i.url, name: i.alt || i.caption || "Generated image" }));
-                      const idx = images.findIndex(i => i.url === img.url);
-                      openLightbox(img.url, img.alt || "Generated image", images, Math.max(0, idx));
-                    }}
-                  />
-                )}
-                {img.caption && (
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    sx={{ mt: 0.5, display: "block", fontStyle: "italic" }}
-                  >
-                    {img.caption}
-                  </Typography>
-                )}
-              </Box>
-            ))}
-          </Box>
-        )}
+        <GeneratedMedia
+          items={message.generatedImages}
+          onOpenPicture={(pictures, index) =>
+            openLightbox(pictures[index].url, pictures[index].name, pictures, index)
+          }
+        />
 
         {/* Thinking context — persisted from the streaming phase */}
         {message.thinkingText && message.toolCalls?.length > 0 && (
@@ -938,8 +916,10 @@ MessageItem.propTypes = {
     agentLoopStatus: PropTypes.oneOf(["thinking", "complete", "error"]),
     agentResult: PropTypes.object,
     imageUrl: PropTypes.string,
+    imageUrls: PropTypes.arrayOf(PropTypes.string),
     relatedImageUrl: PropTypes.string,
     imageFileName: PropTypes.string,
+    imageFileNames: PropTypes.arrayOf(PropTypes.string),
     isUnifiedChat: PropTypes.bool,
     toolCalls: PropTypes.array,
     generatedImages: PropTypes.array,

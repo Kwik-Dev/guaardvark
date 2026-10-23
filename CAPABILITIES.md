@@ -142,6 +142,7 @@ If query-time params have not plateaued: ~70% wall-clock RAG, 30% code. If plate
 - Autoresearch page: Unified / Retrieval / Code, Stop, eval-pair regenerate, promotions, code-keep PendingFixes, ledger TSV
 - Dashboard Play starts a bounded unified run
 - Beat: at most one unified run per night inside `autoresearch_nightly_window` (opt-in)
+- Runs on a worker of its own, started when a run is queued and stopped about two minutes after it ends, so chat, indexing and generation never wait behind a run; its model calls wait while a render or training job holds the GPU
 
 ---
 
@@ -272,7 +273,7 @@ Guaardvark speaks Model Context Protocol — both as a server (exposing its tool
 - **One-command client setup** — `python -m backend.mcp install` writes the server entry into the configs of detected clients (Claude Code, Codex, Cursor, Grok, Antigravity, opencode, Claude Desktop, Zed, Gemini); any other client can launch `guaardvark mcp serve`; `python -m backend.mcp doctor` self-tests the server and flags stale client configs
 - **Native tools exposed under the default-deny policy** — RAG, code intelligence, file management, image/video/music-video generation, songs and speech (`generate_music`, `generate_speech`), memory, web; `python -m backend.mcp list-tools` prints the live list and how many of the registered tools it exposes
 - **Read-only output resources** — generated media and documents under `data/outputs/` served as `guaardvark://outputs/...` (paged listing; chat exports, screenshots, consent records and training work are not served)
-- **API key** — for the backend of its own checkout the server sends the key in that checkout's `.env`, read on every call, so a key created or replaced in Settings → API key works without restarting the client; for a backend named by `GUAARDVARK_URL` it sends `GUAARDVARK_API_KEY` from its environment
+- **API key** — for the backend of its own checkout the server sends the key in that checkout's `.env`, read on every call, so a key created or replaced in Settings → Access works without restarting the client; for a backend named by `GUAARDVARK_URL` it sends `GUAARDVARK_API_KEY` from its environment
 - **Verified end-to-end** — smoke tests drive a real initialize/tools-list handshake over stdio
 
 ### MCP Client
@@ -415,7 +416,7 @@ Supervised AI for social-media engagement. Production path: **recon → draft �
 ### Three Phases
 1. **Recon** — search for candidate posts/threads (YouTube keyword topics, Reddit subs, Discord channels). Outputs candidates; **never posts**
 2. **Content** — LLM drafts + grades in the user's voice. Outputs `drafted` rows; **never posts**
-3. **Dispatch** — after approve, `tick_process_approved_drafts` posts via servo (Reddit/YouTube) or Discord cog, with Redis cadence (1 successful post/platform/tick)
+3. **Dispatch** — after approve, Reddit, YouTube and Facebook drafts are posted one at a time through the agent's browser when a person presses **Post now, I'm watching**, and Discord drafts by the Discord bot, with Redis cadence (at most 1 post per 30 min and 8 per 24 h, per platform)
 
 ### Natural language control
 - GUI Chat / slash: `/outreach comment on some youtube videos regarding Offline AI or ComfyUI`
@@ -476,6 +477,7 @@ Dedicated upscaling plugin for sharpening generated content to 4K/8K.
 | RealESRGAN x2plus | 2x | 64 MB | Mild upscaling |
 | RealESRGAN x4plus (Anime) | 4x | 17 MB | Anime and stylized content |
 | realesr-animevideov3 | 4x | 6 MB | Video-optimized anime |
+| realesr-general-x4v3 | 4x | 6 MB | Lightweight general-purpose (Real-ESRGAN Compact) |
 | 4x-UltraSharp | 4x | 67 MB | Enhanced sharpness |
 | 4x NMKD-Superscale | 4x | 67 MB | Advanced super-scaling |
 | 4x Foolhardy Remacri | 4x | 67 MB | Texture-focused upscaling |
@@ -607,7 +609,7 @@ Centralized configuration across six sections.
 - **Pending updates banner** — shows when Interconnector has available updates
 
 ### Appearance
-- **Theme selection** — four dark themes with accent colors
+- **Theme selection** — six built-in themes (five dark, one light) with accent colors
 - **View modes** — customize default layouts
 
 ### Maintenance
@@ -679,7 +681,7 @@ Running a tool directly (`/api/tools/execute`) and the automation routes
 (`/api/automation/*`) answer only the Guaardvark machine itself, or a client
 that sends this install's API key (`GUAARDVARK_API_KEY`) in the `X-API-Key`
 header. A browser on another device is signed in once the key is entered in
-Settings → API key (an HttpOnly cookie; the browser does not keep the key);
+Settings → Access (an HttpOnly cookie; the browser does not keep the key);
 the key is created there on the Guaardvark machine, or by `./start-docker.sh`
 under Docker. `GUAARDVARK_PROTECT_TOOL_ENDPOINTS=false`
 opens these routes to every device that can reach the backend.
@@ -741,14 +743,17 @@ Each plugin lives in `plugins/<name>/` with a `plugin.json` manifest declaring i
 |---|---|---|
 | **Ollama** | 11434 | Local LLM and embedding inference (chat, RAG, agents) |
 | **ComfyUI** | 8188 | Image + video generation (Wan2.2, CogVideoX, LTX-2.3, LTX-2.5, RIFE, Real-ESRGAN) |
-| **Audio Foundry** | — | Voiceover (Chatterbox / Kokoro / Piper), music (ACE-Step / Suno), SFX/ambience (Stable Audio Open). Dual-venv with torch isolation |
+| **Audio Foundry** | 8206 | Voiceover (Chatterbox / Kokoro / Piper), music (ACE-Step / Suno), SFX/ambience (Stable Audio Open). Dual-venv with torch isolation |
 | **Upscaling** | 8202 | GPU image/video upscaling via spandrel + torch.compile |
 | **Vision Pipeline** | 8201 | Real-time scene narration, camera feed, video chat input |
 | **Swarm** | 8210 | Parallel agent orchestration in isolated worktrees |
-| **LoRA Trainer** | — | Train character/environment/prop LoRAs for the Film Crew (CUDA, bf16) |
+| **LoRA Trainer** | 8203 | Train character/environment/prop LoRAs for the Film Crew (CUDA, bf16) |
 | **Discord Bot** | 8200 | Discord bot integration — chat, image generation, search via Guaardvark backend |
-| **GPU Embedding** | 5002 | GPU-accelerated text embeddings for faster indexing (CPU fallback) |
-| **Training** | — | Vision/servo training data collection and dataset management |
+| **GPU Embedding** | 8204 | GPU-accelerated text embeddings for faster indexing (CPU fallback) |
+| **Video Editor** | 8207 | MLT/Shotcut + auto-editor timelines and renders for the Video Editor and music videos (CPU) |
+| **zvec grep** | 7999 | Hybrid code search over a checkout for the agents, by meaning, keyword or ripgrep, as two MCP tools (trial) |
+
+`plugins/training` is not a plugin: it holds command-line scripts for the text fine-tuning pipeline (transcript parsing, quality filtering, fine-tuning, export).
 
 ### Plugins Page (GPU Management)
 - **Plugin cards** — each plugin shows name, description, version, status (running/stopped/starting/error), and health indicator
@@ -787,9 +792,9 @@ Plugins can register:
 ## System Architecture
 
 ### Backend Stack
-- **Flask 3.0** — HTTP server with 68+ REST API blueprints (auto-discovered)
-- **SQLAlchemy + PostgreSQL** — ORM with 42 models; Alembic migrations + a custom `schema_sync.py` (single master)
-- **Celery + Redis** — async task processing with two worker pools (main + training/GPU)
+- **Flask 3.0** — HTTP server with about 96 REST API modules (auto-discovered)
+- **SQLAlchemy + PostgreSQL** — ORM with about 67 models; Alembic migrations + a custom `schema_sync.py` (single master)
+- **Celery + Redis** — async task processing with two worker pools (main + training/GPU), plus a research worker that an autoresearch run starts for itself and stops when it is done
 - **LlamaIndex** — RAG pipeline with vector storage, entity extraction, hybrid retrieval
 - **Ollama** — local LLM and embedding model inference (managed plugin)
 - **ComfyUI** — video/image generation server supporting Wan2.2, CogVideoX, LTX-2.3, LTX-2.5, RIFE, Real-ESRGAN (managed plugin)
@@ -872,6 +877,7 @@ All logs in `logs/`:
 - `backend.log` — Flask application
 - `celery_main.log` — Main Celery worker (indexing, generation, health)
 - `celery_training.log` — Training/GPU worker
+- `celery_research.log` — Research worker (autoresearch runs; present only once a run has been started)
 - `frontend.log` — Vite dev server
 - `setup.log` — Dependency installation
 - `xfce_agent.log` — Agent's XFCE session output

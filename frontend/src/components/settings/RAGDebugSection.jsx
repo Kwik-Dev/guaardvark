@@ -89,15 +89,17 @@ const RAGDebugSection = () => {
             </Typography>
           )}
           <Tooltip title="Refresh data">
-            <Button
-              size="small"
-              variant="outlined"
-              onClick={fetchRAGData}
-              disabled={loading}
-              startIcon={loading ? <CircularProgress size={16} /> : <RefreshIcon />}
-            >
-              Refresh
-            </Button>
+            <span>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={fetchRAGData}
+                disabled={loading}
+                startIcon={loading ? <CircularProgress size={16} /> : <RefreshIcon />}
+              >
+                Refresh
+              </Button>
+            </span>
           </Tooltip>
         </Stack>
       </Box>

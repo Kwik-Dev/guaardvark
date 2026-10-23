@@ -161,7 +161,7 @@ export default function LessonSummaryModal({
       <DialogTitle sx={{ pb: 1 }}>
         Lesson Summary
         <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', fontSize: '0.75rem' }}>
-          Fix anything the distiller got wrong — this is what future Gemma4 will read.
+          Fix anything the automatic summary got wrong. This is what the agent reads the next time it does a task like this.
         </Typography>
       </DialogTitle>
       <DialogContent dividers>

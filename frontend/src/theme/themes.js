@@ -291,8 +291,16 @@ const lightTheme = createFullTheme({
   bg: "#fafafa",
   bgPaper: "#ffffff",
   textPrimary: "#212121",
-  textSecondary: "#757575",
+  // #757575 measured 4.41:1 on the #fafafa page; #707070 is the lightest grey
+  // that clears 4.5:1 on #fafafa, #ffffff and #f5f5f5 (4.74 / 4.95 / 4.54).
+  textSecondary: "#707070",
   divider: "rgba(0, 0, 0, 0.08)",
+  // The shared status defaults (#4caf50, #ff9800, #f44336) are bright tones
+  // for dark backgrounds; as text on white they measure about 2.8, 2.2 and
+  // 3.7:1. These give 5.1, 5.0 and 5.0:1 (WCAG asks 4.5 for body text).
+  success: "#2e7d32",
+  warning: "#b45309",
+  error: "#d32f2f",
   mode: "light",
   componentOverrides: {
     MuiPaper: {

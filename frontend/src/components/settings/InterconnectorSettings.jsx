@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import {
+  Alert,
   Box,
   Typography,
   Paper,
@@ -50,6 +51,7 @@ import * as interconnectorApi from "../../api/interconnectorService";
 import { useSnackbar } from "../common/SnackbarProvider";
 import { useAppStore } from "../../stores/useAppStore";
 import ClientUpdatePanel from "./ClientUpdatePanel";
+import InterconnectorEnrolments from "./InterconnectorEnrolments";
 
 const debugLog = (...args) => {
   if (import.meta.env.DEV) {
@@ -61,6 +63,44 @@ const redactValue = (value) => {
   if (!value) return "";
   const text = String(value);
   return text.length <= 8 ? "***" : `${text.slice(0, 4)}...${text.slice(-4)}`;
+};
+
+// Client: whether the master has let this machine join, and the key
+// fingerprint the person approving it there compares with.
+const FleetMembership = ({ identity }) => {
+  if (!identity) return null;
+  const fleet = identity.fleet || {};
+  const key = identity.key_fingerprint;
+  const keyLine = key ? `This machine's key: ${key}` : "This machine's key is made at its first enrolment.";
+  if (fleet.status === "approved") {
+    return (
+      <Alert severity="success">
+        This machine is part of the fleet.{" "}
+        {fleet.master_fingerprint ? `Master's key: ${fleet.master_fingerprint}. ` : ""}
+        {keyLine}
+      </Alert>
+    );
+  }
+  if (fleet.status === "pending") {
+    return (
+      <Alert severity="info">
+        Waiting for approval on the master (Settings → Interconnector, machines joining the
+        fleet). Approve it there only if it shows the same key. {keyLine}
+      </Alert>
+    );
+  }
+  if (fleet.status === "refused") {
+    return (
+      <Alert severity="warning">
+        The master did not enrol this machine{fleet.message ? `: ${fleet.message}` : "."} {keyLine}
+      </Alert>
+    );
+  }
+  return (
+    <Alert severity="info">
+      Save to ask the master to enrol this machine; the operator approves it there. {keyLine}
+    </Alert>
+  );
 };
 
 const InterconnectorSettings = () => {
@@ -139,22 +179,28 @@ const InterconnectorSettings = () => {
     return stored || null;
   });
 
+  // This machine's key fingerprint and its place in the fleet (waiting for
+  // approval, joined, refused), from its own backend.
+  const [localIdentity, setLocalIdentity] = useState(null);
+
+  const refreshLocalIdentity = async () => {
+    const result = await interconnectorApi.getLocalIdentity();
+    if (result?.data) {
+      setLocalIdentity(result.data);
+    }
+    return result?.data || null;
+  };
+
   // Prefer the machine-stable identity from this box's own backend.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      try {
-        const resp = await fetch('/api/interconnector/nodes/local-identity');
-        if (!resp.ok) return;
-        const body = await resp.json();
-        const machineId = body?.data?.node_id || body?.node_id;
-        if (!cancelled && machineId) {
-          setNodeId(machineId);
-          localStorage.setItem('interconnector_node_id', machineId);
-        }
-      } catch (_e) {
-        // No local identity available (e.g. dev without hardware.json) —
-        // keep the localStorage id.
+      const identity = await refreshLocalIdentity();
+      // The id the master enrolled this machine under, else the machine id.
+      const machineId = identity?.fleet?.enrolled_node_id || identity?.node_id;
+      if (!cancelled && machineId) {
+        setNodeId(machineId);
+        localStorage.setItem('interconnector_node_id', machineId);
       }
     })();
     return () => { cancelled = true; };
@@ -202,9 +248,10 @@ const InterconnectorSettings = () => {
     return () => clearInterval(interval);
   }, [config.is_enabled]);
 
-  // Client node: automatic registration and heartbeat, from the saved
-  // configuration only. Registers on load and when this node's id changes;
-  // Save registers on its own. Nothing is sent while fields are typed into.
+  // Client node: enrolment and heartbeat, from the saved configuration only.
+  // This machine's backend sends both, signed with its node key; the page
+  // asks it to on load and when this node's id changes (Save asks on its
+  // own), then every minute while open so the status shown stays current.
   useEffect(() => {
     const config = savedConfig; // the saved copy, not the form being edited
     if (!config?.is_enabled || config.node_mode !== "client") {
@@ -215,133 +262,35 @@ const InterconnectorSettings = () => {
       return;
     }
 
+    // Track if component is still mounted to prevent state updates after unmount
+    let isMounted = true;
+
     const key = registrationKey(config, nodeId);
-    const registerClient = async () => {
-      try {
-        // Get the actual network IP from the backend
-        let networkIp = null;
-        let networkPort = 5000;
-        try {
-          const networkInfo = await interconnectorApi.getNetworkInfo();
-          if (networkInfo.data) {
-            networkIp = networkInfo.data.network_ip;
-            networkPort = networkInfo.data.port || 5000;
-            debugLog("[INTERCONNECTOR] Got network info", {
-              hasIp: Boolean(networkInfo.data.ip),
-              port: networkInfo.data.port || 5000,
-            });
-          }
-        } catch (netErr) {
-          console.warn("[INTERCONNECTOR] Could not get network info, will rely on server detection:", netErr);
-        }
-        
-        // Detect basic capabilities
-        const capabilities = {
-          cpu_cores: navigator.hardwareConcurrency || 4,
-          memory_mb: (navigator.deviceMemory || 4) * 1024,
-          gpu_available: false, // Could be enhanced with WebGL detection
-        };
-
-        const registrationData = {
-          node_name: config.node_name,
-          node_id: nodeId, // Use existing node ID if available
-          node_mode: "client",
-          sync_entities: config.sync_entities || ["clients", "projects"],
-          capabilities: capabilities,
-          // Use actual network IP from backend (not window.location which may be localhost)
-          client_ip: networkIp,
-          client_port: networkPort,
-        };
-
-        debugLog("[INTERCONNECTOR] Registration data", {
-          nodeName: registrationData.node_name,
-          nodeId: redactValue(registrationData.node_id),
-          syncEntityCount: registrationData.sync_entities?.length || 0,
-        });
-
-        const response = await interconnectorApi.registerWithMaster(
-          config.master_url,
-          config.master_api_key,
-          registrationData
-        );
-
-        debugLog("[INTERCONNECTOR] Registration response", {
-          success: response?.success,
-          nodeId: redactValue(response?.data?.node_id),
-        });
-
-        if (response.error) {
-          if (lastRegistration.current === key) lastRegistration.current = null;
-          console.error("[INTERCONNECTOR] Failed to register with master:", response.error);
-          console.error("[INTERCONNECTOR] Registration error details:", {
-            error: response.error,
-            message: response.error?.message,
-            data: response.data
-          });
-          return;
-        }
-
-        // Store node ID for future heartbeats
-        const returnedNodeId = response.data?.node_id;
-        debugLog("[INTERCONNECTOR] Registration successful", {
-          nodeId: redactValue(returnedNodeId),
-        });
-        if (returnedNodeId && returnedNodeId !== nodeId) {
-          // The master already knows this node by the id it returned.
-          lastRegistration.current = registrationKey(config, returnedNodeId);
-          setNodeId(returnedNodeId);
-          localStorage.setItem('interconnector_node_id', returnedNodeId);
-          debugLog("[INTERCONNECTOR] Stored node_id", { nodeId: redactValue(returnedNodeId) });
-        }
-      } catch (error) {
+    const enrolStep = async () => {
+      const response = await interconnectorApi.enrolWithMaster();
+      if (!isMounted) return;
+      if (response.error) {
         if (lastRegistration.current === key) lastRegistration.current = null;
-        console.error("[INTERCONNECTOR] Error registering client:", error);
-        console.error("[INTERCONNECTOR] Registration exception:", {
-          name: error.name,
-          message: error.message,
-          stack: error.stack
-        });
+        console.warn("[INTERCONNECTOR] Enrolment step failed:", response.error);
+      }
+      const identity = await refreshLocalIdentity();
+      const enrolledId = response.data?.node_id || identity?.fleet?.enrolled_node_id;
+      if (isMounted && enrolledId && enrolledId !== nodeId) {
+        // The master knows this machine by the id it assigned.
+        lastRegistration.current = registrationKey(config, enrolledId);
+        setNodeId(enrolledId);
+        localStorage.setItem('interconnector_node_id', enrolledId);
+        debugLog("[INTERCONNECTOR] Stored node_id", { nodeId: redactValue(enrolledId) });
       }
     };
 
     if (lastRegistration.current !== key) {
       lastRegistration.current = key;
-      registerClient();
+      enrolStep();
     }
 
-    // Track if component is still mounted to prevent state updates after unmount
-    let isMounted = true;
-
-    // Send heartbeat every 60 seconds
-    const heartbeatInterval = setInterval(async () => {
-      if (!isMounted) return; // Skip if unmounted
-      if (nodeId && config.master_url && config.master_api_key) {
-        try {
-          debugLog("[INTERCONNECTOR] Sending heartbeat", { nodeId: redactValue(nodeId) });
-          const heartbeatResponse = await interconnectorApi.sendHeartbeat(
-            config.master_url,
-            config.master_api_key,
-            nodeId
-          );
-          if (!isMounted) return; // Check again after await
-          debugLog("[INTERCONNECTOR] Heartbeat response", {
-            success: heartbeatResponse?.success,
-            error: Boolean(heartbeatResponse?.error),
-          });
-          if (heartbeatResponse.error) {
-            console.warn("[INTERCONNECTOR] Heartbeat failed:", heartbeatResponse.error);
-          }
-        } catch (error) {
-          if (!isMounted) return; // Check after await
-          console.error("[INTERCONNECTOR] Heartbeat failed:", error);
-          console.error("[INTERCONNECTOR] Heartbeat error details:", {
-            name: error.name,
-            message: error.message
-          });
-        }
-      } else {
-        console.warn("[INTERCONNECTOR] Cannot send heartbeat - missing nodeId, master_url, or api_key");
-      }
+    const heartbeatInterval = setInterval(() => {
+      if (isMounted) enrolStep();
     }, 60000); // 60 seconds
 
     return () => {
@@ -470,7 +419,16 @@ const InterconnectorSettings = () => {
       }
       console.error("[INTERCONNECTOR] Error loading nodes:", error);
       setNodes([]);
+      // Otherwise the node list just looks empty.
+      showMessage(`Connected machines could not be loaded: ${errorMsg || "the request failed"}`, "error");
     }
+  };
+
+  // A disabled interconnector plugin answers "Not Found" / "not enabled":
+  // that is the off state, not a failure to report.
+  const isDisabledPluginError = (error) => {
+    const msg = error?.message || error?.data?.message || "";
+    return msg === "Not Found" || /not enabled/i.test(msg);
   };
 
   const loadProfiles = async () => {
@@ -484,6 +442,9 @@ const InterconnectorSettings = () => {
       }
     } catch (error) {
       console.warn("[INTERCONNECTOR] Failed to load sync profiles:", error.message);
+      if (!isDisabledPluginError(error)) {
+        showMessage(`Sync profiles could not be loaded: ${error.message || "the request failed"}`, "error");
+      }
     }
   };
 
@@ -495,6 +456,9 @@ const InterconnectorSettings = () => {
       setPendingApprovals(approvals);
     } catch (error) {
       console.warn("[INTERCONNECTOR] Failed to load approvals:", error.message);
+      if (!isDisabledPluginError(error)) {
+        showMessage(`Pending approvals could not be loaded: ${error.message || "the request failed"}`, "error");
+      }
     } finally {
       setIsLoadingApprovals(false);
     }
@@ -616,63 +580,31 @@ const InterconnectorSettings = () => {
         }
       }
 
-      // If client mode, automatically register with master
+      // If client mode, enrol with the master now (this machine's backend
+      // signs the request with its node key)
       if (registersNow) {
         const key = lastRegistration.current;
-        try {
-          // Get actual network IP from backend
-          let networkIp = null;
-          let networkPort = 5000;
-          try {
-            const networkInfo = await interconnectorApi.getNetworkInfo();
-            if (networkInfo.data) {
-              networkIp = networkInfo.data.network_ip;
-              networkPort = networkInfo.data.port || 5000;
-            }
-          } catch (netErr) {
-            console.warn("[INTERCONNECTOR] Could not get network info:", netErr);
-          }
-          
-          const capabilities = {
-            cpu_cores: navigator.hardwareConcurrency || 4,
-            memory_mb: (navigator.deviceMemory || 4) * 1024,
-            gpu_available: false,
-          };
-
-          const registrationData = {
-            node_name: saved.node_name,
-            node_id: nodeId,
-            node_mode: "client",
-            sync_entities: saved.sync_entities || ["clients", "projects"],
-            capabilities: capabilities,
-            // Use actual network IP from backend
-            client_ip: networkIp,
-            client_port: networkPort,
-          };
-
-          const regResponse = await interconnectorApi.registerWithMaster(
-            saved.master_url,
-            saved.master_api_key,
-            registrationData
-          );
-
-          if (regResponse.error) {
-            if (lastRegistration.current === key) lastRegistration.current = null;
-            console.warn("Failed to register with master:", regResponse.error);
-            showMessage("Configuration saved, but registration with master failed. Please check connection.", "warning");
-          } else {
-            const returnedNodeId = regResponse.data?.node_id;
-            if (returnedNodeId && returnedNodeId !== nodeId) {
-              lastRegistration.current = registrationKey(saved, returnedNodeId);
-              setNodeId(returnedNodeId);
-              localStorage.setItem('interconnector_node_id', returnedNodeId);
-            }
-            showMessage("Configuration saved and registered with master successfully", "success");
-          }
-        } catch (error) {
+        const enrolment = await interconnectorApi.enrolWithMaster();
+        const step = enrolment.data || {};
+        await refreshLocalIdentity();
+        if (enrolment.error || step.error) {
           if (lastRegistration.current === key) lastRegistration.current = null;
-          console.error("Error registering client:", error);
-          showMessage("Configuration saved, but registration failed. Please check connection.", "warning");
+          const reason = step.message || enrolment.error || step.error;
+          showMessage(`Configuration saved, but the master did not enrol this machine: ${reason}`, "warning");
+        } else {
+          if (step.node_id && step.node_id !== nodeId) {
+            lastRegistration.current = registrationKey(saved, step.node_id);
+            setNodeId(step.node_id);
+            localStorage.setItem('interconnector_node_id', step.node_id);
+          }
+          if (step.pending) {
+            showMessage(
+              `Configuration saved. Approve this machine on the master (key ${step.fingerprint}).`,
+              "info"
+            );
+          } else {
+            showMessage("Configuration saved; this machine is part of the fleet", "success");
+          }
         }
       }
 
@@ -1411,6 +1343,10 @@ const InterconnectorSettings = () => {
                       )}
                     </Box>
                   </Grid>
+
+                  <Grid item xs={12}>
+                    <FleetMembership identity={localIdentity} />
+                  </Grid>
                 </>
               )}
 
@@ -1863,6 +1799,9 @@ const InterconnectorSettings = () => {
             </>
           )}
 
+          {/* Machines asking to join (Master Mode Only) */}
+          {config.node_mode === "master" && <InterconnectorEnrolments />}
+
           {/* Connected Nodes (Master Mode Only) */}
           {config.node_mode === "master" && (
             <Paper elevation={2} sx={{ p: 3 }}>
@@ -1918,18 +1857,20 @@ const InterconnectorSettings = () => {
                             <TableCell align="right">
                               <Box display="flex" gap={1} justifyContent="flex-end" alignItems="center">
                                 <Tooltip title="Test connection to client">
-                                  <IconButton
-                                    size="small"
-                                    onClick={() => handleTestClientConnection(node.node_id, node.node_name)}
-                                    disabled={isTesting}
-                                    color={testResult?.success ? "success" : testResult?.success === false ? "error" : "default"}
-                                  >
-                                    {isTesting ? (
-                                      <CircularProgress size={16} />
-                                    ) : (
-                                      <NetworkIcon fontSize="small" />
-                                    )}
-                                  </IconButton>
+                                  <span>
+                                    <IconButton
+                                      size="small"
+                                      onClick={() => handleTestClientConnection(node.node_id, node.node_name)}
+                                      disabled={isTesting}
+                                      color={testResult?.success ? "success" : testResult?.success === false ? "error" : "default"}
+                                    >
+                                      {isTesting ? (
+                                        <CircularProgress size={16} />
+                                      ) : (
+                                        <NetworkIcon fontSize="small" />
+                                      )}
+                                    </IconButton>
+                                  </span>
                                 </Tooltip>
                                 {testResult && (
                                   <Tooltip title={testResult.message}>

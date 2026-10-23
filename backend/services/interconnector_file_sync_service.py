@@ -188,6 +188,10 @@ class InterconnectorFileSyncService:
             ".egg-info",
             # Plugin runtime artifacts (not source code)
             "plugins/comfyui/ComfyUI/",
+            # Trees the ComfyUI updater keeps beside the live one
+            "plugins/comfyui/ComfyUI.next",
+            "plugins/comfyui/ComfyUI.prev-",
+            "plugins/comfyui/.update_job.json",
             "plugins/upscaling/models/",
             "plugins/upscaling/input/",
             "plugins/upscaling/output/",
@@ -951,6 +955,9 @@ class InterconnectorFileSyncService:
 
             # Interconnector sync is additive-only; prune migration version files the
             # master removed (e.g. post-v2.6.1 squash) so Alembic has a single head.
+            # The kept set comes from the revision chain, not from this batch: a
+            # batch carries only the files that changed, so a new migration arriving
+            # alone would otherwise delete the unchanged baseline it builds on.
             if any(
                 (d.get("path") or "").replace("\\", "/").startswith("backend/migrations/")
                 for d in valid_files
@@ -958,19 +965,8 @@ class InterconnectorFileSyncService:
                 try:
                     from backend.utils.migration_utils import prune_stale_migration_versions
                     migrations_dir = project_root / "backend" / "migrations"
-                    version_paths = [
-                        d.get("path")
-                        for d in valid_files
-                        if (d.get("path") or "").replace("\\", "/").startswith(
-                            "backend/migrations/versions/"
-                        )
-                        and (d.get("path") or "").endswith(".py")
-                    ]
                     if migrations_dir.is_dir():
-                        prune_result = prune_stale_migration_versions(
-                            str(migrations_dir),
-                            authoritative_paths=version_paths or None,
-                        )
+                        prune_result = prune_stale_migration_versions(str(migrations_dir))
                         if prune_result.get("removed"):
                             logger.info(
                                 "[FILE_SYNC] Pruned %d stale migration version file(s): %s",

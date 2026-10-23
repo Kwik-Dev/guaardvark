@@ -1,4 +1,4 @@
-"""POST /draft-comment runs the independent check and gates would_post on it.
+"""POST /draft-comment runs the independent check and queues every draft for a person.
 
 The real route runs against the in-memory database. The persona (drafting LLM)
 and the external grader are stand-ins, outreach is on and cadence is open, and
@@ -13,32 +13,33 @@ import pytest
 
 from backend.api import social_outreach_api
 from backend.models import Setting, SocialOutreachLog, db
-from backend.services.social_outreach import audit, external_grader, kill_switch, persona
+from backend.services.social_outreach import audit, external_grader, kill_switch, persona, platforms
 
 PASSED = {"grade": 0.75, "passed": True, "checked": True, "skipped": False, "model": "g", "reason": "fine"}
 FAILED = {"grade": 0.75, "passed": False, "checked": True, "skipped": False, "model": "g", "reason": "generic"}
 UNCHECKED = {"grade": 0.0, "checked": False, "skipped": True, "model": None,
              "reason": "no_grader_model_loaded"}
+SAME_MODEL = {**PASSED, "model": "gemma4:e2b", "drafter_model": "gemma4:e2b", "independent": False}
 
 THREAD = "TITLE: Running local models\n\nOP BODY:\nWhich GPU do I need?"
 
 
 @pytest.fixture
 def route(app, client, monkeypatch, tmp_path):
-    """Call /draft-comment with a chosen grader result and supervised mode."""
+    """Call /draft-comment with a chosen grader result."""
     app.register_blueprint(social_outreach_api.social_outreach_bp)
     monkeypatch.setattr(audit, "AUDIT_DIR", tmp_path)
     monkeypatch.setattr(audit, "AUDIT_FILE", tmp_path / "audit.jsonl")
     monkeypatch.setattr(kill_switch, "is_enabled", lambda: True)
     monkeypatch.setattr(kill_switch, "cadence_allows_post", lambda platform: (True, None))
     state = {"draft": "A 12GB card runs the 8B models fine.", "grade": 0.9,
-             "ext": UNCHECKED, "supervised": False, "graded": []}
+             "ext": UNCHECKED, "graded": [], "drafted": 0}
 
-    monkeypatch.setattr(kill_switch, "is_supervised", lambda: state["supervised"])
-    monkeypatch.setattr(
-        persona, "draft_outreach_text",
-        lambda **kwargs: {"draft": state["draft"], "grade": state["grade"], "reason": "r"},
-    )
+    def draft(**kwargs):
+        state["drafted"] += 1
+        return {"draft": state["draft"], "grade": state["grade"], "reason": "r"}
+
+    monkeypatch.setattr(persona, "draft_outreach_text", draft)
 
     def grade(draft_text, thread_context):
         state["graded"].append((draft_text, thread_context))
@@ -46,10 +47,13 @@ def route(app, client, monkeypatch, tmp_path):
 
     monkeypatch.setattr(external_grader, "grade_draft_externally", grade)
 
-    def call(**body):
+    def post(**body):
         body = {"platform": "reddit", "thread_context": THREAD,
                 "target_url": "https://www.reddit.com/r/x/comments/abc/t/", **body}
-        resp = client.post("/api/social-outreach/draft-comment", json=body)
+        return client.post("/api/social-outreach/draft-comment", json=body)
+
+    def call(**body):
+        resp = post(**body)
         assert resp.status_code == 200, resp.get_json()
         return resp.get_json()
 
@@ -58,6 +62,7 @@ def route(app, client, monkeypatch, tmp_path):
         return json.loads(lines[-1])["extra"]
 
     call.state = state
+    call.post = post
     call.audit_extra = audit_extra
     return call
 
@@ -91,59 +96,34 @@ def test_a_feature_hint_in_the_body_is_the_persons_requested_feature(route, monk
     assert all("feature_hint" not in call for call in calls)
 
 
-def test_unsupervised_passed_check_posts(route):
-    route.state["ext"] = PASSED
-
-    body = route()
-
-    assert body["would_post"] is True
-    assert body["gates"]["independent_check"] == "passed"
-    assert _status(body["audit_id"]) == "approved"
-    assert route.audit_extra()["hold_reason"] is None
-
-
-def test_unsupervised_unchecked_draft_is_held(route):
-    body = route()
-
-    assert body["would_post"] is False
-    assert body["gates"]["independent_check"] == "unavailable"
-    assert body["gates"]["independent_reason"] == "no_independent_check"
-    assert _status(body["audit_id"]) == "drafted"
-    assert route.audit_extra()["hold_reason"] == "no_independent_check"
-
-
-def test_unsupervised_failed_check_is_held(route):
-    route.state["ext"] = FAILED
-
-    body = route()
-
-    assert body["would_post"] is False
-    assert body["gates"]["independent_check"] == "failed"
-    assert _status(body["audit_id"]) == "drafted"
-    assert route.audit_extra()["hold_reason"] == "failed"
-
-
-def test_unchecked_draft_posts_when_the_check_is_switched_off(route):
-    db.session.add(Setting(key="outreach_require_independent_check", value="false"))
-    db.session.commit()
-
-    body = route()
-
-    assert body["would_post"] is True
-    assert body["gates"]["independent_check"] == "unavailable"
-    assert body["gates"]["independent_reason"] == "check_not_required"
-    assert _status(body["audit_id"]) == "approved"
-
-
-@pytest.mark.parametrize("ext, label", [(PASSED, "passed"), (UNCHECKED, "unavailable")])
-def test_supervised_never_posts_and_reports_the_check(route, ext, label):
-    route.state["supervised"] = True
+@pytest.mark.parametrize("ext, label, reason, hold", [
+    (PASSED, "passed", "passed", None),
+    (UNCHECKED, "unavailable", "unchecked", None),
+    (FAILED, "failed", "failed", "failed"),
+    (SAME_MODEL, "not_independent", "not_independent", None),
+])
+def test_every_draft_waits_for_a_person_and_reports_the_check(route, ext, label, reason, hold):
     route.state["ext"] = ext
 
     body = route()
 
     assert body["would_post"] is False
+    assert body["gates"]["supervised"] is True
     assert body["gates"]["independent_check"] == label
+    assert body["gates"]["independent_reason"] == reason
+    assert _status(body["audit_id"]) == "drafted"
+    assert route.audit_extra()["hold_reason"] == hold
+
+
+@pytest.mark.parametrize("key", ["social_outreach_supervised", "outreach_require_independent_check"])
+def test_settings_from_an_older_install_do_not_approve_a_draft(route, key):
+    db.session.add(Setting(key=key, value="false"))
+    db.session.commit()
+    route.state["ext"] = PASSED
+
+    body = route()
+
+    assert body["would_post"] is False
     assert _status(body["audit_id"]) == "drafted"
 
 
@@ -157,56 +137,47 @@ def test_an_empty_draft_is_not_sent_to_the_grader(route):
     assert body["gates"]["independent_check"] == "unavailable"
 
 
-def test_a_passed_draft_on_a_thread_the_judge_did_not_see_is_held(route):
+def test_a_passed_draft_on_a_thread_the_judge_did_not_see_is_noted(route):
     route.state["ext"] = PASSED
 
     body = route(relevance_unchecked=True)
 
-    assert body["would_post"] is False
     assert body["gates"]["independent_check"] == "passed"
     assert body["gates"]["independent_reason"] == "relevance_unchecked"
     assert _status(body["audit_id"]) == "drafted"
     assert route.audit_extra()["relevance_unchecked"] is True
-    assert route.audit_extra()["hold_reason"] == "relevance_unchecked"
 
 
-def _share(route):
-    return route(mode="share", share_target="r/SideProject", share_link="https://example.com/x",
-                 thread_context=None)
-
-
-def test_an_unsupervised_share_is_not_graded_and_waits_for_a_person(route):
+def test_a_share_is_not_graded_and_waits_for_a_person(route):
     route.state["ext"] = PASSED
 
-    body = _share(route)
+    body = route(mode="share", share_target="r/SideProject", share_link="https://example.com/x",
+                 thread_context=None)
 
     assert route.state["graded"] == []
     assert body["would_post"] is False
-    assert body["gates"]["independent_check"] == "unavailable"
-    assert body["gates"]["independent_reason"] == "share_needs_person"
+    assert body["gates"]["independent_reason"] == "share_not_graded"
     assert _status(body["audit_id"]) == "drafted"
-    assert route.audit_extra()["hold_reason"] == "share_needs_person"
     assert route.audit_extra()["external_reason"] == "share_not_graded"
 
 
-def test_a_share_waits_even_when_the_check_is_switched_off(route):
-    db.session.add(Setting(key="outreach_require_independent_check", value="false"))
-    db.session.commit()
+@pytest.mark.parametrize("platform", ["x", "twitter", "linkedin"])
+def test_a_draft_for_x_or_linkedin_is_refused_before_drafting(route, platform):
+    resp = route.post(platform=platform)
 
-    body = _share(route)
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == platforms.refusal_for(platform)
+    assert route.state["drafted"] == 0
+    assert SocialOutreachLog.query.count() == 0
 
-    assert body["would_post"] is False
-    assert _status(body["audit_id"]) == "drafted"
-    assert route.audit_extra()["hold_reason"] == "share_needs_person"
 
+def test_the_record_says_which_models_graded_and_drafted(route):
+    route.state["ext"] = SAME_MODEL
 
-def test_a_supervised_share_waits_as_before_without_a_grader_call(route):
-    route.state["supervised"] = True
+    route()
 
-    body = _share(route)
-
-    assert route.state["graded"] == []
-    assert body["would_post"] is False
-    assert body["gates"]["independent_reason"] == "human_review"
-    assert _status(body["audit_id"]) == "drafted"
-    assert route.audit_extra()["hold_reason"] is None
+    extra = route.audit_extra()
+    assert extra["independent_check"] == "not_independent"
+    assert extra["external_model"] == "gemma4:e2b"
+    assert extra["drafter_model"] == "gemma4:e2b"
+    assert extra["external_independent"] is False

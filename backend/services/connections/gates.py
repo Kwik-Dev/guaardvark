@@ -1,23 +1,34 @@
 """Safety gates for publishing.
 
 Publishing your own asset is a different act from unsolicited outreach, so it
-gets its own enable switch and defaults to on. Each publish still waits on the
-Approvals page unless a person switches approval off. The two paths share one
-per-platform cadence budget and one stop on all public posting
+gets its own enable switch and defaults to on. Each publish waits on the
+Approvals page for a person. The one exception is a connection that can post
+only into a channel its owner manages (``ProviderSpec.posts_to_owned_channel``,
+a Discord webhook) and that the person switched to post without approval;
+even then a request from chat, MCP or a schedule waits. The two paths share
+one per-platform cadence budget and one stop on all public posting
 (``kill_switch.posting_stop_reason``). That stop is its own setting, not the
 outreach on/off switch: outreach defaults off, and that must not hold back a
 publish.
+
+Some visibilities are held back per connection until its person turns them
+on (``Capabilities.public_opt_in``: YouTube uploads stay private by default).
+``visibility_refusal`` says why such a post is refused while the switch is off.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 PUBLISH_ENABLED_KEY = "connections_publish_enabled"
-PUBLISH_SUPERVISED_KEY = "connections_publish_supervised"
+# Connection.config key a person sets on an owned-channel connection.
+POST_WITHOUT_APPROVAL_KEY = "post_without_approval"
+# Connection.config key for a provider's public opt-in (Capabilities.public_opt_in).
+ALLOW_PUBLIC_KEY = "allow_public"
 
 # Requests from an agent always require a human click, regardless of settings.
 # "unknown" is here so an unattributed request fails safe: a caller that omits
@@ -62,20 +73,89 @@ def set_publish_enabled(value: bool) -> None:
     save_setting(PUBLISH_ENABLED_KEY, "true" if value else "false")
 
 
-def publish_supervised() -> bool:
-    """True unless a person switched approval off; a saved value wins."""
-    return _setting(PUBLISH_SUPERVISED_KEY, "true") in _TRUTHY
+def may_skip_approval(provider: str | None) -> bool:
+    """Whether a connection of ``provider`` may be switched to post without a
+    per-post approval: only one that posts into a channel its owner manages."""
+    try:
+        from backend.services.connections import registry
+
+        return bool(registry.spec_for(provider or "").posts_to_owned_channel)
+    except Exception:  # noqa: BLE001 - an unknown provider waits for a person
+        return False
 
 
-def set_publish_supervised(value: bool) -> None:
-    from backend.utils.settings_utils import save_setting
+def posts_without_approval(connection) -> bool:
+    """True only for an owned-channel connection whose person switched it to
+    post without approval. A config that cannot be read means approval."""
+    if connection is None or not may_skip_approval(getattr(connection, "provider", None)):
+        return False
+    try:
+        raw = connection.config
+        config = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        return isinstance(config, dict) and config.get(POST_WITHOUT_APPROVAL_KEY) is True
+    except (ValueError, TypeError):
+        return False
 
-    save_setting(PUBLISH_SUPERVISED_KEY, "true" if value else "false")
+
+def _config_dict(config) -> dict:
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except (ValueError, TypeError):
+            return {}
+    return config if isinstance(config, dict) else {}
 
 
-def requires_approval(requested_by: str) -> bool:
-    """An agent-initiated publish is never allowed to go out unattended."""
-    return (requested_by or "ui").strip().lower() in ALWAYS_SUPERVISED_SOURCES or publish_supervised()
+def _public_opt_in(provider: str | None):
+    try:
+        from backend.services.connections import registry
+
+        return registry.spec_for(provider or "").capabilities.public_opt_in
+    except Exception:  # noqa: BLE001 - an unknown provider cannot be published to anyway
+        return None
+
+
+def public_opt_in_state(provider: str | None, config) -> Optional[Dict[str, Any]]:
+    """Whether a connection may post with the visibilities its provider holds
+    back (``Capabilities.public_opt_in``); None when the provider holds none.
+
+    ``config`` is the connection's config (JSON text or a dict). Returns
+    {"on": bool, "source": ...}: "connection" for the person's choice on the
+    connection's card; "setting" for the provider's install-wide legacy
+    setting, read only while the connection has no choice stored; "default"
+    (off) otherwise. Anything but a stored true or false counts as no choice.
+    """
+    opt_in = _public_opt_in(provider)
+    if opt_in is None:
+        return None
+    stored = _config_dict(config).get(ALLOW_PUBLIC_KEY)
+    if isinstance(stored, bool):
+        return {"on": stored, "source": "connection"}
+    if opt_in.legacy_setting and _setting(opt_in.legacy_setting, "false") in _TRUTHY:
+        return {"on": True, "source": "setting"}
+    return {"on": False, "source": "default"}
+
+
+def visibility_refusal(provider: str | None, config, visibility: str | None) -> Optional[str]:
+    """Why a post with ``visibility`` is refused on this connection, or None.
+    Pass the visibility the post is sent with, its default already applied."""
+    opt_in = _public_opt_in(provider)
+    if opt_in is None or (visibility or "") not in opt_in.visibilities:
+        return None
+    state = public_opt_in_state(provider, config)
+    return None if state and state["on"] else opt_in.refusal
+
+
+def requires_approval(requested_by: str, connection=None) -> bool:
+    """Whether this publish waits on the Approvals page.
+
+    Always, except a publish a person started from the app ("ui") to an
+    owned-channel connection set to post without approval. An agent-initiated
+    publish is never allowed to go out unattended.
+    """
+    if (requested_by or "ui").strip().lower() in ALWAYS_SUPERVISED_SOURCES:
+        return True
+    return not posts_without_approval(connection)
 
 
 def posting_stop_reason() -> Optional[str]:

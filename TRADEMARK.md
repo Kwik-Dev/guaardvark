@@ -30,8 +30,8 @@ approved.
 - Presenting a modified version, fork, or derived product as Guaardvark, or with branding that
   could be confused with it. Forks are welcome under the MIT License; give the fork its own name.
 - Suggesting endorsement by, affiliation with, or origin from Albenze, Inc. where none exists.
-- Registering or applying to register any mark or domain containing "Guaardvark" or a confusingly
-  similar spelling.
+- Registering or applying to register any mark containing "Guaardvark" or a confusingly similar
+  spelling.
 - Altering the logo or combining it with other marks.
 
 ## Why this exists

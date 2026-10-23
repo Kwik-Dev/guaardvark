@@ -463,8 +463,9 @@ def recompute_and_broadcast(reason: str = "manual") -> RoutingTable | None:
 
     from backend.services.fleet_map import get_fleet_map
     from backend.socketio_instance import socketio
+    from backend.utils.node_identity import local_node_id
 
-    master_id = _os.environ.get("CLUSTER_NODE_ID") or "unknown-master"
+    master_id = local_node_id()
     table = RoutingTableBuilder().build(get_fleet_map(), master_node_id=master_id)
     store = get_routing_store()
     prev = store.get()
@@ -478,8 +479,8 @@ def recompute_and_broadcast(reason: str = "manual") -> RoutingTable | None:
         socketio.emit("cluster:routing_table", table.to_dict(),
                       to="cluster:masters-broadcast")
         _logger.info(
-            "[CLUSTER] routing_table recomputed (reason=%s, fleet_hash=%s, nodes=%d)",
-            reason, table.fleet_hash, table.node_count)
+            "[CLUSTER] routing_table recomputed by %s (reason=%s, fleet_hash=%s, nodes=%d)",
+            master_id, reason, table.fleet_hash, table.node_count)
     except Exception as e:
         _logger.warning("[CLUSTER] broadcast failed: %s (table still persisted locally)", e)
     return table

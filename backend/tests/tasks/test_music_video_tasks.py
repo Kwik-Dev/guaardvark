@@ -385,8 +385,8 @@ def test_assembler_registers_the_render_when_the_plugin_did_not(app, sent, monke
     class _Doc:
         id = 4242
 
-    def fake_register(path, folder_name=None, file_metadata=None, **kw):
-        calls["path"] = path
+    def fake_register(physical_path=None, folder_name=None, file_metadata=None, **kw):
+        calls["path"] = physical_path
         calls["folder"] = folder_name
         calls["meta"] = file_metadata
         return _Doc()
@@ -400,7 +400,6 @@ def test_assembler_registers_the_render_when_the_plugin_did_not(app, sent, monke
     assert calls["path"] == str(final)
     assert calls["folder"] == "Videos"
     assert calls["meta"]["music_video_id"] == mv.id
-    assert calls["meta"]["fallback_registration"] is True
     assert mv.output_document_id == 4242
     assert mv.current_stage == "complete"
 
@@ -529,7 +528,7 @@ def test_clip_profile_reads_the_registry_for_declared_models(app):
     assert (h3["fps"], h3["min_frames"], h3["max_frames"], h3["audio_out"]) == (24, 72, 362, True)
     assert mvt._max_clip_s(s) == pytest.approx(362 / 24)
     cog = mvt._clip_profile(mvt._settings(_mk(svc, settings={"i2v_engine": "cogvideox"})))
-    assert (cog["model"], cog["fps"], cog["max_frames"]) == ("cogvideox-5b-i2v", 8, 49)
+    assert (cog["model"], cog["fps"], cog["max_frames"]) == ("cogvideox-5b-i2v", 16, 81)
 
 
 def test_generate_one_clip_on_a_native_audio_model_anchors_the_song_slice(app, monkeypatch, tmp_path):

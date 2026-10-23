@@ -8,6 +8,7 @@ import json
 import logging
 import secrets
 import hashlib
+import hmac
 import uuid
 import time
 import mimetypes
@@ -17,7 +18,7 @@ from celery import group  # pyright: ignore[reportMissingImports]
 from backend.celery_app import celery
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 # Suppress SSL warnings for self-signed certs (common in local networks)
 import urllib3
@@ -28,10 +29,12 @@ from backend.models import (
     Setting, db,
     InterconnectorNode, InterconnectorSyncHistory, InterconnectorConflict, InterconnectorPendingChange,
     InterconnectorSyncProfile, InterconnectorBroadcast, InterconnectorBroadcastTarget,
-    InterconnectorPendingApproval,
+    InterconnectorPendingApproval, InterconnectorNodeIdentity,
     Client, Project, Rule, Website, Task, Document, LLMSession,
     InterconnectorLearning, Image
 )
+from backend.utils import node_auth
+from backend.services import interconnector_transition
 from backend.services.interconnector_sync_service import get_sync_service
 from backend.services.interconnector_file_sync_service import get_file_sync_service
 from backend.services.interconnector_sync_registry import (
@@ -50,6 +53,8 @@ from backend.utils.response_utils import (
 )
 from backend.utils.path_guard import PathEscapesRoot, contained, contained_path
 from backend.utils import update_state
+# Named apart from the local_node_id variables in the sync routes.
+from backend.utils.node_identity import local_node_id as this_node_id
 
 # Try to import psutil for system capabilities detection
 try:
@@ -229,8 +234,14 @@ def _hash_api_key(api_key):
 
 
 def _verify_api_key(provided_key, stored_hash):
-    """Verify an API key against a stored hash."""
-    return _hash_api_key(provided_key) == stored_hash
+    """Verify an API key against a stored hash, in constant time."""
+    if not provided_key or not stored_hash:
+        return False
+    # Bytes, so a value with non-ASCII characters compares unequal instead of
+    # raising.
+    return hmac.compare_digest(
+        _hash_api_key(provided_key).encode("utf-8"), str(stored_hash).encode("utf-8")
+    )
 
 
 def _check_api_key(config, provided_key=None):
@@ -263,8 +274,136 @@ def _check_api_key(config, provided_key=None):
     
     if not _verify_api_key(provided_key, stored_hash):
         return (False, "Invalid API key")
-    
+
     return (True, None)
+
+
+# Enrolment requests the master keeps waiting at once; more are refused
+# until the operator approves or removes some.
+MAX_PENDING_ENROLMENTS = 2000
+
+NOT_ENROLLED_MESSAGE = (
+    "This machine has not joined the fleet yet. Approve it on the master "
+    "(Settings → Interconnector, Machines joining the fleet), then try again."
+)
+
+
+def _node_auth_refusal(exc: node_auth.NodeAuthError):
+    code = "node_signature_required" if exc.status == 401 else "node_not_allowed"
+    return error_response(exc.reason, exc.status, error_code=code)
+
+
+def _require_node(url_node_id: Optional[str] = None):
+    """The approved machine that signed this request, or the refusal to send.
+
+    Returns (certificate, None) or (None, response). Unsigned, expired,
+    replayed or forged requests get 401; a machine that is not approved with
+    the key it signed with, or that names another machine in the URL, 403.
+    """
+    try:
+        cert = node_auth.verify_flask_request()
+    except node_auth.NodeAuthError as exc:
+        logger.warning(f"[SYNC] Refused {request.method} {request.path}: {exc.reason}")
+        return None, _node_auth_refusal(exc)
+    identity = db.session.get(InterconnectorNodeIdentity, cert.node)
+    if identity is None or identity.status != "approved" or identity.public_key != cert.pub:
+        logger.warning(
+            f"[SYNC] Refused {request.path}: {_node_log_label(cert.node)} is not approved with this key"
+        )
+        return None, error_response(
+            "This machine is not approved on the master with the key it signed with.",
+            403, error_code="node_not_approved",
+        )
+    if url_node_id is not None and url_node_id != cert.node:
+        logger.warning(
+            f"[SYNC] Refused {request.path}: signed by {_node_log_label(cert.node)}, "
+            f"names {_node_log_label(url_node_id)}"
+        )
+        return None, error_response(
+            "This request names another machine than the one that signed it.",
+            403, error_code="node_mismatch",
+        )
+    return cert, None
+
+
+class LegacyCaller:
+    """A client that joined before enrolment, taken during the transition
+    window (backend/services/interconnector_transition.py). It stands where
+    a certificate would: .node is the machine's id; it has no expiry to renew."""
+
+    legacy = True
+    exp = None
+
+    def __init__(self, node: str):
+        self.node = node
+
+
+def _legacy_caller(url_node_id: Optional[str] = None) -> Optional[LegacyCaller]:
+    """The legacy client this unsigned request may be taken from on the old
+    rule (the fleet key, when the master requires one), or None."""
+    from backend.utils.auth_guard import _effective_client_ip
+
+    if node_auth.is_signed(request.headers):
+        return None
+    is_valid, _error = _check_api_key(_get_config(), request.headers.get("X-API-Key"))
+    if not is_valid:
+        return None
+    node_id = interconnector_transition.legacy_caller(
+        _effective_client_ip(), request.path, url_node_id,
+        # A browser page sends an Origin; it may be open on another computer.
+        may_move=url_node_id is not None and not request.headers.get("Origin"),
+    )
+    return LegacyCaller(node_id) if node_id else None
+
+
+def _require_node_or_legacy(url_node_id: Optional[str] = None):
+    """_require_node, except that while the transition window is open a
+    client that joined before enrolment may still call unsigned. Only the
+    routes an old client needs to stay alive and fetch the update use this:
+    heartbeat, pulls and pushes, the manifest and registry, and outputs."""
+    legacy = _legacy_caller(url_node_id)
+    if legacy is not None:
+        return legacy, None
+    return _require_node(url_node_id)
+
+
+def _require_node_or_operator():
+    """None when an approved machine signed the request, a legacy client
+    called during the transition window, or the operator sent it (this
+    machine, or the install API key); otherwise the refusal."""
+    from backend.utils.auth_guard import caller_is_authorized
+
+    if not node_auth.is_signed(request.headers) and caller_is_authorized():
+        return None
+    _cert, refusal = _require_node_or_legacy()
+    return refusal
+
+
+def _issue_node_certificate(identity: InterconnectorNodeIdentity) -> Dict[str, Any]:
+    """A fresh certificate for an approved machine, signed by this master."""
+    master_key = node_auth.load_or_create_private_key()
+    master_id = this_node_id()
+    now = int(time.time())
+    token = node_auth.issue_certificate(
+        master_key, identity.node_id, identity.public_key, issuer=master_id, now=now
+    )
+    expires = now + node_auth.CERT_LIFETIME_S
+    identity.cert_expires_at = datetime.fromtimestamp(expires)
+    return {
+        "certificate": token,
+        "certificate_expires": expires,
+        "master_public_key": node_auth.public_key_text(master_key),
+        "master_node_id": master_id,
+    }
+
+
+def _client_fleet_auth():
+    """(requests auth, None) for this client's calls to its master, or
+    (None, refusal) while it holds no certificate."""
+    auth = node_auth.request_auth()
+    if auth is None:
+        return None, error_response(NOT_ENROLLED_MESSAGE, 409, error_code="node_not_enrolled")
+    return auth, None
 
 
 def _should_use_master_image_repository():
@@ -518,8 +657,26 @@ def update_config():
 
 @interconnector_bp.route("/config/generate-key", methods=["POST"])
 def generate_api_key():
-    """Generate a new API key for master mode."""
+    """Generate a new fleet key for master mode.
+
+    Only the person at the master gets the key, once, in this reply; the
+    master keeps its hash. The auth guard already lets through this machine
+    or a holder of the install API key; a caller on another machine is
+    refused here even with that key, so the plain fleet key never crosses
+    the network.
+    """
+    from backend.utils.auth_guard import LOCAL_ONLY_CODE, request_is_from_this_machine
+
     try:
+        if not request_is_from_this_machine():
+            logger.warning("[SYNC] Refused fleet key generation from another machine")
+            return error_response(
+                "A new fleet key can be made only on the master machine itself, "
+                "in Settings → Interconnector, where it is shown once.",
+                403,
+                error_code=LOCAL_ONLY_CODE,
+            )
+
         config = _get_config()
 
         if config.get("node_mode") != "master":
@@ -537,13 +694,16 @@ def generate_api_key():
 
         logger.info("New interconnector API key generated")
 
-        return success_response(
+        response, status = success_response(
             {
                 "api_key": api_key,
                 "api_key_hash": api_key_hash,
             },
             "API key generated successfully",
         )
+        # Shown once: no browser or proxy keeps a copy of this reply.
+        response.headers["Cache-Control"] = "no-store"
+        return response, status
 
     except Exception as e:
         logger.error(f"Error generating API key: {e}")
@@ -784,15 +944,19 @@ def _prune_duplicate_nodes(keep_id: str, fingerprint: Optional[str]) -> int:
     rows for one machine. Now that identity is machine-stable, any OTHER row
     with the same hostname fingerprint is a leftover duplicate and is removed
     (cascades to its sync history / conflicts). Runs on every registration, so
-    every install self-heals over time. Conservative: skips weak fingerprints.
+    every install self-heals over time. Conservative: skips weak fingerprints,
+    and never removes a machine that has its own enrolled key.
     """
     if not fingerprint or fingerprint in ("", "localhost", "unknown", "guaardvark"):
         return 0
     try:
         removed = 0
+        enrolled = {node_id for (node_id,) in db.session.query(InterconnectorNodeIdentity.node_id)}
         for other in db.session.query(InterconnectorNode).filter(
             InterconnectorNode.node_id != keep_id
         ).all():
+            if other.node_id in enrolled:
+                continue
             if _profile_fingerprint(_safe_json(other.hardware_profile)) == fingerprint:
                 db.session.delete(other)
                 removed += 1
@@ -807,12 +971,6 @@ def _prune_duplicate_nodes(keep_id: str, fingerprint: Optional[str]) -> int:
         db.session.rollback()
         logger.warning("[SYNC] Duplicate-node prune failed (non-fatal): %s", exc)
         return 0
-
-
-def _stable_local_node_id(config: dict, fallback: str = "local_node") -> str:
-    """This node's stable id for local records — the machine id (CLUSTER_NODE_ID),
-    falling back to the configured node_name for very old setups."""
-    return os.environ.get("CLUSTER_NODE_ID") or config.get("node_name") or fallback
 
 
 def _ensure_local_self_node(node_id: str, node_name: Optional[str],
@@ -852,26 +1010,65 @@ def local_identity():
     every install out of the box; needs no master mode (a node asking itself).
     """
     import socket
-    node_id = os.environ.get("CLUSTER_NODE_ID") or ""
+    node_id = this_node_id()
     hostname = None
     try:
         hostname = socket.gethostname()
     except Exception:
         pass
-    if not node_id:
-        try:
-            from backend.services.hardware_detector import HardwareDetector
-            prof = HardwareDetector().detect()
-            node_id = prof.get("node_id") or ""
-            hostname = prof.get("hostname") or hostname
-        except Exception as exc:
-            logger.debug("[SYNC] local-identity hardware detect failed: %s", exc)
-    return success_response({"node_id": node_id, "hostname": hostname}, "Local identity")
+    data = {"node_id": node_id, "hostname": hostname}
+    # The fingerprint a person compares with the one the master shows before
+    # approving this machine.
+    try:
+        data["key_fingerprint"] = node_auth.local_fingerprint()
+    except Exception as exc:
+        logger.warning("[SYNC] node key unavailable: %s", exc)
+        data["key_fingerprint"] = None
+    state = node_auth.read_fleet_state()
+    if node_auth.certificate_usable(state):
+        status = "approved"
+    elif state.get("status") in ("pending", "refused"):
+        status = state["status"]
+    else:
+        status = None
+    data["fleet"] = {
+        "status": status,
+        "message": state.get("message") if status == "refused" else None,
+        "enrolled_node_id": state.get("node_id"),
+        "certificate_expires": state.get("certificate_expires"),
+        "master_fingerprint": (
+            node_auth.fingerprint(state["master_public_key"]) if state.get("master_public_key") else None
+        ),
+    }
+    return success_response(data, "Local identity")
+
+
+@interconnector_bp.route("/enrol", methods=["POST"])
+def enrol_now():
+    """Client: enrol with the master now (or heartbeat, once enrolled) and
+    report where this machine stands. The same step the periodic heartbeat
+    runs; the Settings page calls it on save and while it is open."""
+    from backend.tasks.interconnector_client_heartbeat import _do_client_heartbeat
+
+    try:
+        result = _do_client_heartbeat()
+    except Exception as exc:
+        logger.error(f"[SYNC] Enrolment step failed: {exc}", exc_info=True)
+        return error_response(f"Enrolment failed: {exc}", 500)
+    return success_response(result, "Enrolment step done")
 
 
 @interconnector_bp.route("/nodes/register", methods=["POST"])
 def register_node():
-    """Register a client node with the master."""
+    """Enrol a client machine with the master, or renew its certificate.
+
+    The request carries the fleet key (when the master requires one), the
+    machine's public key in the body and a signature by that key
+    (backend/utils/node_auth.py). A machine the master does not know yet is
+    kept as pending and answered 202 until the operator approves it on the
+    master; an approved machine has its node row updated and gets a
+    certificate for its requests.
+    """
     try:
         logger.debug("[SYNC] Node registration request received")
         config = _get_config()
@@ -896,6 +1093,31 @@ def register_node():
             return error_response(error_msg or "Invalid or missing API key", 401)
 
         data = request.get_json()
+        if not isinstance(data, dict):
+            return validation_error_response("Request body must be a JSON object")
+
+        # The machine proves it holds the key it enrols with.
+        public_key = data.get("public_key")
+        if not public_key:
+            logger.warning(f"[SYNC] Node registration without a node key from {request.remote_addr}")
+            return error_response(
+                "This machine must be updated: joining the fleet now needs its node key. "
+                "Update Guaardvark on it, then save its Interconnector settings again.",
+                401, error_code="node_key_required",
+            )
+        try:
+            node_auth.verify_signature(
+                request.method,
+                node_auth.path_with_query(request.path, request.query_string.decode("latin-1")),
+                request.headers,
+                request.get_data(cache=True),
+                str(public_key),
+                node_auth.enrolment_nonce_cache(),
+            )
+        except node_auth.NodeAuthError as exc:
+            logger.warning(f"[SYNC] Node registration refused: {exc.reason}")
+            return _node_auth_refusal(exc)
+
         node_name = data.get("node_name")
         node_mode = data.get("node_mode", "client")
         # Accept structured hardware_profile from the client. Older clients that
@@ -966,9 +1188,17 @@ def register_node():
         node_id = profile_node_id or provided_id
 
         if node_id:
-            existing_node = db.session.get(InterconnectorNode, node_id)
+            existing_identity = db.session.get(InterconnectorNodeIdentity, node_id)
+            same_key = existing_identity is not None and existing_identity.public_key == public_key
+            existing_node = None if same_key else db.session.get(InterconnectorNode, node_id)
+            # The key holder of an enrolled id is that machine, whatever its
+            # hostname is now. Otherwise the hostname tells machines apart.
+            existing_host = None
             if existing_node:
                 existing_host = _profile_fingerprint(_safe_json(existing_node.hardware_profile))
+            if not existing_host and existing_identity is not None and not same_key:
+                existing_host = existing_identity.hostname
+            if existing_host or existing_node:
                 # A genuine collision is a DIFFERENT physical machine claiming the
                 # same id (e.g. a Full Backup that copied ~/.guaardvark/node_id to
                 # another box). Detect it by hostname fingerprint — never by IP.
@@ -987,6 +1217,61 @@ def register_node():
         if not node_id:
             node_id = str(uuid.uuid4())
         logger.debug(f"[SYNC] Using node: {_node_log_label(node_id, node_name)}")
+
+        # ---- Enrolment: the operator approves each machine's key once ----
+        if node_id == this_node_id():
+            logger.warning("[SYNC] Enrolment under this master's own node id refused")
+            return error_response(
+                "That node id is this master's own; another machine cannot enrol under it.",
+                409, error_code="node_key_conflict",
+            )
+        identity = db.session.get(InterconnectorNodeIdentity, node_id)
+        if identity is not None and identity.public_key != public_key:
+            logger.warning(f"[SYNC] Enrolment for {_node_log_label(node_id, node_name)} with another key refused")
+            return error_response(
+                "This node id is enrolled on the master with another key. Remove it there "
+                "(Settings → Interconnector) to enrol this machine again.",
+                409, error_code="node_key_conflict",
+            )
+        if identity is not None and identity.status == "revoked":
+            logger.warning(f"[SYNC] Enrolment for revoked {_node_log_label(node_id, node_name)} refused")
+            return error_response(
+                "This machine's place in the fleet was revoked on the master.",
+                403, error_code="node_revoked",
+            )
+        if identity is None:
+            waiting = db.session.query(InterconnectorNodeIdentity).filter(
+                InterconnectorNodeIdentity.status == "pending"
+            ).count()
+            if waiting >= MAX_PENDING_ENROLMENTS:
+                logger.warning(f"[SYNC] Enrolment refused: {waiting} requests already wait for approval")
+                return error_response(
+                    "Too many machines are waiting for approval on the master; approve or "
+                    "remove some there first.",
+                    429, error_code="too_many_pending",
+                )
+            identity = InterconnectorNodeIdentity(
+                node_id=node_id,
+                public_key=public_key,
+                status="pending",
+                requested_at=datetime.now(),
+            )
+            db.session.add(identity)
+            logger.info(f"[SYNC] Enrolment request from {_node_log_label(node_id, node_name)} waits for approval")
+        identity.node_name = node_name
+        identity.hostname = incoming_host or identity.hostname
+        identity.host = client_ip
+        db.session.commit()
+        if identity.status != "approved":
+            return success_response(
+                {
+                    "status": "pending",
+                    "node_id": node_id,
+                    "fingerprint": node_auth.fingerprint(public_key),
+                },
+                "Waiting for approval on the master",
+                202,
+            )
 
         # Check if node already exists
         existing_node = db.session.get(InterconnectorNode, node_id)
@@ -1050,9 +1335,17 @@ def register_node():
         # identity logic for this same physical machine.
         _prune_duplicate_nodes(node_id, incoming_host)
 
-        # Return node ID
+        identity = db.session.get(InterconnectorNodeIdentity, node_id)
+        credentials = _issue_node_certificate(identity)
+        db.session.commit()
         return success_response(
-            {"node_id": node_id, "registered_at": datetime.now().isoformat()},
+            {
+                "status": "approved",
+                "node_id": node_id,
+                "registered_at": datetime.now().isoformat(),
+                "fingerprint": node_auth.fingerprint(public_key),
+                **credentials,
+            },
             "Node registered successfully"
         )
 
@@ -1078,12 +1371,12 @@ def node_heartbeat(node_id):
             logger.warning(f"[SYNC] Heartbeat rejected: Not in master mode (mode={config.get('node_mode')})")
             return error_response("Heartbeat is only available in master mode", 400)
 
-        # Verify API key (if enabled)
-        api_key = request.headers.get("X-API-Key")
-        is_valid, error_msg = _check_api_key(config, api_key)
-        if not is_valid:
-            logger.warning(f"[SYNC] Heartbeat rejected: {error_msg} for node {node_id}")
-            return error_response(error_msg or "Invalid or missing API key", 401)
+        # Only the machine itself, signing with its approved key, may beat for
+        # the node id in the URL (or, during the transition window, a client
+        # that joined before enrolment).
+        cert, refusal = _require_node_or_legacy(node_id)
+        if refusal:
+            return refusal
 
         node = db.session.get(InterconnectorNode, node_id)
         if not node:
@@ -1100,11 +1393,16 @@ def node_heartbeat(node_id):
 
         # Update hardware_profile if provided
         if request.is_json:
-            data = request.get_json()
+            data = request.get_json(silent=True) or {}
             if "hardware_profile" in data:
                 node.hardware_profile = json.dumps(data["hardware_profile"])
             if "sync_entities" in data:
                 node.sync_entities = json.dumps(data["sync_entities"])
+
+        # The certificate is renewed here, well before it runs out.
+        renewal = {}
+        if cert.exp is not None and cert.exp - int(time.time()) < node_auth.CERT_RENEW_BEFORE_S:
+            renewal = _issue_node_certificate(db.session.get(InterconnectorNodeIdentity, node_id))
 
         db.session.commit()
         logger.debug(f"[SYNC] Heartbeat updated for node {node_id} ({node.node_name})")
@@ -1122,7 +1420,7 @@ def node_heartbeat(node_id):
             logger.warning("[SYNC] FleetMap liveness update failed for %s: %s",
                            node_id, fleet_err)
 
-        response_data = {"node_id": node_id, "heartbeat_at": node.last_heartbeat.isoformat()}
+        response_data = {"node_id": node_id, "heartbeat_at": node.last_heartbeat.isoformat(), **renewal}
 
         # Master piggybacks the current fleet_hash so workers can self-heal
         # missed broadcasts without an explicit ACK protocol (see spec §4.5).
@@ -1211,10 +1509,14 @@ def get_sync_history():
         # Get last N sync history records
         limit = int(request.args.get("limit", 10))
         
-        local_node_id = config.get("node_name", "local_node")
-        
+        # Syncs are recorded under this machine's id; installs that predate it
+        # recorded them under the node name.
+        recorded_as = [this_node_id()]
+        if config.get("node_name"):
+            recorded_as.append(config["node_name"])
+
         sync_history_records = db.session.query(InterconnectorSyncHistory).filter(
-            InterconnectorSyncHistory.node_id == local_node_id
+            InterconnectorSyncHistory.node_id.in_(recorded_as)
         ).order_by(
             InterconnectorSyncHistory.sync_timestamp.desc()
         ).limit(limit).all()
@@ -1532,6 +1834,166 @@ def disconnect_node(node_id):
         return error_response(f"Failed to disconnect node: {str(e)}", 500)
 
 
+# ---- Enrolments: which machines may join the fleet --------------------------
+# Operator routes (auth guard: this machine or the install API key). Approving
+# a machine lets it collect a certificate at its next enrolment step; revoking
+# stops its certificate at once; removing forgets the machine and its node row.
+
+def _enrolments_live_here():
+    config = _get_config()
+    if not config.get("is_enabled") or config.get("node_mode") != "master":
+        return error_response("Machines join the fleet on its master; this machine is not one.", 400)
+    return None
+
+
+def _take_node_offline(node_id: str, reason: str) -> None:
+    from backend.services.fleet_map import get_fleet_map
+
+    get_fleet_map().set_online(node_id, False)
+    if os.environ.get("CLUSTER_ROLE") == "master":
+        try:
+            from backend.services.cluster_routing import recompute_and_broadcast
+            recompute_and_broadcast(reason=reason)
+        except Exception as exc:
+            logger.warning("[SYNC] Routing recompute after %s failed: %s", reason, exc)
+
+
+@interconnector_bp.route("/enrolments", methods=["GET"])
+def list_enrolments():
+    """Machines that asked to join, newest first, waiting ones on top."""
+    refusal = _enrolments_live_here()
+    if refusal:
+        return refusal
+    rows = InterconnectorNodeIdentity.query.order_by(
+        InterconnectorNodeIdentity.requested_at.desc()
+    ).all()
+    rank = {"pending": 0, "approved": 1, "revoked": 2}
+    rows.sort(key=lambda row: rank.get(row.status, 3))
+    return success_response(
+        {
+            "enrolments": [row.to_dict() for row in rows],
+            "pending_count": sum(1 for row in rows if row.status == "pending"),
+            "master_fingerprint": node_auth.local_fingerprint(),
+            "transition": interconnector_transition.status(),
+        },
+        "Enrolments retrieved",
+    )
+
+
+@interconnector_bp.route("/enrolments/<node_id>/approve", methods=["POST"])
+def approve_enrolment(node_id):
+    refusal = _enrolments_live_here()
+    if refusal:
+        return refusal
+    try:
+        identity = db.session.get(InterconnectorNodeIdentity, node_id)
+        if identity is None:
+            return not_found_response("Enrolment")
+        if identity.status != "approved":
+            identity.status = "approved"
+            identity.decided_at = datetime.now()
+            db.session.commit()
+            logger.info(
+                f"[SYNC] Approved {_node_log_label(node_id, identity.node_name)} "
+                f"(key {node_auth.fingerprint(identity.public_key)})"
+            )
+        return success_response(
+            {"enrolment": identity.to_dict()},
+            "Approved. The machine joins at its next heartbeat.",
+        )
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"[SYNC] Error approving {node_id}: {e}", exc_info=True)
+        return error_response(f"Failed to approve: {str(e)}", 500)
+
+
+@interconnector_bp.route("/enrolments/<node_id>/revoke", methods=["POST"])
+def revoke_enrolment(node_id):
+    refusal = _enrolments_live_here()
+    if refusal:
+        return refusal
+    try:
+        identity = db.session.get(InterconnectorNodeIdentity, node_id)
+        if identity is None:
+            return not_found_response("Enrolment")
+        identity.status = "revoked"
+        identity.decided_at = datetime.now()
+        identity.cert_expires_at = None
+        node = db.session.get(InterconnectorNode, node_id)
+        if node is not None:
+            node.status = "disconnected"
+            node.online = False
+            # No heartbeat time, so the sweeper does not bring it back online.
+            node.last_heartbeat = None
+        db.session.commit()
+        _take_node_offline(node_id, "node_revoked")
+        logger.warning(f"[SYNC] Revoked {_node_log_label(node_id, identity.node_name)}")
+        return success_response({"enrolment": identity.to_dict()}, "Revoked")
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"[SYNC] Error revoking {node_id}: {e}", exc_info=True)
+        return error_response(f"Failed to revoke: {str(e)}", 500)
+
+
+@interconnector_bp.route("/enrolments/<node_id>", methods=["DELETE"])
+def remove_enrolment(node_id):
+    """Decline a waiting machine, or forget an enrolled one and its node row."""
+    refusal = _enrolments_live_here()
+    if refusal:
+        return refusal
+    try:
+        identity = db.session.get(InterconnectorNodeIdentity, node_id)
+        node = db.session.get(InterconnectorNode, node_id)
+        if identity is None and node is None:
+            return not_found_response("Enrolment")
+        if identity is not None:
+            db.session.delete(identity)
+        if node is not None:
+            db.session.delete(node)
+        db.session.commit()
+        _take_node_offline(node_id, "node_removed")
+        logger.info(f"[SYNC] Removed {_node_log_label(node_id)} from the fleet")
+        return success_response({"node_id": node_id}, "Removed")
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"[SYNC] Error removing {node_id}: {e}", exc_info=True)
+        return error_response(f"Failed to remove: {str(e)}", 500)
+
+
+@interconnector_bp.route("/transition", methods=["POST"])
+def set_transition_window():
+    """Open or close the window in which clients that joined before enrolment
+    may still sync unsigned (backend/services/interconnector_transition.py).
+    Body: {"open": true, "hours": 48} or {"open": false}."""
+    refusal = _enrolments_live_here()
+    if refusal:
+        return refusal
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data.get("open"), bool):
+        return validation_error_response("open must be true or false")
+    try:
+        if data["open"]:
+            try:
+                hours = float(data.get("hours", interconnector_transition.WINDOW_HOURS))
+            except (TypeError, ValueError):
+                return validation_error_response("hours must be a number")
+            if not 0 < hours <= interconnector_transition.MAX_WINDOW_HOURS:
+                return validation_error_response(
+                    f"hours must be more than 0 and at most {interconnector_transition.MAX_WINDOW_HOURS}"
+                )
+            interconnector_transition.open_window(hours, opened_by="operator")
+        else:
+            interconnector_transition.close_window(closed_by="operator")
+        return success_response(
+            {"transition": interconnector_transition.status()},
+            "Transition window open" if data["open"] else "Transition window closed",
+        )
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"[SYNC] Error changing the transition window: {e}", exc_info=True)
+        return error_response(f"Failed to change the transition window: {str(e)}", 500)
+
+
 @interconnector_bp.route("/sync/profiles", methods=["GET"])
 def get_sync_profiles():
     """List available sync profiles."""
@@ -1556,12 +2018,9 @@ def pull_entities():
         if config.get("node_mode") != "master":
             return error_response("Pull endpoint is only available on master nodes", 400)
 
-        # Verify API key (if enabled)
-        api_key = request.headers.get("X-API-Key")
-        is_valid, error_msg = _check_api_key(config, api_key)
-        if not is_valid:
-            logger.warning(f"[SYNC] Pull entities rejected: {error_msg}")
-            return error_response(error_msg or "Invalid or missing API key", 401)
+        _cert, refusal = _require_node_or_legacy()
+        if refusal:
+            return refusal
 
         # Get requested entity types
         entity_types = request.args.getlist("entities")
@@ -1611,19 +2070,17 @@ def push_entities():
         if config.get("node_mode") != "master":
             return error_response("Push endpoint is only available on master nodes", 400)
 
-        # Verify API key (if enabled)
-        api_key = request.headers.get("X-API-Key")
-        is_valid, error_msg = _check_api_key(config, api_key)
-        if not is_valid:
-            logger.warning(f"[SYNC] Pull entities rejected: {error_msg}")
-            return error_response(error_msg or "Invalid or missing API key", 401)
+        cert, refusal = _require_node_or_legacy()
+        if refusal:
+            return refusal
 
         if not request.is_json:
             return error_response("Request must be JSON", 400)
 
         data = request.get_json()
         entities_data = data.get("entities", {})
-        node_id = data.get("node_id")  # ID of the client node pushing data
+        # The pushing machine is the one that signed, whatever the body says.
+        node_id = cert.node
         conflict_strategy = data.get("conflict_strategy", "last_write_wins")
 
         if not entities_data:
@@ -1721,7 +2178,13 @@ def get_pending_approvals():
 
 @interconnector_bp.route("/approvals/<int:approval_id>/decide", methods=["POST"])
 def decide_approval(approval_id: int):
-    """Approve or decline a pending approval."""
+    """Approve or decline a pending approval.
+
+    Approving applies what the person chose: held files replace the local
+    copy even where it is newer (remote_wins, which backs the old copy up
+    first), and a held entity change replaces the local row. When nothing
+    could be applied the approval stays pending and the answer says why.
+    """
     try:
         approval = db.session.get(InterconnectorPendingApproval, approval_id)
         if not approval:
@@ -1736,36 +2199,80 @@ def decide_approval(approval_id: int):
             return validation_error_response("decision must be approve|decline|partial")
 
         approved_files = set(data.get("approved_files") or [])
-        file_sync_service = get_file_sync_service()
-
-        files = approval.files_data or "[]"
-        try:
-            files_list = json.loads(files)
-        except Exception:
-            files_list = []
-
-        # Determine files to apply
-        files_to_apply = files_list
-        if decision == "partial" and approved_files:
-            files_to_apply = [f for f in files_list if f.get("path") in approved_files]
+        # A partial approval applies only the ticked files, so with none
+        # ticked there is nothing to apply; the push stays pending.
+        if decision == "partial" and not approved_files:
+            return error_response(
+                "Tick at least one file to apply, or decline the whole push.", 400
+            )
 
         apply_results = {"processed": 0, "created": 0, "updated": 0, "conflicts": 0, "errors": 0}
         details = []
 
-        if decision in {"approve", "partial"} and files_to_apply:
-            success, apply_result = file_sync_service.apply_files_atomic(
-                files_to_apply, "last_write_wins", create_backup=True
-            )
-            asum = apply_result.get("summary", {})
-            apply_results["processed"] = asum.get("total_processed", 0)
-            apply_results["created"] = asum.get("total_created", 0)
-            apply_results["updated"] = asum.get("total_updated", 0)
-            apply_results["conflicts"] = asum.get("total_conflicts", 0)
-            apply_results["errors"] = asum.get("total_errors", 0)
-            details = [
-                {"path": d.get("path"), "status": d.get("status", "success"), "error": d.get("error")}
-                for d in apply_result.get("details", [])
-            ]
+        if decision != "decline" and approval.sync_type == "entities":
+            if decision == "partial":
+                return validation_error_response(
+                    "A held entity change is approved or declined whole."
+                )
+            applied, outcome = _apply_entity_approval(approval)
+            if not applied:
+                db.session.rollback()
+                logger.warning(f"[APPROVAL] Approval {approval_id} not applied: {outcome}")
+                return error_response(f"{outcome} The change stays pending.", 409)
+            apply_results["processed"] = 1
+            apply_results["created"] = int(bool(outcome.get("created")))
+            apply_results["updated"] = int(bool(outcome.get("updated")))
+            details = [{"entity_type": outcome["entity_type"], "entity_id": outcome["entity_id"],
+                        "status": "success"}]
+        elif decision != "decline":
+            files = approval.files_data or "[]"
+            try:
+                files_list = json.loads(files)
+            except Exception:
+                files_list = []
+            files_to_apply = files_list
+            if decision == "partial":
+                files_to_apply = [f for f in files_list if f.get("path") in approved_files]
+
+            if files_to_apply:
+                success, apply_result = get_file_sync_service().apply_files_atomic(
+                    files_to_apply, "remote_wins", create_backup=True
+                )
+                asum = apply_result.get("summary", {})
+                apply_results["processed"] = asum.get("total_processed", 0)
+                apply_results["created"] = asum.get("total_created", 0)
+                apply_results["updated"] = asum.get("total_updated", 0)
+                apply_results["conflicts"] = asum.get("total_conflicts", 0)
+                apply_results["errors"] = asum.get("total_errors", 0)
+                details = [
+                    {
+                        "path": d.get("path"),
+                        "status": d.get("status", "success"),
+                        "created": d.get("created", False),
+                        "updated": d.get("updated", False),
+                        "skipped": d.get("skipped", False),
+                        "error": d.get("error"),
+                    }
+                    for d in apply_result.get("details", [])
+                ]
+                details += [
+                    {"path": path, "status": "error", "error": "no content in the held push"}
+                    for path in apply_result.get("invalid_files", [])
+                ]
+                if not success:
+                    # apply_files_atomic rolled back whatever it had written.
+                    failed = next((d for d in details if d["status"] != "success"), {})
+                    logger.warning(
+                        f"[APPROVAL] Approval {approval_id} not applied: "
+                        f"{failed.get('path')}: {failed.get('error')}"
+                    )
+                    return error_response(
+                        f"Nothing was applied: {failed.get('path') or 'a file'} failed "
+                        f"({failed.get('error') or 'unknown error'}). The push stays pending.",
+                        409,
+                        details={"approval_id": approval_id, "apply_results": apply_results,
+                                 "details": details},
+                    )
 
         approval.status = "approved" if decision in {"approve", "partial"} else "declined"
         approval.reviewed_at = datetime.now()
@@ -1788,6 +2295,28 @@ def decide_approval(approval_id: int):
         return error_response(f"Failed to process approval: {str(e)}", 500)
 
 
+def _apply_entity_approval(approval: InterconnectorPendingApproval):
+    """Apply the client's version of a held entity change (queued by the
+    sync service's push safeguard). Returns (True, outcome) with the row
+    changed in this session, uncommitted, or (False, reason)."""
+    from backend.services.interconnector_sync_service import REMOTE_WINS
+
+    try:
+        change = json.loads(approval.entities_data or "{}")
+    except ValueError:
+        change = {}
+    entity_type = change.get("entity_type") if isinstance(change, dict) else None
+    client_data = change.get("client_data") if isinstance(change, dict) else None
+    if not entity_type or not isinstance(client_data, dict):
+        return False, "This approval holds no entity change to apply."
+    applied, _conflict_id, stats = get_sync_service().apply_entity(
+        entity_type, client_data, REMOTE_WINS, node_id=approval.source_node
+    )
+    if not applied or not (stats.get("created") or stats.get("updated")):
+        return False, f"The {entity_type} change could not be applied."
+    return True, {"entity_type": entity_type, "entity_id": client_data.get("id"), **stats}
+
+
 def _build_client_url(node: InterconnectorNode) -> str:
     """Construct base URL for a client node."""
     return f"http://{node.host}:{node.port}"
@@ -1807,7 +2336,10 @@ def broadcast_push_to_client(self, broadcast_id: str, node_id: str, payload: Dic
         target.started_at = datetime.now()
         db.session.commit()
 
-        resp = requests.post(client_url, json=payload, timeout=120, verify=False)
+        # Signed with the master's own key: the client takes a sync request
+        # only from the master it enrolled with.
+        resp = requests.post(client_url, json=payload, timeout=120, verify=False,
+                             auth=node_auth.request_auth())
         if resp.status_code == 200:
             target.status = "success"
             target.completed_at = datetime.now()
@@ -2131,12 +2663,9 @@ def list_outputs_index():
         if config.get("node_mode") != "master":
             return error_response("Outputs index is only available on master nodes", 400)
 
-        # Verify API key (if enabled)
-        api_key = request.headers.get("X-API-Key")
-        is_valid, error_msg = _check_api_key(config, api_key)
-        if not is_valid:
-            logger.warning(f"[SYNC OUTPUTS] Outputs index rejected: {error_msg}")
-            return error_response(error_msg or "Invalid or missing API key", 401)
+        refusal = _require_node_or_operator()
+        if refusal:
+            return refusal
 
         sub_path = request.args.get("path")
         limit = int(request.args.get("limit", 200))
@@ -2171,10 +2700,9 @@ def fetch_output_content():
         if config.get("node_mode") != "master":
             return error_response("Output content is only available on master nodes", 400)
 
-        api_key = request.headers.get("X-API-Key")
-        is_valid, error_msg = _check_api_key(config, api_key)
-        if not is_valid:
-            return error_response(error_msg or "Invalid or missing API key", 401)
+        refusal = _require_node_or_operator()
+        if refusal:
+            return refusal
 
         rel_path = request.args.get("path")
         if not rel_path:
@@ -2210,12 +2738,11 @@ def pull_files():
             logger.warning(f"[SYNC] File pull rejected: Not in master mode (mode={config.get('node_mode')})")
             return error_response("Pull files endpoint is only available on master nodes", 400)
 
-        # Verify API key (if enabled)
-        api_key = request.headers.get("X-API-Key")
-        is_valid, error_msg = _check_api_key(config, api_key)
-        if not is_valid:
-            logger.warning(f"[SYNC] File pull rejected: {error_msg}")
-            return error_response(error_msg or "Invalid or missing API key", 401)
+        # Code and portable credentials go only to approved machines, and
+        # during the transition window to clients that joined the old way.
+        _cert, refusal = _require_node_or_legacy()
+        if refusal:
+            return refusal
 
         # Get requested sync paths
         sync_paths = request.args.getlist("paths")
@@ -2470,6 +2997,11 @@ def trigger_manual_sync():
             logger.error("[SYNC] Manual sync rejected: Master URL or API key missing")
             return error_response("Master URL and API key must be configured", 400)
 
+        # Every call to the master below is signed as this machine.
+        fleet_auth, refusal = _client_fleet_auth()
+        if refusal:
+            return refusal
+
         # Clean up URL
         master_url = master_url.rstrip('/')
         if not master_url.startswith(('http://', 'https://')):
@@ -2491,7 +3023,7 @@ def trigger_manual_sync():
 
         # Local node identity = the machine-stable id; ensure a self-row exists
         # so the sync-history FK and last_sync_time update below succeed.
-        local_node_id = _stable_local_node_id(config)
+        local_node_id = this_node_id()
         _ensure_local_self_node(local_node_id, config.get("node_name"),
                                 config.get("node_mode", "client"))
 
@@ -2525,7 +3057,8 @@ def trigger_manual_sync():
                     headers=headers,
                     params=params,
                     timeout=60,
-                    verify=False
+                    verify=False,
+                    auth=fleet_auth,
                 )
 
                 if response.status_code == 200:
@@ -2677,7 +3210,8 @@ def trigger_manual_sync():
                     headers=push_headers,
                     json=push_data,
                     timeout=60,
-                    verify=False
+                    verify=False,
+                    auth=fleet_auth,
                 )
 
                 if response.status_code == 200:
@@ -2820,7 +3354,8 @@ def trigger_manual_sync():
                             headers=headers,
                             params=files_params,
                             timeout=120,  # Longer timeout for file sync
-                            verify=False
+                            verify=False,
+                            auth=fleet_auth,
                         )
 
                         logger.debug(f"[SYNC] File pull: Response status={files_response.status_code}")
@@ -2980,7 +3515,8 @@ def trigger_manual_sync():
                             headers=push_headers,
                             json=files_push_data,
                             timeout=120,
-                            verify=False
+                            verify=False,
+                            auth=fleet_auth,
                         )
 
                         if files_response.status_code == 200:
@@ -3126,28 +3662,81 @@ def trigger_manual_sync():
         return error_response(f"Synchronization failed: {str(e)}", 500)
 
 
+def _host_port(url: Optional[str]):
+    """(host, port) of an address written the way the Interconnector settings
+    take it (http:// added when left out), or None when it is not one."""
+    text = str(url or "").strip()
+    if not text:
+        return None
+    if not text.startswith(("http://", "https://")):
+        text = f"http://{text}"
+    try:
+        parts = urlsplit(text)
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        return None
+    if not parts.hostname:
+        return None
+    return parts.hostname.lower(), port
+
+
+def _known_fleet_addresses(config: dict) -> set:
+    """The addresses this machine may probe: its saved master, and the nodes
+    the master has on record."""
+    known = set()
+    master = _host_port(config.get("master_url"))
+    if master:
+        known.add(master)
+    try:
+        for node in db.session.query(InterconnectorNode).all():
+            host = str(node.host or "")
+            address = _host_port(host if host.startswith(("http://", "https://"))
+                                 else f"{host}:{node.port}")
+            if address:
+                known.add(address)
+    except Exception as exc:
+        logger.warning(f"[SYNC] Could not read the node list: {exc}")
+    return known
+
+
 @interconnector_bp.route("/test-connection", methods=["POST"])
 def test_connection():
-    """Test connection to master server (client mode)."""
+    """Test connection to master server (client mode).
+
+    Only an address of this fleet: the saved master address or a node the
+    master has on record. The backend fetches whatever it is given, so an
+    open address would let a caller probe any host this machine can reach.
+    """
     try:
         if not request.is_json:
             return error_response("Request must be JSON", 400)
 
-        data = request.get_json()
+        data = request.get_json() or {}
         master_url = data.get("master_url")
         master_api_key = data.get("master_api_key")
 
         if not master_url:
             return validation_error_response("Master URL is required")
-        
+
+        target = _host_port(master_url)
+        if target is None or target not in _known_fleet_addresses(_get_config()):
+            logger.warning(f"[SYNC] Refused to test an address outside the fleet: {_redact_log_value(master_url)}")
+            return error_response(
+                "Only this fleet's addresses can be tested from here: the saved master "
+                "address, or a node the master has on record. Save the master address first.",
+                400,
+            )
+
         # API key is optional if server doesn't require it
         # But we can't check server config from here, so we'll allow empty API key
         # The server will accept or reject based on its require_api_key setting
 
-        # Clean up URL
-        master_url = master_url.rstrip('/')
-        if not master_url.startswith(('http://', 'https://')):
-            master_url = f"http://{master_url}"
+        # Rebuilt from the checked host and port, so no path or credentials
+        # in the given URL go along.
+        host, port = target
+        scheme = "https" if str(master_url).strip().startswith("https://") else "http"
+        netloc = f"[{host}]" if ":" in host else host
+        master_url = f"{scheme}://{netloc}:{port}"
 
         # Build headers - conditionally include API key
         test_headers = {}
@@ -3244,23 +3833,28 @@ def check_for_updates():
             return error_response("Master URL not configured", 400)
         
         logger.info(f"[UPDATES] Fetching manifest from master {_redact_log_value(master_url)}")
-        
+
+        fleet_auth, refusal = _client_fleet_auth()
+        if refusal:
+            return refusal
+
         # Build headers
         headers = {}
         if master_api_key:
             headers["X-API-Key"] = master_api_key
-        
+
         # Fetch file metadata from master (without content for speed)
         try:
             # First, get file hashes from master
             manifest_url = f"{master_url}/api/interconnector/updates/manifest"
             logger.debug(f"[UPDATES] Requesting manifest from: {manifest_url}")
-            
+
             response = requests.get(
                 manifest_url,
                 headers=headers,
                 timeout=30,
-                verify=False
+                verify=False,
+                auth=fleet_auth,
             )
             
             logger.debug(f"[UPDATES] Master response status: {response.status_code}")
@@ -3373,13 +3967,10 @@ def get_update_manifest():
             logger.warning(f"[UPDATES] Manifest rejected: Not in master mode (mode={config.get('node_mode')})")
             return error_response("Manifest endpoint is only available on master nodes", 400)
         
-        # Verify API key if required
-        api_key = request.headers.get("X-API-Key")
-        is_valid, error_msg = _check_api_key(config, api_key)
-        if not is_valid:
-            logger.warning(f"[UPDATES] Manifest rejected: {error_msg}")
-            return error_response(error_msg or "Invalid or missing API key", 401)
-        
+        _cert, refusal = _require_node_or_legacy()
+        if refusal:
+            return refusal
+
         # Scan files WITHOUT content (metadata only for speed, but WITH hashes for comparison)
         logger.info("[UPDATES] Scanning files for manifest...")
         file_sync_service = get_file_sync_service()
@@ -3449,10 +4040,9 @@ def get_core_files_registry():
         if config.get("node_mode") != "master":
             return error_response("Core files registry is only available on master nodes", 400)
 
-        api_key = request.headers.get("X-API-Key")
-        is_valid, error_msg = _check_api_key(config, api_key)
-        if not is_valid:
-            return error_response(error_msg or "Invalid or missing API key", 401)
+        _cert, refusal = _require_node_or_legacy()
+        if refusal:
+            return refusal
 
         file_sync_service = get_file_sync_service()
         registry = _master_core_registry(file_sync_service.get_project_root())
@@ -3482,18 +4072,23 @@ def preview_updates():
         
         if not master_url:
             return error_response("Master URL not configured", 400)
-        
+
+        fleet_auth, refusal = _client_fleet_auth()
+        if refusal:
+            return refusal
+
         headers = {}
         if master_api_key:
             headers["X-API-Key"] = master_api_key
-        
+
         # Fetch manifest from master
         try:
             response = requests.get(
                 f"{master_url}/api/interconnector/updates/manifest",
                 headers=headers,
                 timeout=30,
-                verify=False
+                verify=False,
+                auth=fleet_auth,
             )
             
             if response.status_code != 200:
@@ -3599,22 +4194,27 @@ def apply_updates():
         
         if not master_url:
             return error_response("Master URL not configured", 400)
-        
+
+        fleet_auth, refusal = _client_fleet_auth()
+        if refusal:
+            return refusal
+
         headers = {"Content-Type": "application/json"}
         if master_api_key:
             headers["X-API-Key"] = master_api_key
-        
+
         # Get optional file filter from request body
         data = request.get_json() or {}
         requested_files = data.get("files", [])  # Empty = all files
-        
+
         # Step 1: Get manifest from master to know what to update
         try:
             manifest_response = requests.get(
                 f"{master_url}/api/interconnector/updates/manifest",
                 headers=headers,
                 timeout=30,
-                verify=False
+                verify=False,
+                auth=fleet_auth,
             )
             
             if manifest_response.status_code != 200:
@@ -3659,7 +4259,8 @@ def apply_updates():
                 headers=headers,
                 params=pull_params,
                 timeout=120,  # Longer timeout for file transfer
-                verify=False
+                verify=False,
+                auth=fleet_auth,
             )
             
             if pull_response.status_code != 200:
@@ -3833,7 +4434,7 @@ def apply_updates():
         # The files themselves are persisted on disk by apply_files_atomic (written + hash-matched
         # on future checks).
         try:
-            local_node_id = _stable_local_node_id(config, fallback="local_client")
+            local_node_id = this_node_id()
             _ensure_local_self_node(local_node_id, config.get("node_name"),
                                     config.get("node_mode", "client"))
             sync_history = InterconnectorSyncHistory(
@@ -3962,6 +4563,7 @@ def sync_status():
                     headers=headers,
                     timeout=15,
                     verify=False,
+                    auth=node_auth.request_auth(),
                 )
                 if resp.status_code == 200:
                     master_summary = resp.json().get("data", {}) or {}
@@ -3985,24 +4587,30 @@ def sync_status():
 
 @interconnector_bp.route("/receive-directive", methods=["POST"])
 def receive_directive():
-    """Receive an Uncle Claude directive from another node."""
-    # Validate API key to prevent unauthorized directive injection
-    config = _get_config()
-    if config.get("is_enabled"):
-        api_key = request.headers.get("X-API-Key")
-        is_valid, error_msg = _check_api_key(config, api_key)
-        if not is_valid:
-            logger.warning(f"[SYNC] Rejected directive from {request.remote_addr}: {error_msg}")
-            return error_response("Unauthorized: invalid or missing API key", 401)
+    """Receive an Uncle Claude directive from the fleet's master.
 
-    data = request.get_json()
-    if not data or "directive" not in data:
+    A directive reaches the code-manipulation kill switches, so it is taken
+    only in a request signed with the master's own key, the one this machine
+    pinned at enrolment (backend/utils/node_auth.py): unsigned 401, signed by
+    any other machine 403. A machine that never enrolled has no master and
+    takes none. Every refusal is logged.
+    """
+    try:
+        cert = node_auth.verify_flask_request_from_master()
+    except node_auth.NodeAuthError as exc:
+        logger.warning(f"[SYNC] Refused directive from {request.remote_addr}: {exc.reason}")
+        return _node_auth_refusal(exc)
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or "directive" not in data:
         return error_response("directive is required", 400)
 
     directive = data["directive"]
     reason = data.get("reason", "No reason provided")
 
-    logger.critical(f"Received Uncle Claude directive from {request.remote_addr}: {directive} — {reason}")
+    logger.critical(
+        f"Received Uncle Claude directive from master {_node_log_label(cert.node)}: {directive} — {reason}"
+    )
 
     from backend.tools.agent_tools.code_manipulation_tools import _handle_uncle_directive
     _handle_uncle_directive(directive, reason)

@@ -310,3 +310,72 @@ def test_embedding_width_comes_from_ollama_before_the_4096_fallback(ollama, monk
     router._gpu_embedding = None
     router._cpu_embedding = None
     assert router.embed_dim == 1024
+
+
+# ── decision-only models ─────────────────────────────────────────────────────
+
+DECISION_BOX = {
+    "nimble:9b-q4_K_M": {"capabilities": ["decision"]},
+    "tev1:4b": {"capabilities": ["decision"]},
+    "gemma4:e2b": {"capabilities": ["completion", "vision", "audio", "tools", "thinking"]},
+    "llama3.1:8b": {"capabilities": ["completion", "tools"]},
+    "nomic-embed-text:latest": {"capabilities": ["embedding"]},
+    "llamacpp:" + "8" * 64: {"capabilities": ["embedding"]},   # an alias with no "embed" in its name
+}
+
+
+def test_the_record_reports_a_decision_model(ollama):
+    ollama.models = DECISION_BOX
+    rec = mc.capabilities_for("nimble:9b-q4_K_M")
+    assert rec.decision is True and rec.completion is False
+    assert rec.evidence["decision"] == "api_show"
+    assert mc.capabilities_for("gemma4:e2b").decision is False
+
+
+def test_a_decision_model_is_not_a_chat_model(ollama):
+    ollama.models = DECISION_BOX
+    assert orm.is_text_chat_model("nimble:9b-q4_K_M") is False
+    assert orm.is_text_chat_model("tev1:4b") is False
+    assert orm.is_text_chat_model("gemma4:e2b") is True
+    assert orm.is_text_chat_model("llama3.1:8b") is True
+
+
+def test_decision_models_are_known_by_name_with_ollama_down(ollama):
+    ollama.down = True
+    assert orm.is_text_chat_model("nimble:9b-q4_K_M") is False
+    assert orm.is_text_chat_model("tev1:0.8b") is False
+    assert orm.is_text_chat_model("llama3.1:8b") is True
+    assert mc.decides_by_name("someone/nimble:9b") is True
+    assert mc.decides_by_name("nimbleness:7b") is False
+
+
+def test_a_local_row_can_declare_a_decision_model(ollama):
+    ollama.models = {"my-classifier:1b": {"capabilities": ["completion"]}}
+    mc.LOCAL_ROWS_PATH.write_text(json.dumps({"my-classifier:1b": {"decision": True}}))
+    assert mc.capabilities_for("my-classifier:1b").decision is True
+    assert orm.is_text_chat_model("my-classifier:1b") is False
+
+
+def test_the_chat_model_list_leaves_out_decision_and_embedding_models(ollama, monkeypatch):
+    from backend.api import model_api
+    monkeypatch.setattr(model_api, "requests", SimpleNamespace(get=ollama.get, exceptions=requests.exceptions))
+    monkeypatch.setattr(model_api, "_model_list_cache", {"models": None, "timestamp": 0})
+    ollama.models = DECISION_BOX
+
+    chat = model_api.get_available_ollama_models(use_cache=False)
+
+    assert [m["name"] for m in chat] == ["gemma4:e2b", "llama3.1:8b"]
+    assert [m["name"] for m in model_api.get_available_decision_models()] == ["nimble:9b-q4_K_M", "tev1:4b"]
+
+
+def test_the_chat_model_list_uses_the_name_rules_when_ollama_cannot_describe(ollama, monkeypatch):
+    from backend.api import model_api
+    monkeypatch.setattr(model_api, "requests", SimpleNamespace(get=ollama.get, exceptions=requests.exceptions))
+    monkeypatch.setattr(model_api, "_model_list_cache", {"models": None, "timestamp": 0})
+    ollama.models = {name: {} for name in ("tev1:0.8b", "nomic-embed-text:latest", "llama3.1:8b")}
+    monkeypatch.setattr(orm, "get_model_info", lambda tag: None)
+
+    chat = model_api.get_available_ollama_models(use_cache=False)
+
+    assert [m["name"] for m in chat] == ["llama3.1:8b"]
+    assert [m["name"] for m in model_api.get_available_decision_models()] == ["tev1:0.8b"]

@@ -72,7 +72,32 @@ export const fetchPublishes = async (params = {}) => {
   return data.publishes || [];
 };
 
-export const approvePublish = (id) => send(`/publishes/${id}/approve`, "POST");
+/**
+ * Approve a waiting publish. `revision` is the one the person was shown; the
+ * backend refuses (409, code "edited_since") when the publish was edited since.
+ */
+export const approvePublish = (id, revision) =>
+  send(`/publishes/${id}/approve`, "POST", revision === undefined ? {} : { revision });
+
+/**
+ * Change a publish that waits for approval; it keeps waiting. `payload` holds
+ * the changed fields plus `revision`, the one the edit started from.
+ * @returns {Promise<{publish: object, changed: string[]}>}
+ */
+export const editPublish = (id, payload) => send(`/publishes/${id}`, "PATCH", payload);
+
+/** Validate an edit to a waiting publish without saving it. */
+export const preflightPublishEdit = (id, payload) =>
+  send(`/publishes/${id}/preflight`, "POST", payload);
+
+/** Delete on platform: remove a posted, or platform-scheduled, post. */
+export const deletePublishRemote = (id) => send(`/publishes/${id}/delete-remote`, "POST");
+
+/** Per connection: posts so far, last post, scheduled count, rate-limit usage. */
+export const fetchConnectionUsage = async (family = "social") => {
+  const data = await request(`/usage?family=${encodeURIComponent(family)}`);
+  return data.usage || {};
+};
 
 export const rejectPublish = (id, reason) =>
   send(`/publishes/${id}/reject`, "POST", { reason });

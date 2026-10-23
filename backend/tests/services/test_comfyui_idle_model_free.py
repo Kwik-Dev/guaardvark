@@ -159,7 +159,7 @@ def _stub_generator(monkeypatch, *, wait_result="images", fetch_ok=True):
         lambda **kwargs: {"sampler": {"class_type": "KSampler", "inputs": {"steps": 9}}},
     )
     monkeypatch.setattr(gen, "_queue", lambda workflow: "pid-1")
-    monkeypatch.setattr(gen, "_wait", lambda prompt_id: wait_result)
+    monkeypatch.setattr(gen, "_wait", lambda prompt_id, **kwargs: wait_result)
     monkeypatch.setattr(
         gen, "_fetch_first_image", lambda outputs, path: path if fetch_ok else None
     )

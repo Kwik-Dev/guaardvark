@@ -37,6 +37,12 @@ const MODES = [
 
 const SEVERITY_TONE = { critical: "error", high: "error", medium: "warning", low: "info", info: "default" };
 
+// The source watch judges each file whole, so its count is the file's length, not lines added.
+export const scanSize = (scan) =>
+  scan.source?.startsWith("watch")
+    ? `${scan.files} file(s) read whole${scan.added_lines ? `, ${scan.added_lines} line(s)` : ""}`
+    : `${scan.files} file(s), +${scan.added_lines} line(s)`;
+
 export const FindingList = ({ findings, max = 50 }) => (
   <Stack spacing={0.75}>
     {(findings || []).slice(0, max).map((f, i) => (
@@ -155,8 +161,8 @@ function ReviewDialog({ open, onClose, onChanged }) {
             <Stack spacing={1.5}>
               <Typography variant="subtitle2" sx={{ wordBreak: "break-all" }}>{item.subject}</Typography>
               <Hint>
-                {item.verdict === "block" ? "Blocked" : "Held"} · {item.source} · {item.files} file(s), +{item.added_lines} line(s) · digest {item.digest}
-                {item.pending_fix_id ? ` · waiting as pending fix #${item.pending_fix_id} (Review fixes)` : ""}
+                {item.verdict === "block" ? "Blocked" : "Held"} · {item.source} · {scanSize(item)} · digest {item.digest}
+                {item.pending_fix_id ? ` · waiting as pending fix #${item.pending_fix_id} (Self-improvement › Pending fixes)` : ""}
                 {selected.kind === "git" ? " · approving lets this exact change through the git hooks" : ""}
               </Hint>
               <FindingList findings={item.findings} />

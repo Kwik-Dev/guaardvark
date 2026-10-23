@@ -14,6 +14,8 @@ import {
   CircularProgress,
   Divider,
   Tooltip,
+  Alert,
+  Button,
 } from "@mui/material";
 import SearchIcon from "@mui/icons-material/Search";
 import AddIcon from "@mui/icons-material/Add";
@@ -25,6 +27,7 @@ import { listChatSessions, deleteChatSession } from "../../api/chatService";
 import EntityContextMenu from "../common/EntityContextMenu";
 import ConfirmActionDialog from "../settings/ui/ConfirmActionDialog";
 import useContextMenu from "../../hooks/useContextMenu";
+import { formatUiError } from "../../utils/uiError";
 
 const DRAWER_WIDTH = 340;
 
@@ -38,16 +41,20 @@ const ChatSessionDrawer = ({
 }) => {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(false);
+  // Why the list could not be loaded; shown instead of "No chats yet".
+  const [loadError, setLoadError] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const rowMenu = useContextMenu();
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const data = await listChatSessions(projectId, 100);
       setSessions(data.sessions || []);
     } catch (err) {
       console.error("Failed to load sessions:", err);
+      setLoadError(formatUiError(err) || "The chat list could not be loaded.");
     } finally {
       setLoading(false);
     }
@@ -62,9 +69,11 @@ const ChatSessionDrawer = ({
   // The chat waiting for the person to confirm its deletion.
   const [pendingDelete, setPendingDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
 
   const askDelete = (session, e) => {
     e?.stopPropagation();
+    setDeleteError(null);
     setPendingDelete(session);
   };
 
@@ -72,6 +81,7 @@ const ChatSessionDrawer = ({
     const sessionId = pendingDelete?.session_id;
     if (!sessionId) return;
     setDeleting(true);
+    setDeleteError(null);
     try {
       await deleteChatSession(sessionId);
       setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
@@ -81,21 +91,15 @@ const ChatSessionDrawer = ({
       setPendingDelete(null);
     } catch (err) {
       console.error("Failed to delete session:", err);
+      setDeleteError(`The chat was not deleted: ${formatUiError(err) || "the request failed"}.`);
     } finally {
       setDeleting(false);
     }
   };
 
-  const isAgentSession = (session) => {
-    const preview = (session.preview || "").toLowerCase();
-    const sid = (session.session_id || "").toLowerCase();
-    return (
-      preview.includes("agent") ||
-      preview.includes("self-test") ||
-      preview.includes("monitor") ||
-      sid.includes("agent")
-    );
-  };
+  // The session's stored mode, as the list route serves it (the value the
+  // /agent and /chat commands set). A list without it is a chat session.
+  const isAgentSession = (session) => (session.mode || "chat") === "agent";
 
   const formatDateTime = (isoString) => {
     if (!isoString) return "";
@@ -239,7 +243,7 @@ const ChatSessionDrawer = ({
                 noWrap
                 sx={{
                   display: "block",
-                  color: "text.disabled",
+                  color: "text.secondary",
                   pl: 3,
                   mt: 0.25,
                   fontStyle: "italic",
@@ -254,8 +258,8 @@ const ChatSessionDrawer = ({
               {/* Date/time */}
               <Tooltip title={formatDateTime(session.last_activity || session.created_at)}>
                 <Box sx={{ display: "flex", alignItems: "center", gap: 0.25 }}>
-                  <AccessTimeIcon sx={{ fontSize: 11, color: "text.disabled" }} />
-                  <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.7rem" }}>
+                  <AccessTimeIcon sx={{ fontSize: 11, color: "text.secondary" }} />
+                  <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.7rem" }}>
                     {formatRelative(session.last_activity || session.created_at)}
                   </Typography>
                 </Box>
@@ -331,7 +335,7 @@ const ChatSessionDrawer = ({
           sx={{
             px: 2.5, pt: 1.5, pb: 0.5,
             display: "block",
-            color: "text.disabled",
+            color: "text.secondary",
             letterSpacing: 1,
             fontSize: "0.65rem",
           }}
@@ -410,6 +414,15 @@ const ChatSessionDrawer = ({
           <Box sx={{ display: "flex", justifyContent: "center", py: 4 }}>
             <CircularProgress size={28} />
           </Box>
+        ) : loadError ? (
+          <Box sx={{ px: 2, py: 2 }}>
+            <Alert
+              severity="error"
+              action={<Button color="inherit" size="small" onClick={loadSessions}>Retry</Button>}
+            >
+              {loadError}
+            </Alert>
+          </Box>
         ) : filteredSessions.length === 0 ? (
           <Box sx={{ display: "flex", flexDirection: "column", alignItems: "center", py: 4, px: 2 }}>
             <ChatBubbleOutlineIcon sx={{ fontSize: 40, color: "text.disabled", mb: 1 }} />
@@ -464,17 +477,18 @@ const ChatSessionDrawer = ({
         }
         confirmLabel="Delete chat"
         busy={deleting}
+        extra={deleteError ? <Alert severity="error" sx={{ mt: 1 }}>{deleteError}</Alert> : null}
         onConfirm={confirmDelete}
-        onClose={() => setPendingDelete(null)}
+        onClose={() => { setPendingDelete(null); setDeleteError(null); }}
       />
 
       {/* Footer stats */}
       <Divider />
       <Box sx={{ px: 2, py: 1, display: "flex", justifyContent: "space-between" }}>
-        <Typography variant="caption" color="text.disabled">
+        <Typography variant="caption" color="text.secondary">
           {sessions.length} chat{sessions.length !== 1 ? "s" : ""}
         </Typography>
-        <Typography variant="caption" color="text.disabled">
+        <Typography variant="caption" color="text.secondary">
           {sessions.reduce((sum, s) => sum + (s.message_count || 0), 0)} messages
         </Typography>
       </Box>

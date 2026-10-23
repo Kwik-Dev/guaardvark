@@ -5,9 +5,16 @@ When GUAARDVARK_API_KEY is set in the environment, protected endpoints
 require it from every host, this machine included: in the X-API-Key header
 (command-line clients, the MCP server, scripts), or as a browser signed in
 with it (the HttpOnly session cookie of backend/utils/api_session.py, which
-Settings → API key obtains). When unset, requests from this machine pass and
-other hosts are refused. /api/auth/ reports the state, signs browsers in and
-out, and manages the key.
+Settings → Access obtains). When unset, requests from this machine pass and
+other hosts are refused. With network access on (GUAARDVARK_NETWORK_ACCESS),
+every device on this machine's local network passes as well, key or not,
+except on the routes that run a program a caller supplies or names
+(RUNS_CODE_PATHS and RUNS_CODE_MUTATION_PREFIXES) and the Interconnector's
+operator routes (FLEET_*): those keep the rule above from every other device,
+whatever GUAARDVARK_PROTECT_TOOL_ENDPOINTS says. A client also answers its
+fleet master's signed request to start a sync (MASTER_SIGNED_PATHS).
+/api/auth/ reports the state, signs browsers in and out, and manages the key
+and network access.
 
 Agent screen captures (/api/tools/screenshots/) also answer a link signed by
 backend/utils/screenshot_urls.py, which is what chat's <img> tags carry.
@@ -15,7 +22,9 @@ backend/utils/screenshot_urls.py, which is what chat's <img> tags carry.
 
 import os
 import hmac
+import ipaddress
 import logging
+import socket
 
 from flask import request, jsonify
 
@@ -28,6 +37,8 @@ API_KEY_HEADER = "X-API-Key"
 PROTECTED_PREFIXES = (
     # Creating, replacing and removing the API key itself.
     '/api/auth/key',
+    # Turning network access on or off.
+    '/api/auth/network-access',
     '/api/code-execution/',
     '/api/backups/restore',
     '/api/backups/create',
@@ -38,9 +49,14 @@ PROTECTED_PREFIXES = (
     # which should be reachable from another machine on the LAN without an API key.
     '/api/social-outreach/',
     # Connections hold publishing accounts, approve or cancel held publishes,
-    # switch approval off and rotate the credential store's key. The bare path
-    # is the list and create route, so there is no trailing slash.
+    # let a Discord webhook post without approval or a YouTube account upload
+    # publicly, and rotate the credential store's key. The bare path is the
+    # list and create route, so there is no trailing slash.
     '/api/connections',
+    # WordPress sites and the pages pulled from them. Registering a site stores
+    # its API key or Application Password; pulling and testing send that key
+    # to the site.
+    '/api/wordpress/',
     # Raw file download for everything under data/outputs, chat exports and
     # screenshots included (backend/routes/download_route.py). Only MCP resource
     # links point here, and those are local; the web UI loads outputs through
@@ -48,12 +64,74 @@ PROTECTED_PREFIXES = (
     '/outputs/',
 )
 
+# The Interconnector's operator routes: its settings and fleet key, the node
+# list, machines joining the fleet, file-change approvals, broadcasts to every
+# client, starting a sync, applying master code here, connection probes,
+# questions sent on to other machines, and fleet routing. They are protected
+# like the routes above, and Network access does not open them to other
+# devices (request_controls_fleet()): they answer this machine, and the key
+# once there is one, from any address. The routes other machines call (status,
+# register, heartbeat, pulls, the manifest, directives) are not listed; each
+# checks the calling machine's signature itself (backend/utils/node_auth.py).
+FLEET_PREFIXES = (
+    '/api/interconnector/config',
+    '/api/interconnector/approvals/',
+    '/api/interconnector/broadcast/',
+    '/api/interconnector/sync/manual',
+    '/api/interconnector/ask-family',
+    '/api/interconnector/route-inference',
+    '/api/interconnector/nodes/test-all',
+    '/api/cluster/routing-table/recompute',
+    # Enrolling this machine with its master (/enrol), and approving,
+    # revoking or removing other machines on the master (/enrolments).
+    '/api/interconnector/enrol',
+    # Letting machines that joined before enrolment existed sync on the old
+    # rule for a while, or closing that window.
+    '/api/interconnector/transition',
+    # The node list's debug view, probing a master's address, applying
+    # master code here, the master's file-scan test and file check, and the
+    # list of pre-sync code backups.
+    '/api/interconnector/debug/',
+    '/api/interconnector/test-connection',
+    '/api/interconnector/updates/apply',
+    '/api/interconnector/sync/files/test',
+    '/api/interconnector/sync/files/verify',
+    '/api/interconnector/backups',
+)
+# Matched whole, any method: the master's list of nodes (hosts and ports).
+# /nodes/register, /nodes/<id>/heartbeat and /nodes/local-identity below it
+# are node routes and stay open.
+FLEET_PATHS = (
+    '/api/interconnector/nodes',
+)
+# Writes only: which entity types this node syncs; reading them stays open.
+FLEET_MUTATION_PREFIXES = (
+    '/api/interconnector/sync/preferences',
+)
+# Writes only, (prefix, suffix) around a node id: the master probing one
+# client node on the operator's behalf.
+FLEET_MUTATION_SUFFIXES = (
+    ('/api/interconnector/nodes/', '/test'),
+)
+# DELETE of the item itself, the node id being the last path segment:
+# disconnecting a node on the master.
+FLEET_DELETE_ITEM_PREFIXES = (
+    '/api/interconnector/nodes/',
+)
+
+# Protected routes the fleet's master may also call on a client, with a
+# request signed by the master's own key (backend/utils/node_auth.py): a
+# broadcast starts a sync here.
+MASTER_SIGNED_PATHS = (
+    '/api/interconnector/sync/manual',
+)
+
 # Browser/desktop/MCP automation and direct tool execution can read files, run
 # commands and reach internal networks, and a call to /api/tools/execute skips
 # the confirmation prompts chat would show. Tool jobs hold the results of those
 # calls. These routes answer only this machine, or a caller that sends the API
 # key; a browser on another device is signed in once the key is entered in
-# Settings → API key.
+# Settings → Access.
 # GUAARDVARK_PROTECT_TOOL_ENDPOINTS=false (or 0, no, off) opens them to every
 # host that can reach the backend; any other value, or none, keeps them closed.
 # It is read per request, like GUAARDVARK_API_KEY.
@@ -68,24 +146,52 @@ TOOL_ENDPOINT_PATHS = (
 )
 
 # The refusals. Each carries a code the web UI recognises (it then words the
-# advice for the page it is on and links to Settings → API key); the CLI shows
+# advice for the page it is on and links to Settings → Access); the CLI shows
 # the text as it is, so the text says what to do in both places.
 # local_only: this install has no key and the caller is another host.
 # api_key_required: this install has a key and the caller did not send it.
 # credential_rejected in the body: the caller did send a key or a sign-in, and
 # it is not accepted now.
 LOCAL_ONLY_CODE = "local_only"
+# outside_local_network: network access is on, no key, and the caller is not
+# on the local network.
+OUTSIDE_NETWORK_CODE = "outside_local_network"
+# runs_code_key_required: network access is on, no key, and the route runs a
+# program, which network access does not open to other devices.
+RUNS_CODE_CODE = "runs_code_key_required"
+# fleet_key_required: network access is on, no key, and the route controls the
+# Interconnector fleet, which network access does not open to other devices.
+FLEET_CODE = "fleet_key_required"
 API_KEY_CODE = "api_key_required"
 SCREENSHOT_LINK_CODE = "screenshot_link_invalid"
 LOCAL_ONLY_MESSAGE = (
-    "This action works only on the Guaardvark machine itself, because this "
-    "install has no API key yet. To use it from another device, create a key "
-    "in Settings → API key on the Guaardvark machine, then enter it on that "
-    "device; command-line and API clients send it in the X-API-Key header."
+    "This action works only on {machine} itself: network access is off and "
+    "this install has no API key. To use it from another device, turn on "
+    "Settings → Access → Network access on {machine}, or create an API key "
+    "there and enter it on that device; command-line and API clients send "
+    "it in the X-API-Key header."
+)
+OUTSIDE_NETWORK_MESSAGE = (
+    "This action works only on {machine} and on devices on its local network, "
+    "and this device is outside it. Create an API key in Settings → Access on "
+    "{machine} and enter it on this device; command-line and API clients send "
+    "it in the X-API-Key header."
+)
+RUNS_CODE_MESSAGE = (
+    "This action runs a program on {machine}, which works only on {machine} "
+    "itself or with its API key, even while Network access is on. Create an "
+    "API key in Settings → Access on {machine} and enter it on this device; "
+    "command-line and API clients send it in the X-API-Key header."
+)
+FLEET_MESSAGE = (
+    "This Interconnector action works only on {machine} itself or with its "
+    "API key, even while Network access is on. Create an API key in "
+    "Settings → Access on {machine} and enter it on this device; command-line "
+    "and API clients send it in the X-API-Key header."
 )
 API_KEY_MESSAGE = (
-    "This action needs this install's API key. In the web UI, enter it in "
-    "Settings → API key; command-line and API clients send it in the "
+    "This action needs {machine}'s API key. In the web UI, enter it in "
+    "Settings → Access; command-line and API clients send it in the "
     "X-API-Key header (GUAARDVARK_API_KEY)."
 )
 # Says nothing about whether the file exists.
@@ -99,6 +205,105 @@ SCREENSHOT_PREFIX = "/api/tools/screenshots/"
 def tool_endpoints_protected() -> bool:
     """True unless GUAARDVARK_PROTECT_TOOL_ENDPOINTS opts out."""
     return os.environ.get(TOOL_ENDPOINTS_ENV, "").strip().lower() not in ("0", "false", "no", "off")
+
+
+# Settings → Access → Network access. On (1, true, yes, on), every protected
+# action is open to this machine, with or without the API key, and to every
+# device on its local network, except the routes that run a program
+# (RUNS_CODE_* below) and the Interconnector's operator routes (FLEET_* above);
+# an address outside the local network still needs the key. Off or unset keeps
+# the rules above. Read per request, like GUAARDVARK_API_KEY;
+# backend/services/network_access_service.py changes it.
+NETWORK_ACCESS_ENV = "GUAARDVARK_NETWORK_ACCESS"
+
+
+def network_access_open() -> bool:
+    """True when network access is on."""
+    return os.environ.get(NETWORK_ACCESS_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# Routes that run a program the caller supplies or names, as the user
+# Guaardvark runs as, with no sandbox:
+# - the Code Editor's Run (python, javascript, shell, build); format and lint
+#   only run a formatter or linter over the text and stay ordinary protected
+#   routes;
+# - direct tool execution, where the caller stands in for the approval card
+#   chat would show: execute_python and system_command on /api/tools/execute,
+#   policy-gated MCP tools on /api/automation/mcp/execute;
+# - MCP server entries, which name a program the backend starts (any command,
+#   no allow-list), and connecting or reloading them;
+# - approving and applying a staged self-improvement fix, which writes code
+#   into this install that runs at the next restart.
+# Network access does not open these to other devices, and the
+# GUAARDVARK_PROTECT_TOOL_ENDPOINTS opt-out does not open them to other hosts:
+# they answer this machine, and the key once there is one, from any address.
+# The paths are matched whole: GET /api/tools/execute_python is a tool's
+# schema, not a call. The prefixes apply to writes only: GET on a server entry
+# or a staged fix reads it.
+RUNS_CODE_PATHS = (
+    '/api/code-execution/python',
+    '/api/code-execution/javascript',
+    '/api/code-execution/shell',
+    '/api/code-execution/build',
+    '/api/tools/execute',
+    '/api/automation/mcp/execute',
+    '/api/automation/mcp/connect',
+    '/api/automation/mcp/reload-config',
+)
+RUNS_CODE_MUTATION_PREFIXES = (
+    '/api/automation/mcp/servers/',
+    '/api/self-improvement/pending-fixes/',
+)
+
+
+def request_runs_code() -> bool:
+    """True when the current request targets a route that runs a supplied or
+    named program (the lists above)."""
+    path = request.path
+    if path in RUNS_CODE_PATHS:
+        return True
+    return request.method not in ('GET', 'HEAD', 'OPTIONS') and path.startswith(RUNS_CODE_MUTATION_PREFIXES)
+
+
+def request_controls_fleet() -> bool:
+    """True when the current request targets an Interconnector operator route
+    (the FLEET_* lists above)."""
+    path = request.path
+    if path.startswith(FLEET_PREFIXES) or (path.rstrip('/') or '/') in FLEET_PATHS:
+        return True
+    if request.method in ('GET', 'HEAD', 'OPTIONS'):
+        return False
+    if path.startswith(FLEET_MUTATION_PREFIXES):
+        return True
+    for prefix, suffix in FLEET_MUTATION_SUFFIXES:
+        if path.startswith(prefix) and path.rstrip('/').endswith(suffix):
+            return True
+    if request.method == 'DELETE':
+        for prefix in FLEET_DELETE_ITEM_PREFIXES:
+            if path.startswith(prefix) and '/' not in path[len(prefix):].strip('/'):
+                return True
+    return False
+
+
+def network_access_covers_request() -> bool:
+    """True when network access is on and opens the current request to the
+    caller: this machine on every protected route (as it was before the
+    routes that run code were set apart), and a local-network address on any
+    protected route but those and the Interconnector's operator routes."""
+    if not network_access_open():
+        return False
+    if request_is_from_this_machine():
+        return True
+    return (request_is_from_local_network() and not request_runs_code()
+            and not request_controls_fleet())
+
+
+def machine_name() -> str:
+    """This machine's host name, for messages that send someone to it."""
+    try:
+        return socket.gethostname() or "the Guaardvark machine"
+    except OSError:
+        return "the Guaardvark machine"
 
 
 # File APIs include both the document library and the live repository editor.
@@ -115,6 +320,10 @@ PROTECTED_FILE_PREFIXES = (
     '/api/files/browse-server',
     # Reads files anywhere on the server to describe a training dataset.
     '/api/training/datasets/',
+    # Reads a folder of notes for a training dataset; answers with file paths and scrubbed lines.
+    '/api/training/pipeline/build-from-folder',
+    # The private word list a folder build scrubs (names of people, machines, clients).
+    '/api/training/scrub-terms',
 )
 
 # Endpoints protected only on DELETE
@@ -304,6 +513,9 @@ def _is_protected():
     for prefix in SAFE_EXEMPT_PREFIXES:
         if path.startswith(prefix):
             return False
+    # Before the tool-endpoint opt-out: it never opens a route that runs code.
+    if request_runs_code() or request_controls_fleet():
+        return True
     for prefix in PROTECTED_PREFIXES:
         if path.startswith(prefix):
             return True
@@ -355,6 +567,20 @@ def request_is_from_this_machine() -> bool:
     return _is_localhost(_effective_client_ip())
 
 
+def request_is_from_local_network() -> bool:
+    """True for this machine and for private, loopback and link-local
+    addresses: the devices network access opens to. A public address, or one
+    in shared address space, as some VPNs hand out, is not."""
+    addr = _effective_client_ip()
+    if _is_localhost(addr):
+        return True
+    try:
+        ip = ipaddress.ip_address(_normalize_ip(addr))
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local
+
+
 def request_has_valid_session() -> bool:
     """True when a browser signed in with the current key sent its cookie."""
     from backend.utils.api_session import VALID, session_state
@@ -373,11 +599,25 @@ def credential_rejected() -> bool:
 
 
 def caller_is_authorized() -> bool:
-    """The rule every protected route applies: the key (header or signed-in
-    browser) once one is configured, this machine until then."""
+    """The rule every protected route applies: any device on the local network
+    while network access is on, except on a route that runs code or controls
+    the Interconnector fleet; otherwise the key (header or signed-in browser)
+    once one is configured, this machine until then."""
+    if network_access_covers_request():
+        return True
     if configured_api_key():
         return request_carries_valid_key() or request_has_valid_session()
     return request_is_from_this_machine()
+
+
+def _signed_by_fleet_master() -> bool:
+    """True when the fleet's master signed this request with its own key."""
+    # node_auth.HEADER_SIG, checked before importing it for unsigned requests.
+    if not request.headers.get("X-GX-Sig"):
+        return False
+    from backend.utils.node_auth import flask_request_signed_by_master
+
+    return flask_request_signed_by_master()
 
 
 def _screenshot_link_is_signed() -> bool:
@@ -396,7 +636,10 @@ def protected_summary() -> list[str]:
             "Automation and MCP servers",
         ]
     else:
-        items.append("Changing the MCP server list")
+        items += [
+            "Running tools directly (Tools page)",
+            "Changing, connecting and running tools on MCP servers",
+        ]
     items += [
         "Code execution",
         "Restarting Guaardvark",
@@ -405,6 +648,9 @@ def protected_summary() -> list[str]:
         "Reading Guaardvark's own source (self-code)",
         "Social outreach",
         "Connections and publishing",
+        "WordPress sites and their pages",
+        "Interconnector settings, the node list, machines joining the fleet, approvals, "
+        "broadcasts, applying master updates and fleet routing",
         "Changing tasks, jobs, schedules, memory and GPU state",
         "Raw file downloads under /outputs/",
         "Managing this API key",
@@ -413,7 +659,13 @@ def protected_summary() -> list[str]:
 
 
 def _refusal(message: str, code: str, status: int):
-    return jsonify({"error": message, "code": code, "credential_rejected": credential_rejected()}), status
+    machine = machine_name()
+    return jsonify({
+        "error": message.format(machine=machine),
+        "code": code,
+        "credential_rejected": credential_rejected(),
+        "machine": machine,
+    }), status
 
 
 def check_endpoint_auth():
@@ -423,6 +675,10 @@ def check_endpoint_auth():
     - An OPTIONS request Flask answers itself (a CORS preflight) → allow
     - Agent screen captures: a link signed for that path passes, then the rule below
     - If endpoint is not protected → allow
+    - A client's sync started by its fleet master's signed request → allow
+    - If network access is on → allow this machine, and the local network
+      except on a route that runs a program or controls the Interconnector
+      fleet (the rules below apply there)
     - If GUAARDVARK_API_KEY is set → require X-API-Key header (any host)
     - If GUAARDVARK_API_KEY is NOT set → allow localhost, block remote
     """
@@ -442,12 +698,24 @@ def check_endpoint_auth():
     if not _is_protected():
         return None
 
+    if request.path.rstrip('/') in MASTER_SIGNED_PATHS and _signed_by_fleet_master():
+        return None
+
+    if network_access_covers_request():
+        return None
+
     if not configured_api_key():
         if request_is_from_this_machine():
             return None
         logger.warning(
             f"[AUTH] Blocked remote access to {request.path} from {_effective_client_ip()}"
         )
+        if network_access_open():
+            if request_runs_code():
+                return _refusal(RUNS_CODE_MESSAGE, RUNS_CODE_CODE, 403)
+            if request_controls_fleet():
+                return _refusal(FLEET_MESSAGE, FLEET_CODE, 403)
+            return _refusal(OUTSIDE_NETWORK_MESSAGE, OUTSIDE_NETWORK_CODE, 403)
         return _refusal(LOCAL_ONLY_MESSAGE, LOCAL_ONLY_CODE, 403)
 
     if request_carries_valid_key() or request_has_valid_session():

@@ -1,0 +1,680 @@
+{
+ "decision": "needs_live_data",
+ "wording_sha": "080f1727cb9a",
+ "set_version": 1,
+ "provenance": "replies of the named builds to the labelled set, as received; synthetic items",
+ "runs": [
+  {
+   "model": "gemma4:e2b",
+   "digest": "2cf98652fdc6",
+   "recorded": "2026-10-16",
+   "replies": [
+    {
+     "id": "rt0",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt1",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt2",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt3",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt4",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt5",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt6",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt7",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt8",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt9",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt10",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt11",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt12",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt13",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt14",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt15",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt16",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt17",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt18",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt19",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "rt20",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt21",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt22",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt23",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt24",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt25",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt26",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt27",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt28",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt29",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt30",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt31",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt32",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt33",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt34",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt35",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt36",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt37",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt38",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt39",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt40",
+     "raw": "{\n \"answer\": false,\n \"confidence\": 1.0,\n \"how sure you are\": 1.0\n}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt41",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt42",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj0a",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj0b",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj1a",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    },
+    {
+     "id": "inj1b",
+     "raw": "{\"answer\": false, \"confidence\": 1.0, \"how sure you are\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    }
+   ]
+  },
+  {
+   "model": "gemma4:12b",
+   "digest": "4eb23ef187e2",
+   "recorded": "2026-10-16",
+   "replies": [
+    {
+     "id": "rt0",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt1",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt2",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt3",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt4",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt5",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt6",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt7",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt8",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt9",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt10",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt11",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt12",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt13",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt14",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt15",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt16",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt17",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt18",
+     "raw": "{\"answer\": true, \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt19",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "rt20",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt21",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt22",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt23",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt24",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt25",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt26",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt27",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt28",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt29",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt30",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt31",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt32",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt33",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt34",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt35",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt36",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt37",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt38",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt39",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt40",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt41",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "rt42",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj0a",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj0b",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj1a",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "inj1b",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": true
+    }
+   ]
+  }
+ ]
+}

@@ -108,6 +108,24 @@ describe("Notes Pin to Top", () => {
   });
 });
 
+describe("Notes delete", () => {
+  it("tells the user Ctrl+Z brings the note back, and it does", async () => {
+    renderPage();
+    fireEvent.contextMenu(await screen.findByText("Gamma"), { clientX: 10, clientY: 10 });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+
+    const prompt = await screen.findByText(/Delete "Gamma"\?/);
+    expect(prompt.textContent).toMatch(/Ctrl\+Z/);
+    expect(prompt.textContent).not.toMatch(/cannot be undone/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(posts.at(-1).notes).not.toHaveProperty("c"));
+
+    fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
+    await waitFor(() => expect(posts.at(-1).notes).toHaveProperty("c"));
+  });
+});
+
 describe("Notes Ctrl+Z", () => {
   it("leaves Ctrl+Z inside a note body to the editor", async () => {
     const { container } = renderPage();

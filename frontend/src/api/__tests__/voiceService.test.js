@@ -100,3 +100,24 @@ describe("voiceService.transcribeUtterance", () => {
     expect(fetch.mock.calls.at(-1)[1].body.get("audio").name).toBe("utterance.mp4");
   });
 });
+
+describe("textToSpeech named export", () => {
+  it("passes the engine and options through, so a streamed request reaches the backend", async () => {
+    const calls = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        calls.push([url, JSON.parse(init.body)]);
+        return { ok: true, status: 200, headers: new Headers({ "content-type": "audio/wav" }) };
+      }),
+    );
+    const { textToSpeech } = await import("../voiceService");
+    const result = await textToSpeech("Hello.", "af_heart", null, { stream: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toMatch(/\/voice\/text-to-speech$/);
+    expect(calls[0][1]).toEqual({ text: "Hello.", voice: "af_heart", stream: true });
+    expect(result.stream).toBe(true);
+    expect(result.response.ok).toBe(true);
+    vi.unstubAllGlobals();
+  });
+});

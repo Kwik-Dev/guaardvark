@@ -1,42 +1,40 @@
 """The declared decision questions are complete, in range, and switched off by default.
 
-``wording_sha`` here is the fingerprint a MEASURED_ACCURACY row records: a row
-holds only while the key, instructions and choices it was measured with are
-unchanged.
+``wording_sha`` (backend/services/decision_prompt.py) is the fingerprint a
+MEASURED_ACCURACY row records: a row holds only while the key, instructions and
+choices it was measured with are unchanged.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 
 import pytest
 
 from backend.services.decision_data import (
+    BACKEND_POLICY,
+    DECISION_MODEL_LICENCE,
+    DECISION_MODEL_THRESHOLD,
     DECISIONS,
     GATE_FLOOR,
     LAYERS,
+    LICENCE_STATUSES,
     MEASURED_ACCURACY,
+    RUN_KINDS,
     SIDE_EFFECTS,
     SOURCES,
     TYPES,
 )
+from backend.services.decision_prompt import wording_sha
 from backend.tests.fixtures.decision_sets import load_set
 
 FIELDS = {
     "feature", "layer", "type", "key", "kind", "instructions", "choices", "state", "anchor", "precheck",
-    "fallback", "safe_side", "side_effect", "mode_default", "floor", "set", "hard_negatives", "notes",
+    "fallback", "safe_side", "unlocks", "side_effect", "mode_default", "floor", "set", "hard_negatives", "notes",
 }
 SNAKE_CASE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$")
 GENERIC_KEYS = {
     "q", "a", "answer", "result", "output", "response", "decision", "label", "value", "choice", "yes", "ok",
 }
-
-
-def wording_sha(entry: dict) -> str:
-    """First 12 hex digits of the sha256 of the wording a decision model sees."""
-    payload = {"key": entry["key"], "instructions": entry["instructions"], "choices": entry["choices"]}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
 
 
 DECISION_IDS = sorted(DECISIONS)
@@ -68,6 +66,18 @@ def test_kind_and_choices_agree(decision_id):
     else:
         assert entry["choices"] is None
         assert isinstance(entry["safe_side"], bool)
+
+
+@pytest.mark.parametrize("decision_id", DECISION_IDS)
+def test_unlocks_are_answers_and_never_the_safe_side(decision_id):
+    entry = DECISIONS[decision_id]
+    unlocks = entry["unlocks"]
+    assert isinstance(unlocks, tuple)
+    options = set(entry["choices"]) if entry["kind"] == "choice" else {True, False}
+    for answer in unlocks:
+        assert type(answer) is (str if entry["kind"] == "choice" else bool), (decision_id, answer)
+        assert answer in options, (decision_id, answer)
+    assert entry["safe_side"] not in unlocks
 
 
 @pytest.mark.parametrize("decision_id", DECISION_IDS)
@@ -128,3 +138,42 @@ def test_wording_sha_tracks_only_the_wording(decision_id):
     assert wording_sha({**entry, "notes": "changed", "floor": 0.5}) == sha
     assert wording_sha({**entry, "instructions": entry["instructions"] + " "}) != sha
     assert wording_sha({**entry, "key": entry["key"] + "_x"}) != sha
+
+
+def test_every_decision_model_has_a_licence_status():
+    """Licence status is declared beside each decision model, so whatever
+    recommends one can read it; a model with a threshold but no status would
+    be read as blocked."""
+    assert set(DECISION_MODEL_LICENCE.values()) <= set(LICENCE_STATUSES)
+    assert set(DECISION_MODEL_THRESHOLD) <= set(DECISION_MODEL_LICENCE)
+
+
+def test_tev1_is_measure_only():
+    """Its weights licence is not final: measured and used only when the
+    person installed it, never suggested, offered or made a default."""
+    assert DECISION_MODEL_LICENCE["tev1"] == "measure_only"
+
+
+def test_every_layer_has_a_backend_policy():
+    assert set(BACKEND_POLICY) == set(LAYERS)
+    for layer, policy in BACKEND_POLICY.items():
+        assert set(policy) == {"runs", "backends", "author_must_differ", "when_unanswered", "why"}, layer
+        assert policy["runs"] and set(policy["runs"]) <= set(RUN_KINDS), layer
+        assert set(policy["author_must_differ"]) <= set(policy["runs"]), layer
+        assert policy["backends"] and set(policy["backends"]) <= {"chat", "batch"}, layer
+        assert policy["when_unanswered"] in ("fallback", "safe_side"), layer
+        assert policy["why"].strip(), layer
+
+
+def test_l0_is_never_a_question():
+    assert "L0" not in LAYERS and "L0" not in BACKEND_POLICY
+    assert all(entry["layer"] != "L0" for entry in DECISIONS.values())
+
+
+def test_learning_and_batch_questions_run_in_batch_passes_only():
+    assert BACKEND_POLICY["L5"]["runs"] == ("batch",)
+    assert "batch" in BACKEND_POLICY["L5"]["author_must_differ"]
+
+
+def test_a_check_that_cannot_answer_reads_as_not_verified():
+    assert BACKEND_POLICY["L4"]["when_unanswered"] == "safe_side"

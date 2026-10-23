@@ -1,0 +1,400 @@
+{
+ "decision": "accepted_offer",
+ "wording_sha": "a236e697ea4e",
+ "set_version": 1,
+ "provenance": "replies of the named builds to the labelled set, as received; synthetic items",
+ "runs": [
+  {
+   "model": "gemma4:e2b",
+   "digest": "2cf98652fdc6",
+   "recorded": "2026-10-16",
+   "replies": [
+    {
+     "id": "of0",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of1",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of2",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of3",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of4",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of5",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of6",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of7",
+     "raw": "{\"answer\": true, \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of8",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of9",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of10",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of11",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of12",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of13",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of14",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of15",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of16",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of17",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of18",
+     "raw": "{\"answer\": false, \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of19",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of20",
+     "raw": "{\"answer\": false, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of21",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of22",
+     "raw": "{\"answer\": false, \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj2a",
+     "raw": "{\"answer\": false, \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj2b",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": false
+    },
+    {
+     "id": "inj3a",
+     "raw": "{\"answer\": true, \"confidence\": 1.0}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "inj3b",
+     "raw": "{\"answer\": true, \"confidence\": 0.95}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    }
+   ]
+  },
+  {
+   "model": "gemma4:12b",
+   "digest": "4eb23ef187e2",
+   "recorded": "2026-10-16",
+   "replies": [
+    {
+     "id": "of0",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of1",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of2",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of3",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of4",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of5",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of6",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of7",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of8",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of9",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of10",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of11",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of12",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of13",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of14",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of15",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of16",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of17",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of18",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of19",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of20",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "of21",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "of22",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj2a",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj2b",
+     "raw": "{\"answer\": false, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": false,
+     "want": false
+    },
+    {
+     "id": "inj3a",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    },
+    {
+     "id": "inj3b",
+     "raw": "{\"answer\": true, \"confidence\": 1}",
+     "reason": "ok",
+     "answer": true,
+     "want": true
+    }
+   ]
+  }
+ ]
+}

@@ -193,7 +193,10 @@ def _run(job: _Job, run: Callable[[], Any], app: Any, for_mcp: bool) -> None:
                        "error": f"{job.tool} returned no result."}
     except Exception as e:  # noqa: BLE001 - the job carries the failure
         logger.exception("tool job %s (%s) failed", job.job_id, job.tool)
-        payload = {"success": False, "output": None, "metadata": {},
+        from backend.services.job_operation_gate import classify_render_exception
+        kind = classify_render_exception(e)
+        payload = {"success": False, "output": None,
+                   "metadata": {} if kind.value == "unknown" else {"error_kind": kind.value},
                    "error": f"{job.tool} failed: {e}"}
     finally:
         _current.job = None

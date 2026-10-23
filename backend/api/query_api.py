@@ -1115,9 +1115,20 @@ def command_dispatcher(command_label: str, args_string: str, session_id: str):
 
 
 def get_query_engine(index: VectorStoreIndex, llm: LLM, template: PromptTemplate):
-    """Return a query engine or None on failure."""
+    """Return a query engine or None on failure.
+
+    Auto-merging is used only when parent nodes are indexed
+    (query_engine_wrapper.parents_indexed); the default leaf-only index gets
+    the plain engine below.
+    """
+    from backend.utils.query_engine_wrapper import (
+        AutoMergingRetriever,
+        _build_query_engine_from_retriever,
+        parents_indexed,
+    )
+
     try:
-        if hasattr(index, "as_retriever") and hasattr(index, "storage_context"):
+        if parents_indexed() and hasattr(index, "as_retriever") and hasattr(index, "storage_context"):
             base_ret = index.as_retriever(similarity_top_k=10)
             merging_ret = AutoMergingRetriever(base_ret, index.storage_context)
             return _build_query_engine_from_retriever(

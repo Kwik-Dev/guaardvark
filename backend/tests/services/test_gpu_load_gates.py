@@ -326,6 +326,12 @@ def test_wait_message_names_the_job_holding_the_gpu():
     assert gpu_holder_label(GpuBusyError("GPU is held by video_render:ImageBatch_x — wait")) == "Image Gen"
     assert gpu_holder_label(GpuBusyError("GPU is held by video_render:editor_42 — wait")) == "a video render"
     assert gpu_holder_label(GpuBusyError("GPU is held by lora_train:7 — wait")) == "LoRA training"
+    # video_render is the general GPU kind: the id says what is rendering, and an
+    # id with no known prefix is not called a video.
+    assert gpu_holder_label(GpuBusyError("GPU is held by video_render:stills_chat_ab12cd34 — wait")) == "a picture"
+    assert gpu_holder_label(GpuBusyError("GPU is held by video_render:video:music3:9 — wait")) == "a song"
+    assert gpu_holder_label(GpuBusyError("GPU is held by video_render:chat_edit_ab12cd34 — wait")) == "a picture edit"
+    assert gpu_holder_label(GpuBusyError("GPU is held by video_render:whatever — wait")) == "another job"
     assert gpu_holder_label(GpuBusyError("GPU is held by another process (busy).")) == "another process"
     assert gpu_holder_label(None) is None
     assert gpu_wait_message(None, 1024, 2048) == "Waiting for VRAM — 1.0GB free, need ~2.0GB"

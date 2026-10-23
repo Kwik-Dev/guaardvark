@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import requests
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,6 +14,12 @@ from backend.services.swarm.agents.cinematographer import Cinematographer, ShotP
 from backend.services.swarm.agents.casting_director import CastingDirector
 from backend.services.swarm.agents.editor import Editor
 from backend.services.swarm.script_markup import parse_markup, apply_intents
+
+
+def _render_kind(exc):
+    """The RenderErrorKind an exception carries or is classified as (job_types)."""
+    from backend.services.job_operation_gate import classify_render_exception
+    return classify_render_exception(exc)
 
 
 class _AgentNonOK(Exception):
@@ -56,6 +63,17 @@ def _agent_run(prod_id: int, *, agent_name: str, expected_stage: str, next_agent
     if not prod or prod.current_stage != expected_stage:
         yield None
         return
+    # A failed stage keeps its stage name, so a second copy of the task (a
+    # worker boots and resumes in-flight runs while one is already queued)
+    # would pass the check above and run under a "failed" status. Retry
+    # clears the failure first; nothing else re-runs it.
+    if (prod.status or "").startswith("failed"):
+        import logging
+        logging.getLogger(__name__).info(
+            "production %s: %s skipped, stage %s is marked %s (Retry re-runs it)",
+            prod_id, agent_name, expected_stage, prod.status)
+        yield None
+        return
 
     ctx = _AgentRunContext(production=prod, agent_name=agent_name, stage=expected_stage)
     try:
@@ -66,7 +84,7 @@ def _agent_run(prod_id: int, *, agent_name: str, expected_stage: str, next_agent
     except Exception as e:
         # Catch all other exceptions, fail stage, and absorb.
         # Absorbing is safer because Celery retry behavior is default, which WILL retry.
-        ProductionService(db.session).fail_stage(prod_id, stage=expected_stage, error=str(e))
+        ProductionService(db.session).fail_stage(prod_id, stage=expected_stage, error=str(e), kind=_render_kind(e))
         pass
     else:
         # Clean exit
@@ -176,13 +194,26 @@ def create_production_swarm_tasks(celery_app: Celery):
 
     @celery_app.task(name="production.regen_storyboard_shot")
     def regen_storyboard_shot_task(shot_id: int, prompt_override: str | None = None):
+        from backend.services.job_operation_gate import GpuBusyError
         with current_app.app_context():
-            regen_storyboard_shot(shot_id, prompt_override)
+            try:
+                regen_storyboard_shot(shot_id, prompt_override)
+            except GpuBusyError as e:
+                # Redraws of several shots arrive together, and every one after
+                # the first meets the gate's cooldown. Ask again shortly rather
+                # than drop it; once the storyboard is approved a redraw no-ops.
+                import logging
+                logging.getLogger(__name__).info(
+                    "Storyboard redraw of shot %s deferred (%s); retrying in %ss", shot_id, e, _REGEN_RETRY_S)
+                celery_app.send_task("production.regen_storyboard_shot",
+                                     args=[shot_id, prompt_override], countdown=_REGEN_RETRY_S)
 
     @celery_app.task(name="production.regen_shot_plan")
     def regen_shot_plan_task(shot_id: int, feedback: str):
         with current_app.app_context():
             run_regen_shot_plan(shot_id, feedback)
+        # The new image prompt only shows once the still is drawn from it.
+        celery_app.send_task("production.regen_storyboard_shot", args=[shot_id, None])
 
     return {
         "run_screenwriter": run_screenwriter_task,
@@ -194,6 +225,57 @@ def create_production_swarm_tasks(celery_app: Celery):
         "regen_storyboard_shot": regen_storyboard_shot_task,
         "regen_shot_plan": regen_shot_plan_task,
     }
+
+
+# A screenplay cue extension after a speaker's name: (V.O.), (O.S.), (CONT'D).
+_CUE = r"\((?:V\.?O\.?|O\.?S\.?|O\.?C\.?|CONT'D)\)"
+# A speaker's name written just before a line: `DETECTIVE (V.O.): "...`, or a
+# screenplay cue on its own line above the dialogue.
+_SPEAKER_BEFORE_LINE = re.compile(
+    r"([A-Za-z][\w'\-]*(?: [A-Za-z][\w'\-]*){0,3})\s*"
+    r"(?:" + _CUE + r")?\s*:?\s*[\"\u201c]?\s*$"
+)
+
+
+def _canonical_speaker(name: str | None, characters: list[str]) -> str | None:
+    """The breakdown's character a shot's speaker names, matched without its cue
+    extension or case (`DETECTIVE (V.O.)` -> `DETECTIVE`); the bare name when none
+    matches, so a Cast Library lookup by name still works."""
+    bare = re.sub(r"\s*" + _CUE + r"\s*$", "", name or "", flags=re.IGNORECASE).strip()
+    if not bare:
+        return None
+    return {c.upper(): c for c in characters}.get(bare.upper(), bare)
+
+
+def _speaker_in_script(script_text: str, dialogue: str | None, characters: list[str]) -> str | None:
+    """The character whose name the script writes before this line, for a shot
+    whose speaker the screenwriter model left empty. Only names of characters the
+    breakdown found are accepted, so a scene heading is never taken for one."""
+    probe = (dialogue or "").strip().strip('"\u201c\u201d')[:40]
+    at = script_text.find(probe) if probe else -1
+    if at < 0:
+        return None
+    m = _SPEAKER_BEFORE_LINE.search(script_text[max(0, at - 80):at])
+    if not m:
+        return None
+    by_upper = {c.upper(): c for c in characters}
+    words = m.group(1).split()
+    # The longest run of trailing words that names a character: "the Detective" -> Detective.
+    for k in range(len(words)):
+        found = by_upper.get(" ".join(words[k:]).upper())
+        if found:
+            return found
+    return None
+
+
+def _production_character(prod_id: int, name: str):
+    """The production's own character Subject called ``name``, or None."""
+    return (
+        Subject.query.join(ProductionSubject, ProductionSubject.subject_id == Subject.id)
+        .filter(ProductionSubject.production_id == prod_id,
+                Subject.kind == "character", Subject.name == name)
+        .first()
+    )
 
 
 def run_screenwriter(prod_id: int, llm=None):
@@ -253,6 +335,7 @@ def run_screenwriter(prod_id: int, llm=None):
                 cast_required=subj["cast_required"],
             ))
         
+        characters = [subj["name"] for subj in resolved_subjects if subj["kind"] == "character"]
         for scene in out.scenes:
             for shot in scene.shots:
                 new_shot = ProductionShot(
@@ -261,7 +344,8 @@ def run_screenwriter(prod_id: int, llm=None):
                     shot_number=shot.number,
                     description=shot.description,
                     scene_mood=scene.mood,
-                    character_name=shot.character_name,
+                    character_name=(_canonical_speaker(shot.character_name, characters)
+                                    or _speaker_in_script(input_data, shot.dialogue, characters)),
                     dialogue_text=shot.dialogue
                 )
                 db.session.add(new_shot)
@@ -545,6 +629,49 @@ def _shot_loras_and_prompt(shot) -> tuple[list[str], list, str]:
     return lora_paths, usable_subjects, base
 
 
+def _shot_identity_subjects(shot) -> list:
+    """The shot's subjects that carry an identity into its storyboard still.
+
+    A subject with a trained LoRA, or one this production requires as a cast
+    member, is locked. Props, places and characters cast as described have no
+    LoRA and are drawn from the shot's own words; passing them would trip the
+    still pipeline's refusal to render a cast member with nothing to load.
+    """
+    from backend.services.swarm.script_markup import effective_cast_required
+    subjects = [pss.subject for pss in shot.shot_subjects if pss.subject]
+    if not subjects:
+        return []
+    pins = {
+        link.subject_id: link.cast_required
+        for link in ProductionSubject.query.filter_by(production_id=shot.production_id)
+    }
+    locked = []
+    for s in subjects:
+        pinned = pins.get(s.id)
+        required = effective_cast_required(
+            pinned if pinned is not None else s.cast_required, s.kind
+        )
+        if s.lora_path or required:
+            locked.append(s)
+    return locked
+
+
+def _still_canvas(production) -> dict:
+    """width/height for a storyboard still in the production's frame shape;
+    empty, so the stills model keeps its default, when none is set."""
+    from backend.services.production_service import film_frame_shape
+    shape = film_frame_shape(getattr(production, "settings_json", None))
+    if not shape:
+        return {}
+    width, height = shape["still"]
+    return {"width": width, "height": height}
+
+
+# Seconds before a storyboard redraw refused by the GPU gate asks again; the
+# gate's cooldown between jobs is shorter.
+_REGEN_RETRY_S = 15
+
+
 def _storyboard_path(prod_id: int, scene_number: int, shot_number: int) -> str:
     from backend.config import STORAGE_DIR
     out_dir = Path(STORAGE_DIR) / "outputs" / "storyboards" / str(prod_id)
@@ -615,6 +742,7 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
                     shot.shot_number or (i + 1),
                 )
                 _update_progress(i, f"Generating storyboard shot {i + 1}/{total}")
+                subjects = _shot_identity_subjects(shot)
                 if lora_paths or image_generator is None:
                     still = render_character_still(
                         prompt,
@@ -623,6 +751,7 @@ def run_storyboard_artist(prod_id: int, image_generator=None):
                         source="filmcrew",
                         output_path=output_path,
                         keep_pipeline=True,
+                        **_still_canvas(ctx.production),
                     )
                     if not still.success:
                         raise RuntimeError(still.error or f"storyboard still failed for shot {shot.shot_number}")
@@ -690,7 +819,9 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
             elif not ready and not resolve_err:
                 resolve_err = prep_err
         if resolve_err:
-            ctx.fail(resolve_err)
+            # ComfyUI down: the sentence every tool gives for a stopped service.
+            from backend.services.video_model_registry import comfyui_down_failure
+            ctx.fail(comfyui_down_failure(resolve_err, "film-crew"))
             return
         caps = model_capabilities(resolved)
         vram_estimate_mb = vram_mb_for_model(resolved, default=14000)
@@ -708,9 +839,12 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
                 i2v = SvdI2VGenerator()
             else:
                 from backend.services.comfyui_video_generator import Wan22I2VGenerator
+                from backend.services.production_service import film_frame_shape
+                shape = film_frame_shape(settings)
                 i2v = Wan22I2VGenerator(
                     model=resolved,
                     fps=int(caps.get("native_fps") or 24),
+                    canvas=shape["clip"] if shape else None,
                 )
 
         # Real service clients with graceful degradation: ffmpeg always present
@@ -726,12 +860,15 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
             _af = AudioFoundryClient()
             audio_foundry = _af if _af.available() else None
 
-        shots = ProductionShot.query.filter_by(production_id=prod_id, approved=True).all()
+        # Script order: the clips are cut together in this order, and without
+        # it the database returns rows in whatever order they were last updated.
+        shots = (ProductionShot.query.filter_by(production_id=prod_id, approved=True)
+                 .order_by(ProductionShot.scene_number, ProductionShot.shot_number).all())
         if not shots:
             ctx.fail("No approved shots")
 
-        flask_port = os.environ.get("FLASK_PORT", "5002")
-        backend_url = f"http://localhost:{flask_port}/api"
+        from backend.utils.backend_http import backend_base_url
+        backend_url = f"{backend_base_url()}/api"
         ve_client = VideoEditorComposeClient(backend_url)
 
         editor = Editor(
@@ -755,7 +892,10 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
             char_cast = [c for c in cast if c.kind == "character"]
             speaker = None
             if s.character_name:
-                speaker = next((c for c in char_cast if c.name == s.character_name), None)
+                # The named speaker, in the shot or not: a voice-over narrator is
+                # cast in the production but rarely appears in the shot.
+                speaker = (next((c for c in char_cast if c.name == s.character_name), None)
+                           or _production_character(prod_id, s.character_name))
             if speaker is None:
                 speaker = char_cast[0] if char_cast else None
             if speaker is None and s.character_name:
@@ -783,8 +923,16 @@ def run_editor(prod_id: int, i2v=None, audio_foundry=None, ffmpeg=None):
                 character_description=(speaker.description if speaker else None),
             ))
             
-        import tempfile
-        output_dir = tempfile.mkdtemp(prefix=f"prod_{prod_id}_")
+        # The film, its clips and its timeline are registered as documents by
+        # path, so they live under the data folder, not a temp folder that a
+        # reboot empties. Each render gets its own folder; earlier cuts stay.
+        from datetime import datetime
+        from backend.config import STORAGE_DIR
+        output_dir = str(
+            Path(STORAGE_DIR) / "outputs" / "productions" / str(prod_id)
+            / datetime.now().strftime("render_%Y%m%d_%H%M%S")
+        )
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
 
         # Ride the unified job rail: a VIDEO_RENDER progress process so the
         # production render shows up in /api/jobs/active and the gate snapshot,
@@ -946,6 +1094,8 @@ def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, imag
                 prompt=prompt, loras=lora_paths, output_path=output_path,
             )
         else:
+            subjects = _shot_identity_subjects(shot)
+
             still = render_character_still(
                 prompt,
                 subjects=subjects,
@@ -953,6 +1103,7 @@ def regen_storyboard_shot(shot_id: int, prompt_override: str | None = None, imag
                 source="filmcrew",
                 output_path=output_path,
                 keep_pipeline=False,
+                **_still_canvas(db.session.get(Production, shot.production_id)),
             )
             if not still.success:
                 raise RuntimeError(still.error or "storyboard regen failed")

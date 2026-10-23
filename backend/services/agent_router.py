@@ -100,6 +100,28 @@ def _near(verbs: str, objects: str) -> str:
     return rf"\b(?:{verbs})\b{_GAP}\b(?:{objects})\b"
 
 
+# "make" asks for a file only as the request itself, opening the message or a
+# sentence: "make me a csv of 10 cities", "can you make a python file that ...".
+# "make sure the csv has headers" and "how do I make a csv in excel?" are not.
+_MAKE_A = (
+    r"(?:^|[.!?]\s+)(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?"
+    r"make\s+(?:me\s+|us\s+)?an?\s+(?:[\w-]+\s+){0,3}?"
+)
+
+
+# Words after which the rest of a request is its topic, not the kind of thing
+# asked for: "a poem about javascript", "a blog post about clean code", "a
+# tutorial on python decorators" ask for prose.
+_TOPIC_WORDS = r"about|on|regarding|concerning|explaining|describing"
+_GAP_BEFORE_TOPIC = rf"(?:(?!\b(?:{_TOPIC_WORDS})\b)(?![.!?](?:\s|$))[^\n]){{0,60}}?"
+
+
+def _near_object(verbs: str, objects: str) -> str:
+    """Like _near, with the object named before any topic word: "write a
+    python script about cats" matches python, "write a poem about python" does not."""
+    return rf"\b(?:{verbs})\b{_GAP_BEFORE_TOPIC}\b(?:{objects})\b"
+
+
 # A person saying the turn needs no tools or files: "do not generate anything",
 # "no tool calling", "without tools", "don't create a file".
 _DECLINES_TOOLS_RE = re.compile(
@@ -201,6 +223,7 @@ class AgentRouter:
                 patterns=[
                     _near("create", "csv"),
                     _near("generate", "csv"),
+                    _MAKE_A + r"csv\b",
                     r"/createcsv\b",
                 ],
                 route_type=RouteType.TOOL_DIRECT,
@@ -213,6 +236,7 @@ class AgentRouter:
                 patterns=[
                     _near("create", "files?"),
                     _near("generate", "files?"),
+                    _MAKE_A + r"file\b",
                     r"\bwrite\b" + _GAP + r"\bto\s+(\w+\.\w+)",
                     r"/createfile\b",
                 ],
@@ -224,9 +248,9 @@ class AgentRouter:
             IntentPattern(
                 name="code_generation",
                 patterns=[
-                    _near("generate", "code"),
-                    _near("write", "python|javascript|java|code"),
-                    _near("create", "function|class|module"),
+                    _near_object("generate", "code"),
+                    _near_object("write", "python|javascript|java|code"),
+                    _near_object("create", "function|class|module"),
                     r"/codegen\b",
                     _near("modify", "file|code"),
                     # "improve/refactor/optimize/rewrite this file" — must be

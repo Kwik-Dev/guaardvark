@@ -576,6 +576,7 @@ class TestCommandOnlyMode:
         assert "start_film_crew" not in GPU_HEAVY_TOOLS
 
 
+
 class TestCastLoraDirectIntercept:
     """A cast-LoRA request (e.g. \"[starship_captain] ... trained LoRA\") must be routed
     directly to generate_image with subject_ids, bypassing an LLM that refuses to call
@@ -616,3 +617,317 @@ class TestCastLoraDirectIntercept:
                 "tell me about Starship Captain", "sess", lambda *a, **k: None, "req", {},
             )
         assert result is None
+
+
+_DECLINED = [
+    "No, do not generate an image. Write the words.",
+    "write me a prompt for Z Image Turbo, don't make an image",
+    "no image please, just the text",
+    "Don't generate an image yet, first write the prompt",
+    "I want the words, not an image",
+    "write the prompt without generating an image",
+]
+_WRITING_FOR_AN_IMAGE_MODEL = (
+    "Please write 300 words or more describing (for Z Image Turbo) Jesus walking through "
+    "an Old West town but with some Quentin Tarantino camera angle styles and shots. "
+    "Wearing traditional Jesus robes. Angles should be dynamic, like worm's eye view "
+    "(low angle), and dramatic lighting and such. Try one version now and I will test it."
+)
+
+
+class TestDeclinedOrWrittenMediaIsNotRendered:
+    """"Do not generate an image" started a render: the direct path matched
+    "generate an image" and never looked at the "do not". A request to write a
+    prompt for an image model was rendered by the chat model, which the
+    semantic selector had offered generate_image."""
+
+    @pytest.mark.parametrize("message", _DECLINED)
+    def test_a_declined_image_is_not_generated(self, message):
+        from backend.services.unified_chat_engine import user_wants_image_generation, _wants_image_tools
+        assert user_wants_image_generation(message) is False
+        assert _wants_image_tools(message) is False
+
+    @pytest.mark.parametrize("message", _DECLINED)
+    def test_a_declined_image_is_not_pinned(self, message):
+        from backend.services.unified_chat_engine import _pin_image_generation_tools
+        selected = _pin_image_generation_tools(message, [], ["web_search", "generate_image"])
+        assert "generate_image" not in selected
+
+    def test_direct_path_stands_down_for_a_decline(self):
+
+        from backend.services.unified_chat_engine import UnifiedChatEngine
+
+        engine = UnifiedChatEngine.__new__(UnifiedChatEngine)
+        engine.registry = type("R", (), {"get_tool": lambda self, n: object()})()
+        result = engine._try_image_generate_direct(
+            "No, do not generate an image. Write the words.",
+            "sess", lambda *a, **k: None, "req", {},
+        )
+        assert result is None
+
+    @pytest.mark.parametrize("message", _DECLINED + [
+        _WRITING_FOR_AN_IMAGE_MODEL,
+        "describe a sunset over Tucson",
+        "can you write an image prompt for flux",
+    ])
+    def test_media_tools_are_withheld(self, message):
+        from backend.services.unified_chat_engine import _withholds_media_tools
+        assert _withholds_media_tools(message) is True
+
+    @pytest.mark.parametrize("message", [
+        "generate an image of a cat",
+        "draw me a chicken",
+        "generate a cat but don't make the picture too dark",
+        "draw a cat, don't use any tools",
+        "make an image of a gallery wall with no pictures",
+        "write a prompt for Z-Image and render it",
+        "write a prompt for a lighthouse at dusk and generate an image of it",
+        "/imagine a red fox, no people",
+        "/video a fox, don't make it dark",
+        "what is the weather",
+    ])
+    def test_media_tools_are_kept(self, message):
+        from backend.services.unified_chat_engine import _withholds_media_tools
+        assert _withholds_media_tools(message) is False
+
+    @pytest.mark.parametrize("message", [
+        "generate a cat but don't make the picture too dark",
+        "draw me a dragon, don't make the image look cartoonish",
+    ])
+    def test_an_instruction_about_the_picture_still_renders(self, message):
+        from backend.services.unified_chat_engine import user_wants_image_generation
+        assert user_wants_image_generation(message) is True
+
+    def test_slash_command_renders_whatever_follows(self):
+        from backend.services.unified_chat_engine import user_wants_image_generation
+        assert user_wants_image_generation("/imagine a sign that reads do not generate an image") is True
+
+    def test_declined_video_and_music_video(self):
+        from backend.services.unified_chat_engine import user_wants_video_generation
+        from backend.tools.video_pipeline_tools import wants_music_video
+        assert user_wants_video_generation("do not make a video of this, describe it") is False
+        assert user_wants_video_generation("make a video of a fox running") is True
+        assert wants_music_video("don't make a music video, just write the treatment") is False
+
+    def test_screen_agent_honours_a_decline(self):
+        from backend.services.agent_brain import is_pure_image_request
+        assert is_pure_image_request("draw a cat") is True
+        assert is_pure_image_request("don't draw a picture, describe a cat") is False
+
+
+class TestImageExampleFollowsTheOffer:
+    """The prompt's generate_image example made the model call a tool it was
+    not offered, for a request to write a prompt for an image model."""
+
+    def test_no_image_example_without_the_tool(self):
+        from backend.services.chat_prompt_blocks import build_chat_tools_prompt_tail
+        tail = build_chat_tools_prompt_tail("- web_search(query:string) - Search the web")
+        assert "<tool>generate_image</tool>" not in tail
+        assert "<tool>web_search</tool>" in tail
+
+    def test_image_example_with_the_tool(self):
+        from backend.services.chat_prompt_blocks import build_chat_tools_prompt_tail
+        tail = build_chat_tools_prompt_tail("- generate_image(prompt:string) - Generate an image")
+        assert "<tool>generate_image</tool>" in tail
+
+
+_EARLIER_PROMPT = (
+    "Close-up cinematic shot framed on a small girl looking up at Jesus' face, holding a lamb. "
+    "Only the coarse linen robe is visible. Golden hour light on a dusty Old West street."
+)
+_REWRITE_REQUEST = (
+    "Please rewrite this so he is not carrying firearms, nor wearing a leather belt.\n\n"
+    "---\n\nA small girl with smudged cheeks holds a lamb on a dusty street."
+)
+
+
+class TestPictureFromEarlierInTheChat:
+    """"generate that image please", sent after the chat wrote a prompt, was
+    rendered with "generate that image" as its prompt. The request points at
+    the prompt already in the conversation."""
+
+    @pytest.fixture
+    def uce(self, monkeypatch):
+        import backend.services.unified_chat_engine as uce
+        monkeypatch.setattr(uce, "_media_requires_explicit_command", lambda: False)
+        return uce
+
+    def _engine(self, uce, calls):
+        engine = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+        engine.registry = type("R", (), {"get_tool": lambda self, n: object()})()
+        engine._image_data = None
+        engine._save_message = lambda *a, **k: None
+        engine._load_history = lambda session_id, limit=None: []
+        engine._run_direct_tool_execution = lambda tool, params, *a, **k: calls.append((tool, params)) or {}
+        return engine
+
+    @staticmethod
+    def _history(*replies):
+        turns = []
+        for reply in replies:
+            turns += [{"role": "user", "content": "..."}, {"role": "assistant", "content": reply}]
+        return turns
+
+    @pytest.mark.parametrize("message", [
+        "generate that image please",
+        "Generate that image.",
+        "ok, generate that image now",
+        "make an image from the prompt above",
+        "create an image from that prompt",
+        "render that picture again",
+        "make a picture of that",
+    ])
+    def test_a_bare_reference_is_only_the_reference(self, uce, message):
+        assert uce.earlier_picture_reference(message) == "only"
+
+    @pytest.mark.parametrize("message", [
+        "generate that image, but make the sky stormy",
+        "generate that image with a red sky",
+    ])
+    def test_a_reference_with_a_change_is_changed(self, uce, message):
+        assert uce.earlier_picture_reference(message) == "changed"
+
+    @pytest.mark.parametrize("message", [
+        "generate an image of a red fox",
+        "draw me a picture of a cat",
+        "generate an image of that dog in the snow",
+    ])
+    def test_a_request_with_its_own_subject_is_not_a_reference(self, uce, message):
+        assert uce.earlier_picture_reference(message) is None
+
+    def test_the_prompt_written_as_a_tool_call_is_rendered(self, uce):
+        calls = []
+        history = self._history(f'generate_image(prompt: "{_EARLIER_PROMPT}")',
+                                "Sorry, that didn't work: Stopped by the user before the image finished.")
+        self._engine(uce, calls)._try_image_generate_direct(
+            "generate that image please", "sess-refer", lambda *a, **k: None, "req", {"history": history})
+        assert calls == [("generate_image", {"prompt": _EARLIER_PROMPT})]
+
+    def test_the_prompt_written_as_prose_is_rendered(self, uce):
+        calls = []
+        history = self._history(f"Here is the revised prompt:\n\n{_EARLIER_PROMPT}")
+        self._engine(uce, calls)._try_image_generate_direct(
+            "generate that image", "sess-refer", lambda *a, **k: None, "req", {"history": history})
+        assert calls == [("generate_image", {"prompt": _EARLIER_PROMPT})]
+
+    def test_the_stored_conversation_is_read_without_a_history_option(self, uce):
+        calls = []
+        engine = self._engine(uce, calls)
+        engine._load_history = lambda session_id, limit=None: self._history(_EARLIER_PROMPT)
+        engine._try_image_generate_direct(
+            "generate that image please", "sess-refer", lambda *a, **k: None, "req", {})
+        assert calls == [("generate_image", {"prompt": _EARLIER_PROMPT})]
+
+    def test_with_nothing_earlier_it_asks_instead_of_rendering(self, uce):
+        calls, events = [], []
+        self._engine(uce, calls)._try_image_generate_direct(
+            "generate that image please", "sess-refer", lambda n, p: events.append((n, p)), "req", {})
+        assert calls == []
+        assert "don't see a prompt" in [p for n, p in events if n == "chat:complete"][0]["response"]
+
+    def test_a_change_goes_to_the_chat_model(self, uce):
+        calls = []
+        result = self._engine(uce, calls)._try_image_generate_direct(
+            "generate that image, but make the sky stormy", "sess-refer", lambda *a, **k: None, "req",
+            {"history": self._history(_EARLIER_PROMPT)})
+        assert result is None and calls == []
+
+    def test_the_picture_in_focus_is_rendered_again(self, uce, tmp_path):
+        sid = "sess-refer-focus"
+        picture = tmp_path / "last.png"
+        picture.write_bytes(b"png")
+        calls = []
+        try:
+            uce._remember_session_image(sid, str(picture))
+            uce._SESSION_LAST_IMAGE_PROMPT[sid] = _EARLIER_PROMPT
+            self._engine(uce, calls)._try_image_generate_direct(
+                "generate that image again", sid, lambda *a, **k: None, "req",
+                {"history": self._history("Here's the generated image.")})
+        finally:
+            uce._SESSION_LAST_EDIT.pop(sid, None)
+            uce._SESSION_IMAGE_FOCUS.discard(sid)
+            uce._SESSION_LAST_IMAGE_PROMPT.pop(sid, None)
+        assert calls == [("generate_image", {"prompt": _EARLIER_PROMPT})]
+
+    def test_a_request_with_its_own_subject_is_unchanged(self, uce):
+        calls = []
+        self._engine(uce, calls)._try_image_generate_direct(
+            "generate an image of a red fox", "sess-refer", lambda *a, **k: None, "req",
+            {"history": self._history(_EARLIER_PROMPT)})
+        assert calls == [("generate_image", {"prompt": "a red fox"})]
+
+    @pytest.mark.parametrize("reply, prompt", [
+        ('generate_image(prompt: "a fox in the snow")', "a fox in the snow"),
+        ('generate_image(prompt="a fox in the snow", width=1024)', "a fox in the snow"),
+        ('`generate_image(prompt: "a fox "in" the snow")`', 'a fox "in" the snow'),
+        ("a fox in the snow", None),
+        ('You could call generate_image(prompt: "a fox") for that.', None),
+    ])
+    def test_a_tool_call_written_as_text(self, uce, reply, prompt):
+        assert uce._media_call_as_text(reply) == prompt
+
+
+class TestRewriteGetsTheText:
+    """"Rewrite this so ..." over a pasted scene came back as a generate_image
+    call: the model was offered the media tools and the request read like a
+    scene. A rewrite is a request for text."""
+
+    @pytest.mark.parametrize("message", [
+        "Rewrite this so the camera is directly behind Jesus:\n\nThe camera follows him.",
+        _REWRITE_REQUEST,
+        "can you revise this prompt so it is shorter",
+    ])
+    def test_media_tools_are_withheld(self, message):
+        from backend.services.unified_chat_engine import _withholds_media_tools
+        from backend.utils.request_phrases import asks_for_rewrite
+        assert _withholds_media_tools(message) is True
+        assert asks_for_rewrite(message) is True
+
+    def test_a_rewrite_that_asks_for_the_picture_keeps_them(self):
+        from backend.services.unified_chat_engine import _withholds_media_tools
+        assert _withholds_media_tools("rewrite this prompt and generate an image of it") is False
+
+    def test_a_reply_written_as_a_tool_call_reads_as_its_prompt(self, monkeypatch):
+        from backend.services.chat_prompt_blocks import REWRITE_THE_TEXT_NOTE
+        from backend.tests.test_unified_chat_host_hooks import _complete, _engine, _run
+
+        e = _engine(monkeypatch, reply=f'generate_image(prompt: "{_EARLIER_PROMPT}")')
+        result, events = _run(e, _REWRITE_REQUEST, {})
+
+        assert _complete(events)["response"] == _EARLIER_PROMPT
+        assert ("assistant", _EARLIER_PROMPT) in e.calls["saved"]
+        assert {"content": _EARLIER_PROMPT, "reset": True, "session_id": "sess-host"} in [
+            p for n, p in events if n == "chat:token"]
+        assert not [n for n, p in events if n == "chat:tool_call"]
+        system, *_, user = e.calls["llm_messages"][0]
+        assert REWRITE_THE_TEXT_NOTE in user["content"]
+        assert "generate_image tool" not in system["content"]
+
+
+class TestStoppedRender:
+    def test_a_stopped_render_reads_as_stopped_not_as_a_failure(self, monkeypatch):
+        from types import SimpleNamespace
+        import backend.services.unified_chat_engine as uce
+        from backend.tools.image_tools import _RENDER_STOPPED
+
+        class Registry:
+            def get_tool(self, name):
+                return SimpleNamespace(name=name, requires_approval=False)
+
+            def execute_tool(self, name, **params):
+                return SimpleNamespace(success=False, output=None, error=_RENDER_STOPPED,
+                                       metadata={"stopped": True})
+
+        monkeypatch.setattr(uce, "inject_chat_image_model", lambda tool, params, options=None: params)
+        monkeypatch.setattr(uce, "is_aborted", lambda sid: False)
+        monkeypatch.setattr(uce, "_preapproved_tool_names", lambda sid: set())
+        engine = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+        engine.registry = Registry()
+        engine._image_data = None
+        engine._save_message = lambda *a, **k: None
+        events = []
+        engine._run_direct_tool_execution(
+            "generate_image", {"prompt": "a fox"}, "sess-stop", lambda n, p: events.append((n, p)),
+            "req", "generate an image of a fox", {})
+        assert [p for n, p in events if n == "chat:complete"][0]["response"] == _RENDER_STOPPED
+

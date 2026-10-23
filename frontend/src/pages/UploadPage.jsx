@@ -1,5 +1,5 @@
 // WARNING: Visual/UX changes to this file are forbidden without explicit written approval from the project maintainer.
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import {
   Box,
   Button,
@@ -20,12 +20,31 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import ErrorIcon from "@mui/icons-material/Error";
 import HourglassTopIcon from "@mui/icons-material/HourglassTop"; // Icon for indexing
 
-// Import both API functions
 import { uploadFile, getDocuments } from "../api";
-import { triggerIndexing } from "../api/indexingService"; // Import directly to avoid static bundling
 import { useStatus } from "../contexts/StatusContext";
 import PageLayout from "../components/layout/PageLayout";
 import { formatTimestamp } from "../utils/fileTypeUtils";
+import useFileDropZone from "../hooks/useFileDropZone";
+
+// The picker's filter only. /api/docs/upload keeps no extension list of its
+// own (the loaders decide what gets indexed), so neither the picker nor the
+// drop zone refuses a file here; the server's answer is shown as it comes.
+const ACCEPTED_EXTENSIONS =
+  ".txt,.md,.pdf,.docx,.html,.htm,.json,.csv,.xml,.py,.js,.jsx,.java,.c,.cpp,.h,.cs,.go,.php,.rb,.swift,.kt,.rs,.scala,.zip";
+
+// Recent Uploads refreshes itself while a row is still being indexed, so a
+// new upload turns INDEXED without a reload. The cap counts every tick,
+// answered or not, so a paused queue or a backend that is down stops the
+// polling after two minutes instead of never.
+const RECENT_REFRESH_MS = 3000;
+const RECENT_REFRESH_MAX_POLLS = 40;
+const statusOf = (doc) => String(doc?.index_status || "").toUpperCase();
+const isInFlight = (doc) => ["INDEXING", "PENDING"].includes(statusOf(doc));
+// The row this page just uploaded is followed until it shows one of these.
+// STORED is not one: for a document type the backend's resume tick queues a
+// STORED row like a PENDING one (text uploads sit at STORED until the worker
+// takes them), so it means "stored, waiting for the indexer".
+const WATCHED_SETTLED = new Set(["INDEXED", "ERROR", "STORAGE_FAILED", "STORED_TRUNCATED"]);
 
 const IndexStatusChip = ({ status }) => {
   let color = "default";
@@ -62,25 +81,30 @@ const IndexStatusChip = ({ status }) => {
 
 const UploadPage = () => {
   const [selectedFile, setSelectedFile] = useState(null);
-  const [uploadStatus, setUploadStatus] = useState("idle"); // idle, uploading, success, indexing, error
+  const [uploadStatus, setUploadStatus] = useState("idle"); // idle, uploading, indexing, success, error
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [_uploadProgress, setUploadProgress] = useState(0); // Progress state if using XHR
   const [recentDocs, setRecentDocs] = useState([]);
   const [isLoadingRecent, setIsLoadingRecent] = useState(true);
+  // {id, name} of the file just uploaded here, until its row settles.
+  const [watched, setWatched] = useState(null);
+  const refreshCountRef = useRef(0);
   const { activeModel, isLoadingModel, modelError } = useStatus();
+  const fileInputRef = useRef(null);
 
-  const fetchRecentDocs = useCallback(async () => {
-    setIsLoadingRecent(true);
+  // silent: refresh the rows in place without the loading spinner.
+  const fetchRecentDocs = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setIsLoadingRecent(true);
     try {
       const result = await getDocuments({ page: 1, perPage: 5 });
       if (result && result.error) throw new Error(result.error);
       setRecentDocs(result?.documents || result?.items || []);
     } catch (err) {
       console.error("Failed to fetch recent documents:", err);
-      setRecentDocs([]);
+      if (!silent) setRecentDocs([]);
     } finally {
-      setIsLoadingRecent(false);
+      if (!silent) setIsLoadingRecent(false);
     }
   }, []);
 
@@ -88,15 +112,74 @@ const UploadPage = () => {
     fetchRecentDocs();
   }, [fetchRecentDocs]);
 
-  const handleFileChange = (event) => {
-    if (event.target.files && event.target.files[0]) {
-      setSelectedFile(event.target.files[0]);
-      setUploadStatus("idle"); // Reset status when new file selected
-      setErrorMessage("");
-      setSuccessMessage("");
-      setUploadProgress(0);
+  // The row just uploaded here: once it is in the list with a settled
+  // status, the upload's own message says how it ended.
+  useEffect(() => {
+    if (!watched) return;
+    const row = recentDocs.find((doc) => doc.id === watched.id);
+    if (!row || !WATCHED_SETTLED.has(statusOf(row))) return;
+    setWatched(null);
+    if (statusOf(row) === "INDEXED") {
+      setSuccessMessage(`File '${watched.name}' uploaded and indexed.`);
+      setUploadStatus("success");
+    } else {
+      setErrorMessage(
+        `File '${watched.name}' uploaded, but indexing failed${row.error_message ? `: ${row.error_message}` : "."}`,
+      );
+      setUploadStatus("error");
     }
+  }, [recentDocs, watched]);
+
+  // Keep refreshing while any recent row is still indexing, or while the
+  // row just uploaded has not yet appeared with a settled status; stop when
+  // neither holds or the cap trips.
+  useEffect(() => {
+    const busy = watched != null || recentDocs.some(isInFlight);
+    if (!busy) {
+      refreshCountRef.current = 0;
+      return undefined;
+    }
+    const interval = setInterval(() => {
+      refreshCountRef.current += 1;
+      if (refreshCountRef.current > RECENT_REFRESH_MAX_POLLS) {
+        clearInterval(interval);
+        refreshCountRef.current = 0;
+        if (watched) {
+          setWatched(null);
+          setSuccessMessage(
+            `File '${watched.name}' uploaded; indexing is still running. Recent Uploads shows the result on a reload.`,
+          );
+          setUploadStatus("success");
+        }
+        return;
+      }
+      fetchRecentDocs({ silent: true });
+    }, RECENT_REFRESH_MS);
+    return () => clearInterval(interval);
+  }, [recentDocs, watched, fetchRecentDocs]);
+
+  // One path for the picker and the drop zone.
+  const selectFile = useCallback((file) => {
+    if (!file) return;
+    setSelectedFile(file);
+    setUploadStatus("idle"); // Reset status when new file selected
+    setErrorMessage("");
+    setSuccessMessage("");
+    setUploadProgress(0);
+  }, []);
+
+  const handleFileChange = (event) => {
+    const file = event.target.files && event.target.files[0];
+    // Clear the input so picking the same file again still fires onChange.
+    event.target.value = "";
+    selectFile(file);
   };
+
+  const openPicker = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const drop = useFileDropZone({ onFiles: (files) => selectFile(files[0]) });
 
   const handleUpload = useCallback(async () => {
     if (!selectedFile) {
@@ -128,29 +211,24 @@ const UploadPage = () => {
       }
 
       if (uploadResult && uploadResult.document_id) {
-        setSuccessMessage(
-          `File '${selectedFile.name}' uploaded successfully (ID: ${uploadResult.document_id}). Starting indexing...`,
-        );
-        setUploadStatus("indexing"); // Move to indexing status
-        
-        // Progress events now handled by backend SocketIO system
-
-        // --- Call triggerIndexing API ---
-        const indexingResult = await triggerIndexing(uploadResult.document_id);
-
-        if (indexingResult && indexingResult.error) {
+        // /api/docs/upload queues the indexing task itself (auto_index), so
+        // the page does not call /api/index/<id> on top of it: that queued the
+        // same document a second time under a second footer job. Recent
+        // Uploads below follows the row until it is INDEXED.
+        if (uploadResult.indexing_queued === false) {
           setErrorMessage(
-            `Upload succeeded, but indexing trigger failed: ${indexingResult.error}`,
+            `File '${selectedFile.name}' uploaded (ID: ${uploadResult.document_id}), but indexing could not be queued${uploadResult.indexing_error ? `: ${uploadResult.indexing_error}` : "."}`,
           );
           setUploadStatus("error");
-          
-          // Error events now handled by backend SocketIO system
-        } else {
-          setSuccessMessage(
-            `File '${selectedFile.name}' uploaded and indexing started.`,
-          );
-          setUploadStatus("success");
+          fetchRecentDocs();
+          return;
         }
+        setSuccessMessage(
+          `File '${selectedFile.name}' uploaded (ID: ${uploadResult.document_id}); indexing queued.`,
+        );
+        setUploadStatus("indexing");
+        refreshCountRef.current = 0;
+        setWatched({ id: uploadResult.document_id, name: selectedFile.name });
         fetchRecentDocs();
       } else {
         // Handle unexpected success response format from upload
@@ -191,31 +269,46 @@ const UploadPage = () => {
     >
       <Paper elevation={2} sx={{ p: 3 }}>
         <Box
+          {...drop.dropProps}
+          onClick={openPicker}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              openPicker();
+            }
+          }}
+          role="button"
+          tabIndex={0}
+          aria-label="Select a file to import"
+          data-testid="upload-drop-zone"
           sx={{
             border: "2px dashed",
-            borderColor: "divider",
+            borderColor: drop.isDragActive ? "primary.main" : "divider",
             borderRadius: 1,
             p: 3,
             textAlign: "center",
             mb: 2,
+            cursor: "pointer",
           }}
         >
           <input
-            accept=".txt,.md,.pdf,.docx,.html,.htm,.json,.csv,.xml,.py,.js,.jsx,.java,.c,.cpp,.h,.cs,.go,.php,.rb,.swift,.kt,.rs,.scala,.zip" // Match ALLOWED_EXTENSIONS roughly
+            ref={fileInputRef}
+            accept={ACCEPTED_EXTENSIONS}
             style={{ display: "none" }}
             id="raised-button-file"
             type="file"
             onChange={handleFileChange}
           />
-          <label htmlFor="raised-button-file">
-            <Button
-              variant="outlined"
-              component="span"
-              startIcon={<UploadFileIcon />}
-            >
-              Select File
-            </Button>
-          </label>
+          <Button
+            variant="outlined"
+            startIcon={<UploadFileIcon />}
+            onClick={(event) => {
+              event.stopPropagation();
+              openPicker();
+            }}
+          >
+            Select File
+          </Button>
           {selectedFile && (
             <Typography variant="body1" sx={{ mt: 2 }}>
               Selected: {selectedFile.name} (
@@ -262,7 +355,7 @@ const UploadPage = () => {
           </CollapsibleAlert>
         )}
         {uploadStatus === "indexing" &&
-          successMessage && ( // Show intermediate message during indexing trigger
+          successMessage && ( // Shown while the uploaded row is being indexed
             <CollapsibleAlert
               severity="info"
               sx={{ mt: 2 }}

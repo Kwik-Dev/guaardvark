@@ -122,8 +122,10 @@ LEFT_OUT = {
 
 # The only installed packages an install may move; every other one is held at
 # its version, so pip either adds packages or refuses. Remove puts these back.
+# backend/requirements*.txt must accept the version an install moves one to:
+# start-up runs `pip install -r` on them, which reinstalls anything outside.
 MAY_CHANGE = {
-    "accelerate": (">=1.4.0", "trl 1.13.0 needs 1.4.0 or newer (requirements.txt pins 1.2.1)"),
+    "accelerate": (">=1.4.0", "trl 1.13.0 needs 1.4.0 or newer (requirements.txt accepts any 1.x from 1.2.1)"),
     "fsspec": ("<=2026.2.0", "datasets 4.8.5 needs 2026.2.0 or older"),
     "typeguard": (">=4.0.0", "tyro, which Unsloth uses, needs 4.0 or newer"),
 }
@@ -226,7 +228,10 @@ def unmet_requirements(versions: dict[str, str]) -> list[str]:
 
 
 def unavailable_reason() -> str | None:
-    """Why a training job cannot run for want of the libraries, or None."""
+    """Why a training job cannot run for want of the libraries, or None: one
+    is missing, or one declares a requirement this environment does not meet
+    (unmet_requirements), which a run would otherwise hit only once started,
+    on the GPU."""
     with _lock:
         busy = _run["state"] == "running"
     if busy:
@@ -238,12 +243,16 @@ def unavailable_reason() -> str | None:
             metadata.version(lib["id"])
         except metadata.PackageNotFoundError:
             missing.append(lib["id"])
-    if not missing:
+    if missing:
+        one = len(missing) == 1
+        names = missing[0] if one else ", ".join(missing[:-1]) + " and " + missing[-1]
+        return (f"Training needs {names}, which {'is' if one else 'are'} not installed. "
+                f"Install {'it' if one else 'them'} in Settings > Training libraries.")
+    unmet = unmet_requirements(installed_versions())
+    if not unmet:
         return None
-    one = len(missing) == 1
-    names = missing[0] if one else ", ".join(missing[:-1]) + " and " + missing[-1]
-    return (f"Training needs {names}, which {'is' if one else 'are'} not installed. "
-            f"Install {'it' if one else 'them'} in Settings > Training libraries.")
+    return ("The training libraries are installed, but incomplete: " + "; ".join(unmet) + ". "
+            "Open Settings > Training libraries and click Repair.")
 
 
 # ---- the hardware verdict ----------------------------------------------------------
@@ -382,11 +391,13 @@ def status(*, with_plan_token: bool = False) -> dict[str, Any]:
     changes = [{"name": name, "installed": versions[name], "needs": spec, "why": why}
                for name, (spec, why) in MAY_CHANGE.items()
                if name in versions and _would_move(name, versions[name])]
+    unmet = unmet_requirements(versions)
     result = {
         "libraries": libraries,
-        "ready": not missing,
+        # A job may start (unavailable_reason): all installed, every requirement met.
+        "ready": not missing and not unmet,
         "download_mb": round(sum(lib["download_mb"] for lib in missing), 1),
-        "unmet": unmet_requirements(versions),
+        "unmet": unmet,
         "changes": changes,
         "left_out": [{"name": name, "why": why} for name, why in LEFT_OUT.items()],
         "hardware": hardware_fit(),

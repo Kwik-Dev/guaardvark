@@ -341,12 +341,19 @@ class VideoGenerationRouter:
         logger.info(f"Starting ComfyUI directly at {comfyui_dir}...")
         try:
             log_file = open(str(log_path), "a")
-            # Mirror plugins/comfyui/scripts/start.sh: loopback bind and the
-            # memory flags the #13109 patch depends on.
+            # Mirror plugins/comfyui/scripts/start.sh: loopback bind, the
+            # local-only settings, and the memory flags the #13109 patch
+            # depends on.
             listen = os.environ.get("GUAARDVARK_COMFYUI_LISTEN", "127.0.0.1")
-            from backend.services.comfyui_launch_flags import model_paths_launch, preview_cli_args
+            from backend.services.comfyui_launch_flags import (
+                LOCAL_ONLY_CLI_ARGS,
+                LOCAL_ONLY_ENV,
+                model_paths_launch,
+                preview_cli_args,
+            )
             args = [
                 str(venv_python), str(main_py), "--listen", listen, "--port", "8188",
+                *LOCAL_ONLY_CLI_ARGS,
                 "--disable-smart-memory", "--cache-none", "--reserve-vram", "1.0",
             ]
             if os.environ.get("GUAARDVARK_COMFYUI_PINNED_MEMORY", "0") != "1":
@@ -360,7 +367,7 @@ class VideoGenerationRouter:
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
-                env={**os.environ, **paths_env},
+                env={**os.environ, **LOCAL_ONLY_ENV, **paths_env},
             )
             self._comfyui_process = proc
 
@@ -490,13 +497,14 @@ class VideoGenerationRouter:
         if comfyui_running:
             try:
                 from backend.services.comfyui_video_generator import ComfyUIVideoGenerator
-                from backend.services.video_model_registry import is_model_installed
+                from backend.services.video_model_registry import is_plan_installed
                 gen = ComfyUIVideoGenerator()
                 face_restore_node_available = (
                     gen.comfy_node_available("FaceRestoreModelLoader")
                     and gen.comfy_node_available("FaceRestoreCFWithModel")
                 )
-                face_restore_model_ready = is_model_installed("codeformer")
+                # CodeFormer plus the face detector and parser the node reads.
+                face_restore_model_ready = is_plan_installed("codeformer")
             except Exception:
                 pass
         return {

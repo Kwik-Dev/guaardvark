@@ -51,13 +51,16 @@ def split_sections(text: str) -> List[dict]:
     cur_path = ""
     in_fence = False
 
-    def _emit(heading, path, level, body, part=None):
+    def _emit(heading, path, level, body, part=None, section=None):
         title = f"{'#' * level} {heading}\n{body}" if heading else body
         entry = {
             "heading": heading,
             "heading_path": path,
             "level": level,
             "text": title.strip(),
+            # The section this text belongs to, also on the parts after the
+            # first, whose text leaves the heading line out.
+            "section": section if section is not None else heading,
         }
         if part is not None:
             entry["part"] = part
@@ -90,7 +93,8 @@ def split_sections(text: str) -> List[dict]:
         for i, chunk in enumerate(parts):
             # Only the first part carries the heading line, so the text is not
             # repeated; the breadcrumb metadata carries the context for the rest.
-            _emit(cur_heading if i == 0 else None, cur_path, cur_level, chunk, part=i)
+            _emit(cur_heading if i == 0 else None, cur_path, cur_level, chunk, part=i,
+                  section=cur_heading)
 
     for line in text.splitlines():
         if _FENCE.match(line):
@@ -140,10 +144,14 @@ def load_documents(file_path: str, filename: str, LlamaDocument) -> Optional[Lis
             "section_index": i,
             "section_count": len(sections),
         }
-        if sec["heading"]:
-            meta["heading"] = sec["heading"]
+        # Every part of a section names it: the parts after the first used to
+        # lose heading_path, so their passages had no section in citations.
+        if sec.get("section"):
+            meta["heading"] = sec["section"]
             meta["heading_path"] = sec["heading_path"]
             meta["heading_level"] = sec["level"]
+        if sec.get("part") is not None:
+            meta["section_part"] = sec["part"]
         documents.append(LlamaDocument(text=sec["text"], metadata=meta))
 
     logger.info("Markdown parsed %s into %d section(s)", filename, len(documents))

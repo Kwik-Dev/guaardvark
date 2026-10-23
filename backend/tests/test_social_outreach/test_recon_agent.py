@@ -22,6 +22,11 @@ from backend.services.social_outreach.reddit_outreach import RedditThread
 
 
 @pytest.fixture(autouse=True)
+def _profile_with_keywords(outreach_profile):
+    """The keyword filter reads the profile's features; "ollama" maps to local_ai."""
+
+
+@pytest.fixture(autouse=True)
 def mock_relevance_grader():
     """Default-mock the LLM relevance scorer to skipped=True so existing tests
     don't depend on Ollama. Tests that care about the gate override locally."""
@@ -437,7 +442,7 @@ def test_scout_youtube_emits_candidate_with_expected_fields(app):
         assert row.grade_score == pytest.approx(1.0)
         import json
         payload = json.loads(row.draft_text)
-        assert payload["feature_hint"] == "local_ai"  # "ollama" matches RELEVANCE_KEYWORDS
+        assert payload["feature_hint"] == "local_ai"  # "ollama" is a local_ai keyword in the profile
         assert payload["stage"] == "recon"
         assert payload["video_id"] == "AGAETsxjg0o"
         assert "Ollama" in payload["title"]
@@ -712,16 +717,13 @@ def test_content_agent_drafts_youtube_candidate_without_crashing(app):
             ), patch(
                 "backend.services.social_outreach.kill_switch.is_enabled",
                 return_value=True,
-            ), patch(
-                "backend.services.social_outreach.kill_switch.is_supervised",
-                return_value=True,
             ):
             result = ContentAgent().draft_candidate(row.id)
         # The exact status depends on grade thresholds; what we care about is
         # that the call did NOT raise (the BLOCKER would surface as a crash
         # or a JSON-decode failure when _build_thread_context reads the YT
-        # payload). Supervised → drafted|rejected (not approved).
-        assert result["status"] in ("drafted", "rejected", "approved")
+        # payload). Never approved: drafted or rejected.
+        assert result["status"] in ("drafted", "rejected")
         # The selftext_preview alias should have flowed through to the
         # thread_context that the persona drafter saw — which is the whole
         # point of the alias fix.

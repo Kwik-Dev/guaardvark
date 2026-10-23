@@ -33,7 +33,7 @@ def _no_dispatch(monkeypatch):
     monkeypatch.setattr(MusicVideoService, "dispatch_agent", lambda self, mv_id, agent: None)
     monkeypatch.setattr(
         "backend.services.video_model_registry.resolve_active_video_model",
-        lambda role, explicit=None, surface=None: (explicit or "wan22-5b", None),
+        lambda role, explicit=None, surface=None, **kw: (explicit or "wan22-5b", None),
     )
     monkeypatch.setattr(
         "backend.api.music_video_api.get_video_generator",

@@ -20,6 +20,22 @@ class TestParsers:
         assert wants_music_video("/music-video song.mp3 neon") is False  # slash is separate
         assert is_music_video_request("/music-video song.mp3 neon") is True
 
+    @pytest.mark.parametrize("message", [
+        "how do I make a music video in Premiere?",
+        "how to make a music video with capcut",
+        "can you make a music video in After Effects for me",
+        "make a music video using DaVinci for my band",
+    ])
+    def test_how_to_and_video_software_are_not_a_music_video_request(self, message):
+        from backend.services.unified_chat_engine import (
+            user_wants_image_generation,
+            user_wants_video_generation,
+        )
+        assert wants_music_video(message) is False
+        assert is_music_video_request(message) is False
+        assert user_wants_video_generation(message) is False
+        assert user_wants_image_generation(message) is False
+
     def test_wants_film_crew(self):
         assert wants_film_crew("start film crew") is True
         assert wants_film_crew("film this script INT. KITCHEN") is True

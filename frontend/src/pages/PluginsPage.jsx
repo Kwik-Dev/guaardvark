@@ -6,6 +6,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
+  Alert,
   Box,
   Typography,
   Paper,
@@ -70,10 +71,10 @@ import {
 } from '../api/pluginsService';
 import { getGpuStatus } from '../api/gpuService';
 import OllamaLifecycleSection from '../components/settings/OllamaLifecycleSection';
+import { ComfyUpdateSection, useComfyUpdate } from '../components/plugins/ComfyUpdate';
 import CollapsibleAlert from "../components/common/CollapsibleAlert";
 
 // ── Constants ──────────────────────────────────────────────────────────
-const TOTAL_VRAM_MB = 16384; // 16GB
 const STATUS_CONFIG = {
   running: { color: 'success', icon: HealthyIcon, label: 'Running' },
   stopped: { color: 'default', icon: StopIcon, label: 'Stopped' },
@@ -90,22 +91,24 @@ const PLUGIN_COLORS = {
   gpu_embedding: '#ff6d00',
 };
 
-// A plugin is "GPU-heavy" — and thus mutually exclusive with other heavy
-// plugins (only one heavy GPU service at a time on a 16 GB card) — when its
-// manifest VRAM estimate crosses this line. Driven by vram_estimate_mb so new
-// plugins are covered automatically: ollama (8 GB), comfyui (6 GB),
-// audio_foundry (10 GB), lora_trainer (18 GB) qualify; light GPU users
-// (vision ~2 GB, upscaling ~1.5 GB) and CPU-only plugins fall below it and
-// never trigger the swap prompt. Groundwork for the future 3-mode "gear" selector.
-const GPU_HEAVY_THRESHOLD_MB = 3000;
-const isGpuHeavy = (plugin) => (plugin?.vram_estimate_mb || 0) >= GPU_HEAVY_THRESHOLD_MB;
+// A plugin is "GPU-heavy", and so mutually exclusive with the other heavy
+// ones, when the backend says so: `gpu_exclusive` in the listing comes from
+// GPU_EXCLUSIVE_PLUGIN_IDS in backend/plugins/plugin_manager.py, the same set
+// the operation gate and the route orchestrator use. A local copy drifted
+// from it (a VRAM threshold flagged plugins the gate did not).
+const isGpuHeavy = (plugin) => Boolean(plugin?.gpu_exclusive);
 
 // ── VRAM Budget Bar ────────────────────────────────────────────────────
 const VramBudgetBar = ({ plugins, gpuVram }) => {
-  const totalMb = gpuVram?.total_mb || TOTAL_VRAM_MB;
+  // The GPU query (/api/gpu/memory/status, then gpu:status pushes) is the only
+  // source for these numbers. When it has not answered, or the backend
+  // reports a failed query (null numbers), the card says "unknown" for the
+  // total and for free VRAM instead of assuming a card size or printing 0.
+  const totalMb = Number(gpuVram?.total_mb) || 0;
+  const vramKnown = totalMb > 0;
   const usedMb = gpuVram?.used_mb || 0;
-  const freeMb = gpuVram?.free_mb ?? (totalMb - usedMb);
-  const usedPct = (usedMb / totalMb) * 100;
+  const freeMb = vramKnown ? (gpuVram?.free_mb ?? totalMb - usedMb) : null;
+  const usedPct = vramKnown ? (usedMb / totalMb) * 100 : 0;
 
   const activePlugins = plugins.filter(
     (p) => p.status === 'running' && p.vram_estimate_mb > 0
@@ -130,13 +133,16 @@ const VramBudgetBar = ({ plugins, gpuVram }) => {
               variant="outlined"
             />
           )}
-          <Typography variant="body2" color="text.secondary">
-            {(usedMb / 1024).toFixed(1)} / {(totalMb / 1024).toFixed(1)} GB
+          <Typography variant="body2" color="text.secondary" data-testid="vram-totals">
+            {vramKnown
+              ? `${(usedMb / 1024).toFixed(1)} / ${(totalMb / 1024).toFixed(1)} GB`
+              : 'total unknown — no answer from the GPU query'}
           </Typography>
         </Stack>
       </Box>
 
       {/* Live usage bar */}
+      {vramKnown && (
       <Box
         sx={{
           height: 24,
@@ -180,11 +186,12 @@ const VramBudgetBar = ({ plugins, gpuVram }) => {
           })}
         </Box>
       </Box>
+      )}
 
       {/* Legend + free VRAM */}
       <Stack direction="row" spacing={2} sx={{ mt: 1 }} flexWrap="wrap" useFlexGap>
         <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
-          {(freeMb / 1024).toFixed(1)} GB free
+          {freeMb != null ? `${(freeMb / 1024).toFixed(1)} GB free` : 'free VRAM unknown'}
         </Typography>
         {activePlugins.map((p) => (
           <Box key={p.id} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
@@ -281,11 +288,13 @@ const LogViewer = ({ pluginId, open }) => {
 };
 
 // ── Plugin Card ────────────────────────────────────────────────────────
-const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage, excludedBy = null }) => {
+export const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage, excludedBy = null }) => {
   const [expanded, setExpanded] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [actionLoading, setActionLoading] = useState(null);
   const cardMenu = useContextMenu();
+  // Inert for every plugin but ComfyUI.
+  const comfy = useComfyUpdate(plugin, showMessage);
 
   // Camera state (vision_pipeline only)
   const [cameraActive, setCameraActive] = useState(false);
@@ -387,8 +396,20 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage, excludedBy = 
           {plugin.description || 'No description available.'}
         </Typography>
 
+        {/* Why the plugin is not (fully) ours to use: another install's copy
+            holding the port, a tool its start script could not find. The
+            backend sets it (status_message) and clears it on the next start. */}
+        {plugin.status_message && (
+          <Alert severity="warning" variant="outlined" sx={{ mb: 2 }} data-testid={`plugin-status-message-${plugin.id}`}>
+            {plugin.status_message}
+          </Alert>
+        )}
+
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 1 }}>
           <Chip size="small" label={`v${plugin.version}`} variant="outlined" />
+          {comfy.installed && (
+            <Chip size="small" label={`ComfyUI ${comfy.installed}`} variant="outlined" />
+          )}
           <Chip size="small" label={plugin.type} variant="outlined" />
           {plugin.port && (
             <Chip size="small" label={`Port ${plugin.port}`} variant="outlined" />
@@ -403,6 +424,8 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage, excludedBy = 
             />
           )}
         </Stack>
+
+        <ComfyUpdateSection comfy={comfy} />
 
         <Collapse in={expanded}>
           <Divider sx={{ my: 1.5 }} />
@@ -466,20 +489,22 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage, excludedBy = 
 
           {cameraAvailable && (
             <Tooltip title={cameraActive ? 'Stop Camera' : 'Start Camera'}>
-              <IconButton
-                size="small"
-                color={cameraActive ? 'primary' : 'default'}
-                onClick={handleCameraToggle}
-                disabled={cameraLoading}
-              >
-                {cameraLoading ? (
-                  <CircularProgress size={20} />
-                ) : cameraActive ? (
-                  <CameraOnIcon />
-                ) : (
-                  <CameraOffIcon />
-                )}
-              </IconButton>
+              <span>
+                <IconButton
+                  size="small"
+                  color={cameraActive ? 'primary' : 'default'}
+                  onClick={handleCameraToggle}
+                  disabled={cameraLoading}
+                >
+                  {cameraLoading ? (
+                    <CircularProgress size={20} />
+                  ) : cameraActive ? (
+                    <CameraOnIcon />
+                  ) : (
+                    <CameraOffIcon />
+                  )}
+                </IconButton>
+              </span>
             </Tooltip>
           )}
 
@@ -490,9 +515,11 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage, excludedBy = 
           </Tooltip>
 
           <Tooltip title="Settings">
-            <IconButton size="small" onClick={() => onConfigOpen(plugin)} disabled={isLoading}>
-              <SettingsIcon />
-            </IconButton>
+            <span>
+              <IconButton size="small" onClick={() => onConfigOpen(plugin)} disabled={isLoading}>
+                <SettingsIcon />
+              </IconButton>
+            </span>
           </Tooltip>
 
           <Tooltip title={expanded ? 'Less' : 'More'}>
@@ -528,6 +555,11 @@ const PluginCard = ({ plugin, onAction, onConfigOpen, showMessage, excludedBy = 
             label: cameraActive ? 'Stop camera' : 'Start camera',
             onClick: handleCameraToggle,
             disabled: cameraLoading,
+          },
+          comfy.available && {
+            label: `Update ComfyUI to ${comfy.check.target}…`,
+            onClick: comfy.openUpdate,
+            disabled: Boolean(comfy.blocked),
           },
           { label: logsOpen ? 'Hide logs' : 'Show logs', onClick: () => setLogsOpen(!logsOpen), dividerBefore: true },
           { label: 'Settings…', onClick: () => onConfigOpen(plugin), disabled: isLoading },
@@ -818,6 +850,7 @@ const PluginsPage = () => {
   }, [plugins]);
 
   const handlePluginAction = async (pluginId, action) => {
+    const settles = action === 'start' || action === 'stop';
     try {
       let response;
       switch (action) {
@@ -840,10 +873,20 @@ const PluginsPage = () => {
           if (!plugins.find((p) => p.id === pluginId)?.enabled) {
             await enablePlugin(pluginId);
           }
+          // The call returns only once the service answers its health check
+          // (a minute for ComfyUI), so show the wait while it runs.
+          setPlugins((prev) => prev.map((p) => (
+            p.id === pluginId ? { ...p, status: 'starting' } : p
+          )));
           response = await startPlugin(pluginId);
           break;
         }
-        case 'stop': response = await stopPlugin(pluginId); break;
+        case 'stop':
+          setPlugins((prev) => prev.map((p) => (
+            p.id === pluginId ? { ...p, status: 'stopping' } : p
+          )));
+          response = await stopPlugin(pluginId);
+          break;
         case 'enable': response = await enablePlugin(pluginId); break;
         case 'disable': response = await disablePlugin(pluginId); break;
         default: throw new Error(`Unknown action: ${action}`);
@@ -869,9 +912,8 @@ const PluginsPage = () => {
 
         // Optimistic update: flip the enabled preference and status immediately so
         // the toggle switch in the UI reflects the change without waiting for the
-        // 'plugins:status' socket round-trip. The authoritative snapshot from the
-        // backend (via socket or later fetch) will reconcile any details (e.g. real
-        // status after start completes, cooldowns, etc.).
+        // 'plugins:status' socket round-trip. Start and stop need none: they answer
+        // after the plugin has settled, and the listing fetched below is final.
         if (action === 'enable' || action === 'disable') {
           const newEnabled = action === 'enable';
           // When enabling, also flip any mutually-exclusive siblings off so the
@@ -898,11 +940,16 @@ const PluginsPage = () => {
         } else if (action === 'stop') {
           setPlugins((prev) => prev.map((p) =>
             p.id === pluginId ? { ...p, status: 'stopping', running: false } : p
+
           ));
         }
 
-        // After stopping ComfyUI, offer to restart Ollama once socket/HTTP state settles.
-        if (action === 'stop' && pluginId === 'comfyui') {
+        // After ComfyUI goes down, offer to bring Ollama back once socket/HTTP
+        // state settles: the route orchestrator stops Ollama to make room for
+        // ComfyUI (plugin_bridge GPU swap), which leaves it enabled but not
+        // running. The switch and the context menu send 'disable' (which stops
+        // the service first); 'stop' is kept for callers that only stop.
+        if ((action === 'stop' || action === 'disable') && pluginId === 'comfyui') {
           setTimeout(async () => {
             const list = (await fetchPlugins()) || plugins;
             const ollamaPlugin = list.find((p) => p.id === 'ollama');
@@ -916,6 +963,10 @@ const PluginsPage = () => {
       }
     } catch (err) {
       showMessage(err.message || `Failed to ${action} plugin`, 'error');
+    } finally {
+      // Replace the 'starting'/'stopping' shown during the call with the
+      // backend's settled status, whether the call worked, failed or was gated.
+      if (settles) await fetchPlugins();
     }
   };
 

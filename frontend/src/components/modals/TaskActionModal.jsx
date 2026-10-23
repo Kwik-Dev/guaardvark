@@ -4,6 +4,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
+  Alert,
   Dialog,
   DialogTitle,
   DialogContent,
@@ -40,6 +41,7 @@ import InfoIcon from "@mui/icons-material/Info";
 import * as apiService from "../../api";
 import { getRules } from "../../api/ruleService";
 import { getWebsites } from "../../api/websiteService";
+import { formatUiError } from "../../utils/uiError";
 import { generateStructuredCSV } from "../../api/bulkGenerationService";
 import { useUnifiedProgress } from "../../contexts/UnifiedProgressContext";
 
@@ -82,6 +84,16 @@ const TaskActionModal = ({
   });
 
   const [formError, setFormError] = useState(null);
+  // Lists that could not be loaded (models, rules, websites): their dropdowns
+  // are empty then, so say why without blocking the form.
+  const [lookupWarnings, setLookupWarnings] = useState({});
+  const noteLookup = useCallback((key, text) =>
+    setLookupWarnings((prev) => {
+      const next = { ...prev };
+      if (text) next[key] = text;
+      else delete next[key];
+      return next;
+    }), []);
   const [projects, setProjects] = useState([]);
   const [availableModels, setAvailableModels] = useState([]);
   const [availableRules, setAvailableRules] = useState([]);
@@ -119,7 +131,9 @@ const TaskActionModal = ({
   // Progress integration
   const { _activeProcesses, getProcess } = useUnifiedProgress();
   
-  const isEditMode = !!taskData;
+  // Editing needs a saved task. taskData without an id is a template (New Job's
+  // quick actions): the form opens in create mode with its values filled in.
+  const isEditMode = Boolean(taskData?.id);
   const isFileGeneration = formData.type === "file_generation";
   const isCodeGeneration = formData.type === "code_generation";
   
@@ -157,9 +171,11 @@ const TaskActionModal = ({
         throw new Error(modelList.error.message || modelList.error);
       }
       setAvailableModels(Array.isArray(modelList) ? modelList : []);
+      noteLookup("models", null);
     } catch (err) {
       console.error("Error fetching models:", err);
       setAvailableModels([]);
+      noteLookup("models", `Models could not be loaded: ${err.message}`);
     } finally {
       setIsLoadingModels(false);
     }
@@ -173,12 +189,15 @@ const TaskActionModal = ({
       if (rulesList.error) {
         console.error("Failed to fetch rules:", rulesList.error);
         setAvailableRules([]);
+        noteLookup("rules", `Rules could not be loaded: ${formatUiError(rulesList.error)}`);
       } else {
         setAvailableRules(rulesList);
+        noteLookup("rules", null);
       }
     } catch (err) {
       console.error("Failed to fetch rules:", err);
       setAvailableRules([]);
+      noteLookup("rules", `Rules could not be loaded: ${formatUiError(err)}`);
     } finally {
       setIsLoadingRules(false);
     }
@@ -192,12 +211,15 @@ const TaskActionModal = ({
       if (websitesList.error) {
         console.error("Failed to fetch websites:", websitesList.error);
         setAvailableWebsites([]);
+        noteLookup("websites", `Websites could not be loaded: ${formatUiError(websitesList.error)}`);
       } else {
         setAvailableWebsites(Array.isArray(websitesList) ? websitesList : []);
+        noteLookup("websites", null);
       }
     } catch (err) {
       console.error("Failed to fetch websites:", err);
       setAvailableWebsites([]);
+      noteLookup("websites", `Websites could not be loaded: ${formatUiError(err)}`);
     } finally {
       setIsLoadingWebsites(false);
     }
@@ -289,21 +311,24 @@ const TaskActionModal = ({
           setBatchSize(workflowConfig.batch_size);
         }
       } else {
-        // Reset for create mode with smart defaults
+        // Create mode with smart defaults, or with a quick action's template
+        const template = taskData || {};
+        const type = template.type || "file_generation";
         const timestamp = new Date().toISOString().slice(0, 16).replace('T', '_').replace(/[-:]/g, '');
         setFormData({
           id: null,
-          name: "",
-          description: "",
-          type: "file_generation",
+          name: template.name || "",
+          description: template.description || "",
+          type,
           project_id: defaults?.project_id ?? "",
           client_name: defaults?.client_name ?? "",
           target_website: "",
-          output_filename: formData.type === "code_generation" ? `generated_file.jsx` : `content_${timestamp}.csv`,
+          output_filename: template.output_filename
+            || (type === "code_generation" ? `generated_file.jsx` : `content_${timestamp}.csv`),
           model_name: "",
           prompt_rule_id: null,
           page_count: 50,
-          auto_start_job: true,
+          auto_start_job: template.auto_start_job ?? true,
           client_id: defaults?.client_id ?? null,
           website_id: defaults?.website_id ?? null,
         });
@@ -546,6 +571,12 @@ const TaskActionModal = ({
       taskPayload.workflow_config = taskData.workflow_config;
     }
 
+    // A new task this form starts itself (below) is created queued. Both task
+    // schedulers run any pending task with no job_id within seconds, so a
+    // pending create followed by the start ran the task twice.
+    const startsHere = !isEditMode && (isFileGeneration || isCodeGeneration) && formData.auto_start_job;
+    if (startsHere) taskPayload.status = "queued";
+
     try {
       let createdTask;
       
@@ -556,7 +587,7 @@ const TaskActionModal = ({
       }
 
       // If this is a new task with auto-start enabled, start the job
-      if (!isEditMode && (isFileGeneration || isCodeGeneration) && formData.auto_start_job && createdTask) {
+      if (startsHere && createdTask) {
         setIsCreatingJob(true);
         try {
           if (isFileGeneration) {
@@ -566,6 +597,12 @@ const TaskActionModal = ({
           }
         } catch (jobError) {
           console.error("Failed to start job:", jobError);
+          // No scheduler takes a queued task, so mark it failed instead of leaving it waiting.
+          fetch(`/api/tasks/${createdTask.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "failed" }),
+          }).catch(() => {});
           setFormError(`Task created successfully, but failed to start job: ${jobError.message}`);
           setIsCreatingJob(false);
           return;
@@ -857,6 +894,11 @@ const TaskActionModal = ({
           <CollapsibleAlert severity="error" sx={{ mb: 2 }}>
             {formError}
           </CollapsibleAlert>
+        )}
+        {Object.keys(lookupWarnings).length > 0 && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            {Object.values(lookupWarnings).join(". ")}.
+          </Alert>
         )}
 
         {/* Task Management Section - Only show for existing tasks */}

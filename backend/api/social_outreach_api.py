@@ -3,20 +3,22 @@ HTTP surface for the social outreach loop.
 
 Endpoints
 ---------
-GET  /api/social-outreach/status              — enabled/supervised/cadence snapshot
+GET  /api/social-outreach/status              — enabled/cadence/per-platform posting modes snapshot
 POST /api/social-outreach/enable              — flip global on
 POST /api/social-outreach/kill                — flip global off (hard stop)
 POST /api/social-outreach/stop-posting        — stop ALL public posting (outreach + Connections), hold what is queued
 POST /api/social-outreach/resume-posting      — lift that stop; held items still need their usual approval
-POST /api/social-outreach/supervised          — body {"on": bool}
 GET  /api/social-outreach/audit?limit=200     — recent log rows
-GET  /api/social-outreach/queue               — drafted-but-not-posted entries (supervised mode)
+GET  /api/social-outreach/queue               — drafts waiting for a person's approval
 POST /api/social-outreach/drafts              — create a draft manually from the UI
 PATCH /api/social-outreach/drafts/<id>        — save edits to a draft (status='drafted' only)
-POST /api/social-outreach/approve/<id>        — approve a queued draft (will be posted on next pass)
+POST /api/social-outreach/approve/<id>        — approve a queued draft (409 with the reason for X and LinkedIn)
 POST /api/social-outreach/reject/<id>         — reject and mark won't-post (409 once the post is being submitted)
-POST /api/social-outreach/claim/<id>          — poster takes an approved draft (approved → processing)
-POST /api/social-outreach/submit/<id>         — poster is about to publish (processing → submitting); 409 means do not publish
+GET  /api/social-outreach/post-now            — Agent Screen presence, the watched post running, approved drafts waiting for one
+POST /api/social-outreach/post-now/<id>       — "Post now, I'm watching": start the one browser post for an approved draft
+POST /api/social-outreach/claim/<id>          — the Discord bot takes an approved Discord draft (approved → processing)
+POST /api/social-outreach/submit/<id>         — the Discord bot is about to send (processing → submitting); 409 means do not send
+POST /api/social-outreach/thread-fit          — internal: ask the thread-fit judge whether a message is worth a reply
 POST /api/social-outreach/draft-comment       — internal: draft a reply via the LLM, with grade
 POST /api/social-outreach/scout-url           — agent fetches OP + comments for a URL so the human doesn't paste them
 POST /api/social-outreach/run-pass            — fire a Reddit / self-share pass on demand instead of waiting for the cron
@@ -34,7 +36,15 @@ from typing import Any, Dict, Optional
 
 from flask import Blueprint, jsonify, request
 
-from backend.services.social_outreach import audit, external_grader, gates, kill_switch, persona
+from backend.services.social_outreach import (
+    audit,
+    external_grader,
+    gates,
+    kill_switch,
+    persona,
+    platforms,
+    profile,
+)
 from backend.utils.hosts import host_matches
 
 logger = logging.getLogger(__name__)
@@ -77,14 +87,6 @@ def resume_posting():
     return jsonify(result)
 
 
-@social_outreach_bp.post("/supervised")
-def set_supervised():
-    body = request.get_json(silent=True) or {}
-    on = bool(body.get("on", True))
-    kill_switch.set_supervised(on)
-    return jsonify({"supervised": on})
-
-
 # --- Audit / queue / approve ---------------------------------------------
 
 @social_outreach_bp.get("/audit")
@@ -102,7 +104,7 @@ def get_audit():
 
 @social_outreach_bp.get("/queue")
 def get_queue():
-    """Drafts that are pending approval (supervised mode produces these)."""
+    """Drafts waiting for a person's approval."""
     from backend.models import SocialOutreachLog
     rows = (
         SocialOutreachLog.query
@@ -116,7 +118,8 @@ def get_queue():
 
 @social_outreach_bp.get("/approved")
 def get_approved():
-    """Drafts that have been approved and are waiting to be posted."""
+    """Approved drafts not posted yet: Discord ones wait for the Discord bot,
+    Reddit, YouTube and Facebook ones for a person's "Post now" (/post-now)."""
     from backend.models import SocialOutreachLog
     rows = (
         SocialOutreachLog.query
@@ -140,6 +143,9 @@ def create_draft():
     platform = (body.get("platform") or "").strip()
     if not platform:
         return jsonify({"error": "platform required"}), 400
+    refusal = platforms.refusal_for(platform)
+    if refusal:
+        return jsonify({"error": refusal}), 400
     action = (body.get("action") or "comment").strip()
     draft_text = body.get("draft_text") or ""
     target_url = body.get("target_url") or None
@@ -194,6 +200,9 @@ def update_draft(event_id: int):
         return jsonify({"error": f"cannot edit a draft in status '{row.status}'"}), 409
 
     body = request.get_json(silent=True) or {}
+    refusal = platforms.refusal_for(body.get("platform"))
+    if refusal:
+        return jsonify({"error": refusal}), 400
     if "draft_text" in body:
         row.draft_text = body["draft_text"] or ""
     if "target_url" in body:
@@ -218,10 +227,10 @@ def approve(event_id: int):
         status = transitions.current_status(event_id)
         if status is None:
             return jsonify({"error": "not found"}), 404
-        return jsonify({
-            "error": f"cannot approve from status '{status}' (only from drafted)",
-        }), 409
-    return jsonify(SocialOutreachLog.query.get(event_id).to_dict())
+        return jsonify({"error": transitions.approval_refusal(event_id), "status": status}), 409
+    row = SocialOutreachLog.query.get(event_id)
+    # "next" tells the person what happens now; approving posts nothing.
+    return jsonify({**row.to_dict(), "next": platforms.after_approval(row.platform)})
 
 
 @social_outreach_bp.post("/reject/<int:event_id>")
@@ -248,11 +257,88 @@ def reject(event_id: int):
     return jsonify({**row.to_dict(), "rejected_from": outcome.status})
 
 
+# --- Watched posts: Reddit, YouTube, Facebook --------------------------------
+
+@social_outreach_bp.get("/post-now")
+def watched_post_status():
+    """What the Approvals page needs to offer "Post now, I'm watching".
+
+    {watching, watching_reason, running, last, waiting}: whether the Agent
+    Screen viewer is streaming, the post running now, how the last one ended,
+    and the approved drafts that wait for a person to start them.
+    """
+    from sqlalchemy import func
+
+    from backend.models import SocialOutreachLog
+    from backend.services.social_outreach import watched_post
+
+    rows = (
+        SocialOutreachLog.query
+        .filter(SocialOutreachLog.status == "approved")
+        .filter(func.lower(SocialOutreachLog.platform).in_(platforms.platforms_in(platforms.WATCHED)))
+        .order_by(SocialOutreachLog.created_at.asc())
+        .limit(50)
+        .all()
+    )
+    waiting = [r.to_dict() for r in rows if platforms.posts(r.platform, r.action)]
+    return jsonify({**watched_post.status(), "waiting": waiting})
+
+
+@social_outreach_bp.post("/post-now/<int:event_id>")
+def post_now(event_id: int):
+    """Start the one browser post for an approved draft ("Post now, I'm watching").
+
+    202 when it is queued; the agent then drives its browser on the Agent
+    Screen. 409 with the reason when it may not start (the Agent Screen is not
+    open, another post is running, a limit or switch says no).
+    """
+    from backend.services.social_outreach import watched_post
+
+    outcome = watched_post.start(event_id)
+    if outcome.status is None:
+        return jsonify({"error": "not found"}), 404
+    if not outcome.started:
+        return jsonify({"error": outcome.message, "status": outcome.status}), 409
+    return jsonify({"started": True, "event_id": event_id, "message": outcome.message}), 202
+
+
+def _bot_only_refusal(event_id: int) -> Optional[str]:
+    """Why a poster outside the backend may not take this row, or None.
+
+    Only the Discord bot posts from outside (platforms.BOT). A Reddit, YouTube
+    or Facebook draft posts only through a person's watched post, so no caller
+    can claim one and drain the approved list.
+    """
+    from backend.models import SocialOutreachLog, db
+
+    found = (
+        db.session.query(SocialOutreachLog.platform)
+        .filter(SocialOutreachLog.id == event_id)
+        .first()
+    )
+    if found is None:
+        return None
+    policy = platforms.policy_for(found[0])
+    if policy is None:
+        return f"nothing here posts to '{found[0]}'"
+    if policy.mode == platforms.REFUSED:
+        return policy.refusal
+    if policy.mode == platforms.WATCHED:
+        return (
+            f"{policy.label} drafts post only from the Approvals page, one at a time, when a "
+            "person presses Post now with the Agent Screen open"
+        )
+    return None
+
+
 def _poster_step(event_id: int, step, verb: str, needs: str):
     """Run a poster's transition (claim or submit) and answer for its route."""
     from backend.models import SocialOutreachLog
     from backend.services.social_outreach import transitions
 
+    refusal = _bot_only_refusal(event_id)
+    if refusal:
+        return jsonify({"error": refusal, "status": transitions.current_status(event_id)}), 409
     if not step(event_id):
         status = transitions.current_status(event_id)
         if status is None:
@@ -269,10 +355,10 @@ def _poster_step(event_id: int, step, verb: str, needs: str):
 
 @social_outreach_bp.post("/claim/<int:event_id>")
 def claim(event_id: int):
-    """Atomically claim an approved draft for posting (approved → processing).
+    """Atomically claim an approved Discord draft for posting (approved → processing).
 
-    Used by the Discord cog (and any non-Celery dispatcher) so overlapping
-    polls cannot double-post the same row.
+    Used by the Discord cog so overlapping polls cannot double-post the same
+    row. Drafts for any other platform are refused (_bot_only_refusal).
     """
     from backend.services.social_outreach import transitions
 
@@ -283,12 +369,54 @@ def claim(event_id: int):
 def begin_submit(event_id: int):
     """Commit a claimed draft to being published (processing → submitting).
 
-    A poster outside the backend calls this immediately before it sends. A 409
-    means the draft was rejected after the claim and must not be sent.
+    The Discord cog calls this immediately before it sends. A 409 means the
+    draft was rejected after the claim and must not be sent.
     """
     from backend.services.social_outreach import transitions
 
     return _poster_step(event_id, transitions.begin_submit, "submit", "processing")
+
+
+# --- Thread-fit judge, for callers outside this process ------------------
+
+@social_outreach_bp.post("/thread-fit")
+def thread_fit():
+    """
+    Body: {
+        "text": "the message or post",        # required
+        "title": "Discord message in #help",  # optional
+        "context": ["earlier message", ...],  # optional, oldest first; the judge reads the last three
+        "feature_hint": "voice",              # optional: what the caller's keyword filter matched
+    }
+    Returns external_grader.score_thread_relevance's answer plus ``unfit``
+    (recon.judged_unfit: a grade below MIN_RELEVANCE_GRADE, or a "skip"
+    verdict) and the ``feature_hint`` the message was judged against: the
+    first outreach-profile feature named in the text, else the caller's hint.
+
+    The same judge recon and the Reddit loop ask before drafting. A judge that
+    could not run comes back skipped and not unfit; the caller drafts and
+    passes relevance_unchecked to /draft-comment. Nothing is drafted or
+    recorded here.
+    """
+    from backend.services.social_outreach.recon import judged_unfit
+
+    body = request.get_json(silent=True) or {}
+    text = str(body.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "text required"}), 400
+    title = str(body.get("title") or "")
+    context = [str(c) for c in (body.get("context") or []) if c]
+    feature_hint = (
+        persona.find_relevant_feature("\n".join([title, text, *context]))
+        or str(body.get("feature_hint") or "").strip()
+    )
+    relevance = external_grader.score_thread_relevance(
+        title=title,
+        selftext=text,
+        top_comments=context[-3:],
+        feature_hint=feature_hint,
+    )
+    return jsonify({**relevance, "unfit": judged_unfit(relevance), "feature_hint": feature_hint})
 
 
 # --- Draft-comment endpoint (the LLM call site) --------------------------
@@ -305,20 +433,25 @@ def draft_comment():
         "task_id": 42,                 # optional, links audit row to celery task
         "mode": "comment"|"share",     # default "comment"
         "share_target": "r/SideProject",  # required for share mode
-        "share_link": "https://guaardvark.com",  # required for share mode
+        "share_link": "https://example.com",  # share mode; defaults to the profile's site
         "relevance_unchecked": true,   # optional: the thread-fit judge could not run
     }
     Returns: {draft, grade, reason, audit_id, would_post, gates}
 
-    gates.independent_check is passed, failed or unavailable: whether the
-    second-opinion grader ran on this draft and what it concluded. With
-    supervised mode off, only a passed check lets the draft post on its own.
-    A share is never graded (there is no thread for the rubric) and is always
-    held for a person. A comment sent with relevance_unchecked is held the way
-    an unchecked draft is (gates.independent_ok).
+    Every draft is queued as drafted for a person's approval; ``would_post``
+    is always false and stays in the answer for the callers that read it.
+    gates.independent_check is passed, not_independent, failed or
+    unavailable: whether the second-opinion grader ran on this draft and what
+    it concluded (not_independent: it passed, but the grader is the drafter's
+    own model), recorded for the person who reviews it. A share is never
+    graded (there is no thread for the rubric). A draft for X or LinkedIn is
+    refused (400).
     """
     body = request.get_json(silent=True) or {}
     platform = body.get("platform", "unknown")
+    refusal = platforms.refusal_for(platform)
+    if refusal:
+        return jsonify({"error": refusal}), 400
     mode = body.get("mode", "comment")
     action = "comment" if mode == "comment" else "share"
     task_id = body.get("task_id")
@@ -329,7 +462,7 @@ def draft_comment():
     if mode == "share":
         context = {
             "target": body.get("share_target") or "(unspecified)",
-            "link_url": body.get("share_link") or persona.SITE_URL,
+            "link_url": body.get("share_link") or profile.site_url(),
         }
     else:
         thread_context = body.get("thread_context", "")
@@ -353,7 +486,6 @@ def draft_comment():
     reason = result.get("reason", "")
 
     enabled = kill_switch.is_enabled()
-    supervised = kill_switch.is_supervised()
     cadence_ok, cadence_reason = kill_switch.cadence_allows_post(platform)
     grade_ok = grade >= 0.7
     has_draft = bool(draft_text.strip())
@@ -368,18 +500,13 @@ def draft_comment():
     else:
         ext = {"grade": 0.0, "checked": False, "skipped": True, "model": None, "reason": "empty_draft"}
     independent_pass, independent_reason = gates.independent_ok(
-        ext, supervised=supervised, action=action, relevance_unchecked=relevance_unchecked,
+        ext, action=action, relevance_unchecked=relevance_unchecked,
     )
     independent_check = gates.independent_check_label(ext)
     hold_reason = None if independent_pass else independent_reason
 
-    would_post = (
-        enabled and not supervised and cadence_ok and grade_ok and has_draft and independent_pass
-    )
-
-    # Unsupervised auto-post goes through process-approved (single posting path).
-    # Legacy Reddit/self-share loops are draft-only and never servo-post.
-    initial_status = "approved" if would_post else "drafted"
+    # Every draft waits for a person; nothing here approves one.
+    would_post = False
 
     audit_id = audit.log_outreach_event(
         platform=platform,
@@ -388,7 +515,7 @@ def draft_comment():
         target_thread_id=target_thread_id,
         draft_text=draft_text,
         posted_text=None,
-        status=initial_status,
+        status="drafted",
         grade_score=grade,
         abort_reason=None,
         task_id=task_id,
@@ -400,6 +527,9 @@ def draft_comment():
             "external_grade": ext.get("grade"),
             "external_passed": ext.get("passed"),
             "external_reason": ext.get("reason", ""),
+            "external_model": ext.get("model"),
+            "drafter_model": ext.get("drafter_model"),
+            "external_independent": ext.get("independent"),
             "relevance_unchecked": relevance_unchecked,
             "hold_reason": hold_reason,
         },
@@ -413,7 +543,7 @@ def draft_comment():
         "would_post": would_post,
         "gates": {
             "enabled": enabled,
-            "supervised": supervised,
+            "supervised": True,
             "cadence_ok": cadence_ok,
             "cadence_reason": cadence_reason,
             "grade_ok": grade_ok,
@@ -428,19 +558,46 @@ def draft_comment():
 
 @social_outreach_bp.get("/snippets")
 def get_snippets():
-    """Pre-built copy blocks for the snippet bank in the Drafting zone.
-    Read-only — these are the canonical Guaardvark pitches + marketing links."""
+    """Copy blocks for the snippet bank in the Drafting zone, read from the
+    local profile: empty on a fresh install until "What you promote" is filled."""
+    current = profile.load()
     return jsonify({
-        "pitch": persona.GUAARDVARK_PITCH,
-        "site_url": persona.SITE_URL,
-        "github_url": persona.GITHUB_URL,
-        "gotham_rising_url": persona.GOTHAM_RISING_URL,
-        "short_a_url": persona.SHORT_RH0_URL,
-        "short_b_url": persona.SHORT_YRO_URL,
-        "marketing_videos": list(persona.MARKETING_VIDEOS),
-        "feature_blurbs": persona.FEATURE_BLURBS,
+        "configured": current.is_configured(),
+        "name": current.name,
+        "pitch": current.pitch,
+        "site_url": current.site_url,
+        "repo_url": current.repo_url,
+        "videos": current.videos,
+        "feature_blurbs": current.feature_blurbs(),
         "tones": list(persona.TONE_GUIDES.keys()),
     })
+
+
+# --- "What you promote" profile --------------------------------------------
+
+@social_outreach_bp.get("/profile")
+def get_profile():
+    """The local outreach profile (data/social_outreach/profile.json)."""
+    current = profile.load()
+    return jsonify({"profile": current.to_dict(), "configured": current.is_configured()})
+
+
+@social_outreach_bp.put("/profile")
+def put_profile():
+    """Replace the profile. Body: the profile object (see profile.py for the
+    fields); URLs must be http(s), lists and texts are capped. 400 with a plain
+    message when a value is not accepted."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "profile object required"}), 400
+    try:
+        saved = profile.save(body.get("profile", body))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except OSError as e:
+        logger.warning("outreach profile save failed: %s", e)
+        return jsonify({"error": f"could not write the profile: {e}"}), 500
+    return jsonify({"profile": saved.to_dict(), "configured": saved.is_configured()})
 
 
 @social_outreach_bp.post("/fetch-meta")
@@ -550,8 +707,6 @@ def _suggest_platform_from_host(host: str) -> Optional[str]:
         return "discord"
     if host_matches(host, "facebook.com", "fb.com"):
         return "facebook"
-    if host_matches(host, "twitter.com", "x.com"):
-        return "twitter"
     return None
 
 
@@ -767,7 +922,8 @@ def scout_url():
 
     Routing:
       reddit.com → JSON API (fast, no Firefox round-trip)
-      discord/twitter/facebook → drive the agent's logged-in Firefox via BiDi
+      discord/facebook → drive the agent's logged-in Firefox via BiDi
+      X and LinkedIn → refused (platforms.REFUSED): nothing here reads or posts there
       anything else → SSRF-guarded HTML scrape (the original cheap path)
     """
     body = request.get_json(silent=True) or {}
@@ -775,6 +931,9 @@ def scout_url():
     force_dom = bool(body.get("force_dom"))
     if not url or not url.startswith(("http://", "https://")):
         return jsonify({"error": "url must include http(s)://"}), 400
+    refusal = platforms.refusal_for_url(url)
+    if refusal:
+        return jsonify({"error": refusal}), 400
 
     parsed_host = ""
     try:
@@ -792,11 +951,11 @@ def scout_url():
 
     # Drive Firefox via BiDi for the platforms whose pages are JS shells. The
     # agent's session inherits the user's logged-in cookies on display restart,
-    # so this works for Discord/Twitter/Facebook without any auth dance.
+    # so this works for Discord/Facebook without any auth dance.
     from backend.services.dom_metadata_extractor import DOMMetadataExtractor
     extractor = DOMMetadataExtractor.get_instance()
     platform = extractor.detect_platform(url)
-    if platform in ("discord", "twitter", "facebook", "reddit"):
+    if platform in ("discord", "facebook", "reddit"):
         dom_result = extractor.extract_thread_context(url, platform=platform)
         if "error" not in dom_result:
             return jsonify(dom_result)
@@ -912,7 +1071,7 @@ def record_post():
     if not platform:
         return jsonify({"error": "platform required"}), 400
 
-    # Belt-and-suspenders: tag any guaardvark.com URL in the recorded text
+    # Belt-and-suspenders: tag any URL to the profile's hosts in the recorded text
     # even if the caller forgot to. The actual POSTED bytes were already
     # tagged at the servo boundary (see reddit_outreach / self_share); this
     # ensures the audit log matches what went out.

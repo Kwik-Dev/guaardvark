@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 from backend.utils.display_paths import display_params
 from backend.utils.settings_utils import get_setting
+from backend.utils.web_search_sources import MAX_SEARCH_QUERY_CHARS
 
 # Local imports
 try:
@@ -698,7 +699,8 @@ VOICE INTERACTION MODE: You are responding to voice chat, so be extra conversati
             # When disabled (default), skip the DB lookups and fall through to
             # the hardcoded fallback template below.
             from backend.utils.settings_utils import get_rules_enabled
-            if get_rules_enabled():
+            rules_on = get_rules_enabled()
+            if rules_on:
                 base_template, rule_id = rule_utils.get_active_system_prompt(
                     "enhanced_chat",
                     db.session,
@@ -800,10 +802,13 @@ You have real-time web search capabilities enabled. When users ask questions tha
             # Build final context string
             context_str = "\n\n".join(context_parts) if context_parts else "No additional context available."
 
-            # Apply template with context (this will be used by the chat engine's system message)
-            # The template includes the anti-fabrication rules and proper formatting
+            # {rules_str} carries the active rules block when the Rules switch is
+            # on and a rule applies; the fixed line otherwise.
+            rules_str = ""
+            if rules_on:
+                rules_str = rule_utils.get_chat_rules_block(model_name).strip()
             final_prompt = base_template.format(
-                rules_str="BULLETPROOF ANTI-FABRICATION SYSTEM ACTIVE",
+                rules_str=rules_str or "BULLETPROOF ANTI-FABRICATION SYSTEM ACTIVE",
                 context_str=context_str,
                 query_str="[USER QUERY WILL BE PROVIDED SEPARATELY]"
             )
@@ -1463,6 +1468,7 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
                            project_id: int = None) -> Optional[Dict]:
         """Check if message is a media command and execute directly, bypassing LLM."""
         import re
+        from backend.services.unified_chat_engine import MEDIA_STATUS_REQUEST_RE
         msg = message.strip()
         msg_lower = msg.lower()
 
@@ -1487,10 +1493,8 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
             action = m.group(1).lower()
             tool_name = "media_control"
             params = {"action": "next" if action in ("next", "skip") else "previous"}
-        # What's playing
-        elif re.match(r"^(?:what'?s|what\s+is)\s+(?:this\s+)?(?:playing|this\s+song)", msg, re.IGNORECASE):
-            tool_name = "media_status"
-        elif re.match(r"^(?:current|now)\s+(?:playing|song|track)", msg, re.IGNORECASE):
+        # What's playing (the whole message, about the user's own player)
+        elif MEDIA_STATUS_REQUEST_RE.match(msg):
             tool_name = "media_status"
         # Volume with number
         elif re.match(r"^(?:set\s+)?volume\s+(?:to\s+)?(\d+)", msg, re.IGNORECASE):
@@ -1619,7 +1623,7 @@ Context: {context_info.get('total_contexts', 0)} conversation contexts available
     _URL_RE = re.compile(r"(?:https?://|www\.)[^\s]+")
     # The search query is the user's message as typed, so anything longer than
     # this is a paste or a brief rather than a query and is never sent.
-    _WEB_SEARCH_MAX_CHARS = 300
+    _WEB_SEARCH_MAX_CHARS = MAX_SEARCH_QUERY_CHARS
 
     def _should_use_web_search(self, message: str) -> bool:
         """Return True only for a short message with a link, a domain or a
@@ -4490,6 +4494,10 @@ def enhanced_chat():
 
         data = request.get_json()
         session_id = data.get('session_id')
+        from backend.utils.session_ids import session_id_refusal
+        _too_long = session_id_refusal(session_id)
+        if _too_long:
+            return error_response(_too_long, 400)
         message = data.get('message')
 
         logger.info(
@@ -4610,6 +4618,10 @@ def enhanced_chat_stream():
 
         data = request.get_json()
         session_id = data.get('session_id')
+        from backend.utils.session_ids import session_id_refusal
+        _too_long = session_id_refusal(session_id)
+        if _too_long:
+            return error_response(_too_long, 400)
         message = data.get('message')
         use_rag = data.get('use_rag', True)
         debug_mode = data.get('debug', False)
@@ -4857,17 +4869,22 @@ def get_chat_history(session_id: str):
         for msg in reversed(messages):  # Reverse to get chronological order
             msg_data = {
                 "id": str(msg.id),
+                # The row id as a number: what a thumb names (ChatPage, MessageItem).
+                "message_id": msg.id,
                 "role": msg.role,
                 "content": msg.content,
                 "timestamp": msg.timestamp.isoformat() if msg.timestamp else None
             }
-            # Flatten extra_data fields into message for frontend rendering
+            # Flatten extra_data fields into message for frontend rendering.
+            # imageUrl is the turn's primary picture; imageUrls lists every
+            # picture of a multi-picture turn, in the order they were attached.
             if msg.extra_data and isinstance(msg.extra_data, dict):
-                for key in ('imageUrl', 'imageFileName', 'messageType',
-                            'relatedImageUrl', 'imageAnalysis', 'analysisDetails',
-                            'generatedImages', 'agentThinkingSteps',
-                            'orchestratorPlan', 'orchestratorPlanId',
-                            'web_search_offer'):
+                flattened = ('imageUrl', 'imageUrls', 'imageFileName', 'messageType',
+                             'relatedImageUrl', 'imageAnalysis', 'analysisDetails',
+                             'generatedImages', 'agentThinkingSteps',
+                             'orchestratorPlan', 'orchestratorPlanId',
+                             'web_search_offer')
+                for key in flattened:
                     if key in msg.extra_data:
                         msg_data[key] = msg.extra_data[key]
                 # Restore tool call steps for unified chat rendering
@@ -4876,6 +4893,13 @@ def get_chat_history(session_id: str):
                     # way the live chat:tool_call event shows them.
                     msg_data['toolCalls'] = display_params(msg.extra_data['steps'])
                     msg_data['isUnifiedChat'] = True
+                # Every other saved field (feedback, thinking, verified,
+                # provenance, ...) as extra_data, where the chat page reads it
+                # after a refresh.
+                rest = {k: v for k, v in msg.extra_data.items()
+                        if k not in flattened and k != 'steps'}
+                if rest:
+                    msg_data['extra_data'] = display_params(rest)
             formatted_messages.append(msg_data)
 
         # Check if there are more messages
@@ -5089,6 +5113,10 @@ def list_chat_sessions():
             results.append({
                 "session_id": session.id,
                 "project_id": session.project_id,
+                # The stored session mode ("chat" or "agent"), the same value
+                # GET /api/chat-sessions/<id>/mode serves; the session list
+                # shows it, so it never has to guess from the preview text.
+                "mode": (session.mode or "chat").strip(),
                 "created_at": session.created_at.isoformat() if session.created_at else None,
                 "last_activity": last_msg.isoformat() if last_msg else None,
                 "message_count": msg_count,
@@ -5283,6 +5311,10 @@ def vision_generate_image():
 
         data = request.get_json()
         session_id = data.get('session_id')
+        from backend.utils.session_ids import session_id_refusal
+        _too_long = session_id_refusal(session_id)
+        if _too_long:
+            return error_response(_too_long, 400)
         prompt = data.get('prompt')
         style = data.get('style', 'realistic')
         size = data.get('size', [512, 512])

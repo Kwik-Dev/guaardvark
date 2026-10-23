@@ -167,10 +167,45 @@ def unload_all_except(keep_model: str = None) -> int:
     return unloaded_count
 
 
+# Embedding-model names, for a model Ollama cannot describe.
+_EMBEDDING_NAME_PATTERNS = ("embed", "nomic-embed", "all-minilm", "bge", "gte", "e5-", "mxbai-embed")
+
+
+def _ollama_model_kind(name: str) -> str:
+    """"chat", "embedding" or "decision" for an installed Ollama model.
+
+    Ollama's capability list decides when it can describe the model, whatever
+    the name: a llamacpp:<digest> alias of an embedding model is still an
+    embedding model, and a decision model (capability "decision", e.g. nimble,
+    tev1) answers with a label, not a chat reply. The name rules answer only
+    when Ollama cannot describe it.
+    """
+    from backend.services.model_capabilities import capabilities_for, decides_by_name
+    try:
+        rec = capabilities_for(name, with_vision=False)
+    except Exception:  # noqa: BLE001 - fall back to the name rules
+        rec = None
+    if rec is not None and rec.exists and rec.capabilities:
+        if rec.embedding:
+            return "embedding"
+        return "decision" if rec.decision else "chat"
+    lower = (name or "").lower()
+    if any(pattern in lower for pattern in _EMBEDDING_NAME_PATTERNS):
+        return "embedding"
+    return "decision" if decides_by_name(name) else "chat"
+
+
+def get_available_decision_models() -> list:
+    """Installed decision-only models, as of the last chat-model listing
+    (get_available_ollama_models keeps them out of that list)."""
+    return list(_model_list_cache.get("decision_models") or [])
+
+
 def get_available_ollama_models(use_cache: bool = True, force_refresh: bool = False):
     """
-    Fetches available models from the Ollama API, filtering out embedding-only models.
-    Uses caching to reduce API calls.
+    Fetches the chat models from the Ollama API: embedding and decision-only
+    models are left out (_ollama_model_kind). The decision models found are
+    kept for get_available_decision_models. Uses caching to reduce API calls.
 
     Args:
         use_cache: Whether to use cached results (default True)
@@ -199,22 +234,25 @@ def get_available_ollama_models(use_cache: bool = True, force_refresh: bool = Fa
             )
             return {"error": "Invalid format received from Ollama API."}
 
-        # Filter out embedding-only models (cannot be used for chat)
-        embedding_patterns = ["embed", "nomic-embed", "all-minilm", "bge", "gte", "e5-", "mxbai-embed"]
+        # Embedding and decision-only models cannot be used for chat.
         chat_models = []
+        decision_models = []
         filtered_count = 0
 
         for model_item in models:
-            model_name = model_item.get("name", "").lower()
-            # Skip if model name contains any embedding pattern
-            is_embedding = any(pattern in model_name for pattern in embedding_patterns)
-            if not is_embedding:
+            kind = _ollama_model_kind(model_item.get("name", ""))
+            if kind == "chat":
                 chat_models.append(model_item)
+            elif kind == "decision":
+                decision_models.append(model_item)
             else:
                 filtered_count += 1
                 logger.debug(f"Filtered out embedding model: {model_item.get('name')}")
 
-        logger.info(f"Found {len(chat_models)} chat models from Ollama API (filtered {filtered_count} embedding models).")
+        logger.info(
+            f"Found {len(chat_models)} chat models from Ollama API (filtered {filtered_count} "
+            f"embedding models, {len(decision_models)} decision models)."
+        )
 
         # Add a simple id for frontend key prop if missing
         for i, model_item in enumerate(chat_models):
@@ -223,9 +261,12 @@ def get_available_ollama_models(use_cache: bool = True, force_refresh: bool = Fa
             if "name" not in model_item:
                 model_item["name"] = "unknown:latest"
             model_item["full_name"] = model_item["name"]
+        for model_item in decision_models:
+            model_item["full_name"] = model_item.get("name", "")
 
         # Update cache
         _model_list_cache["models"] = chat_models
+        _model_list_cache["decision_models"] = decision_models
         _model_list_cache["timestamp"] = time.time()
 
         return chat_models
@@ -246,6 +287,9 @@ def get_available_ollama_models(use_cache: bool = True, force_refresh: bool = Fa
 def list_models():
     """API endpoint to list available models from Ollama.
 
+    ``models`` are the chat models; ``decision_models`` are the installed
+    decision-only models (capability "decision"), which cannot chat.
+
     When Ollama is offline (plugin disabled / not running), returns a 200 with
     an empty model list and `ollama_offline: true` rather than a 502, so pages
     that load this on mount don't spam the console with 502 errors. Real
@@ -255,10 +299,14 @@ def list_models():
     models_data = get_available_ollama_models(use_cache=True, force_refresh=force_refresh)
     if isinstance(models_data, dict) and models_data.get("error"):
         if models_data.get("offline"):
-            return success_response({"models": [], "ollama_offline": True}, "Ollama offline")
+            return success_response({"models": [], "decision_models": [], "ollama_offline": True},
+                                    "Ollama offline")
         return error_response(models_data["error"], 502, "OLLAMA_ERROR")
     logger.info(f"Returning {len(models_data)} available models from Ollama.")
-    return success_response({"models": models_data}, "Models retrieved")
+    return success_response(
+        {"models": models_data, "decision_models": get_available_decision_models()},
+        "Models retrieved",
+    )
 
 
 @model_bp.route("/loaded", methods=["GET"])
@@ -680,11 +728,12 @@ def set_embedding_model():
     """Switch the active embedding model at runtime.
 
     Reinitializes the EmbeddingRouter singleton and the LlamaIndex embed model
-    in app config. If the new model's vector width differs from the previous
-    one the existing index is unusable: the JSON store is deleted (simple
-    backend) and the in-memory index is reset so pgvector binds a fresh table
-    for the new width. Either way the caller must re-index. Same width keeps
-    the index.
+    in app config. A different model makes the existing index unusable, whatever
+    its width: two models' vectors are not comparable even when they have the
+    same length. The JSON store is deleted (simple backend), the in-memory index
+    is reset so pgvector binds the table for the new width, the tables of that
+    width are emptied, and every document that was indexed is queued to be
+    indexed again with the new model.
     """
     data = request.get_json() or {}
     model_name = data.get("model")
@@ -715,9 +764,11 @@ def set_embedding_model():
         embed_dim = len(test_vec)
         logger.info(f"Embedding model '{model_name}' produces {embed_dim}-dim vectors")
 
-        # Read the outgoing model's width BEFORE anything below replaces it in
-        # app config; reading it afterwards compares the new model with itself.
+        # Read the outgoing model and its width BEFORE anything below replaces
+        # them; reading them afterwards compares the new model with itself.
         prev_dim = _embed_dim_of(current_app.config.get("LLAMA_INDEX_EMBED_MODEL"))
+        from backend.config import get_active_embedding_model
+        prev_model = get_active_embedding_model()
 
         # Save the choice first: other processes follow it, and the router's
         # clients rebuild from it on their next call.
@@ -750,11 +801,14 @@ def set_embedding_model():
         except Exception:
             pass
 
-        # Models with the same width are interchangeable without reindexing.
         # An unknown previous width is treated as changed: keeping an index of
         # unknown width would be the mixed-dimension store this guards against.
         dimension_changed = prev_dim is None or prev_dim != embed_dim
-        if dimension_changed:
+        model_changed = prev_model != model_name
+        index_cleared = dimension_changed or model_changed
+        requeued = {"queued": 0, "pending": 0}
+        not_rebuilt = []
+        if index_cleared:
             try:
                 import os
                 storage_dir = current_app.config.get("STORAGE_DIR",
@@ -776,17 +830,43 @@ def set_embedding_model():
                 import backend.services.indexing_service as idx_svc
                 idx_svc.index = None
                 idx_svc.storage_context = None
-            except Exception:
-                pass
-            logger.info(f"Embedding dimension changed {prev_dim} → {embed_dim}: index reset, re-index required")
+                current_app.config.pop("INDEX_CACHE", None)
+                # What the new index will not have until someone rebuilds it:
+                # text that came from no document (corpus summaries, repository
+                # summaries, entities), counted in the outgoing model's tables.
+                not_rebuilt = idx_svc.rows_not_rebuilt(prev_dim or embed_dim)
+                # The tables of the new width hold the old model's rows on a
+                # same-width switch, or an earlier model's on a switch back;
+                # either would be searched with the new model.
+                idx_svc.empty_vector_tables(embed_dim)
+                idx_svc._record_index_embedding_model()
+            except Exception as clear_err:
+                logger.warning(f"Failed to clear the old model's vectors: {clear_err}")
+            try:
+                # Every document that belongs in the index, failed and waiting
+                # ones included, not only those INDEXED a moment ago.
+                from backend.api.indexing_api import requeue_documents_for_new_index
+                requeued = requeue_documents_for_new_index()
+            except Exception as queue_err:
+                logger.warning(f"Could not queue documents for re-indexing: {queue_err}")
+            logger.info(
+                f"Embedding model changed {prev_model} ({prev_dim}d) → {model_name} ({embed_dim}d): "
+                f"index cleared, {requeued['queued']} document(s) queued, {requeued['pending']} left pending"
+            )
         else:
-            logger.info(f"Embedding dimension unchanged ({embed_dim}d) — keeping existing index")
+            logger.info(f"Embedding model unchanged ({model_name}, {embed_dim}d) — keeping existing index")
 
         return success_response({
             "model": model_name,
             "dimensions": embed_dim,
             "previous_dimensions": prev_dim,
-            "index_cleared": dimension_changed,
+            "previous_model": prev_model,
+            "index_cleared": index_cleared,
+            "reindex_queued": requeued["queued"],
+            "reindex_pending": requeued["pending"],
+            "reindex_by_status": requeued.get("by_status", {}),
+            # Not rebuilt by the re-index: each kind, its row count and how to rebuild it.
+            "not_rebuilt": not_rebuilt,
         }, f"Embedding model switched to {model_name}")
 
     except Exception as e:
@@ -1216,8 +1296,14 @@ def set_current_model():
     new_model_name = data["model"]
     logger.info(f"Starting async model switch to: {new_model_name}")
 
-    # Quick validation using cached model list (avoids slow re-fetch)
-    available_models_data = get_available_ollama_models(use_cache=True)
+    # A fresh list (one local /api/tags call): a cached one would let a switch
+    # start against an Ollama that stopped since, and fail in the background.
+    available_models_data = get_available_ollama_models(use_cache=False)
+    if isinstance(available_models_data, dict) and available_models_data.get("offline"):
+        return jsonify({
+            "error": "Ollama isn't running. Start it from the chat model list in Settings, or in Plugins → Ollama.",
+            "code": "ollama_offline",
+        }), 503
     if isinstance(available_models_data, dict) and available_models_data.get("error"):
         return jsonify({"error": f"Cannot verify model: {available_models_data['error']}"}), 500
 

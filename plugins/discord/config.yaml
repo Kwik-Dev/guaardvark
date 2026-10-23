@@ -4,7 +4,7 @@ bot:
   guild_id: "1540529554991354017"
 
 api:
-  base_url: "http://localhost:${FLASK_PORT:-5002}/api"
+  base_url: "http://localhost:${FLASK_PORT:-5000}/api"
   timeout: 120
   health_check_interval: 60
 
@@ -34,7 +34,7 @@ voice:
   router_url: "http://localhost:8081"  # only used when backend: pi-omni
   silence_threshold_ms: 1500
   max_listen_duration_s: 30
-  tts_voice: "ryan"  # Guaardvark/Piper voice
+  tts_voice: "ryan"  # a Piper voice id such as "libritts"; empty uses Guaardvark's default
   router_tts_voice: "af_heart"  # pi-omni/Kokoro voice
   join_greeting: ""  # spoken welcome on /voice join (empty = silent)
   interrupt_on_speech: true  # barge-in not implemented yet (reserved)

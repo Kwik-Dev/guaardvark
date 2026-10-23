@@ -35,6 +35,12 @@ export const COGVIDEOX_DURATION_PRESETS = {
   long: { label: "Long", description: "~6 seconds", duration_frames: 49, fps: 8 },
 };
 
+/** CogVideoX 1.5 I2V renders its card's 5 s length at 16fps; the card's 10 s
+ *  (161 frames) is not offered until it has been measured on a 16 GB card. */
+export const COGVIDEOX15_DURATION_PRESETS = {
+  short: { label: "5 s", description: "5 seconds", duration_frames: 81, fps: 16 },
+};
+
 /** Wan 2.2 14B (T2V / I2V) is 16fps-native. */
 export const WAN_DURATION_PRESETS = {
   short: { label: "Short", description: "~2 seconds", duration_frames: 33, fps: 16 },
@@ -171,7 +177,7 @@ export const MODEL_OPTIONS = {
   },
   "wan22-14b": {
     label: "Wan 2.2 14B (GGUF Q5)",
-    description: "Best quality, 5s videos (~11GB VRAM)",
+    description: "Best quality, 5s videos (16GB VRAM)",
     type: "wan",
     nativeFps: 16,
     maxFrames: 81,
@@ -190,7 +196,7 @@ export const MODEL_OPTIONS = {
   },
   "wan22-14b-i2v": {
     label: "Wan 2.2 14B I2V (GGUF Q5)",
-    description: "Top-tier image-to-video, 5s clips (~11GB VRAM)",
+    description: "Top-tier image-to-video, 5s clips (16GB VRAM)",
     type: "wan",
     nativeFps: 16,
     maxFrames: 81,
@@ -221,12 +227,18 @@ export const MODEL_OPTIONS = {
     dimensionAlignment: 16,
   },
   "cogvideox-5b-i2v": {
-    label: "CogVideoX 5B I2V",
-    description: "Image-to-video, 6s (~16GB VRAM)",
+    label: "CogVideoX 1.5 5B I2V",
+    description: "Image-to-video, 5 s at 1360x768 (~16GB VRAM)",
     type: "cogvideox",
-    nativeFps: 8,
-    maxFrames: 49,
-    resolution: [720, 480],
+    // CogVideoX 1.5's card: short side 768, long side up to 1360, 16fps,
+    // 5 s. The registry entry carries the same numbers.
+    nativeFps: 16,
+    maxFrames: 81,
+    resolution: [1360, 768],
+    canvas: { shortSide: 768, maxLongSide: 1360 },
+    maxPixelArea: 1360 * 768,
+    aspectRatios: ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2"],
+    durationPresets: COGVIDEOX15_DURATION_PRESETS,
     defaultSteps: 50,
     minSteps: 50,
     supportsT2V: false,
@@ -303,6 +315,24 @@ export const MODEL_OPTIONS = {
     dimensionAlignment: 32,
     maxPixelArea: 768 * 1344,
   },
+  // The reference build takes no text-only or first-frame request: it is
+  // offered under the References input, from capabilities.modes "ref2v".
+  "minimax-h3-ref2va-int8": {
+    label: "MiniMax H3 Reference Int8 (16GB)",
+    description: "MiniMax H3 reference-to-video: up to 9 pictures, 3 clips and 3 audio files lock identity, motion and voice, or edit and continue a clip. 24fps, native audio.",
+    type: "minimax",
+    nativeFps: 24,
+    maxFrames: 362,
+    resolution: [864, 480],
+    aspectRatios: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
+    defaultSteps: 20,
+    minSteps: 20,
+    speedProfiles: ["standard", "turbo-4"],
+    supportsT2V: false,
+    supportsI2V: false,
+    dimensionAlignment: 32,
+    maxPixelArea: 768 * 1344,
+  },
   "minimax-h3-bf16": {
     label: "MiniMax H3 BF16 (48GB+)",
     description: "MiniMax H3 at full precision with the bf16 encoder (~110GB of weights). Workstation cards; unmeasured.",
@@ -321,7 +351,7 @@ export const MODEL_OPTIONS = {
   },
   "hunyuan-t2v": {
     label: "HunyuanVideo 13B T2V (GGUF Q5)",
-    description: "Tencent HunyuanVideo — cinematic motion, no content filter. 24fps, ~3s clips (~11GB VRAM)",
+    description: "Tencent HunyuanVideo — cinematic motion, no content filter. 24fps, ~3s clips (16GB VRAM)",
     type: "hunyuan",
     nativeFps: 24,
     maxFrames: 129,
@@ -335,7 +365,7 @@ export const MODEL_OPTIONS = {
   },
   "hunyuan-i2v": {
     label: "HunyuanVideo 13B I2V (GGUF Q5)",
-    description: "HunyuanVideo image-to-video (v2) — follows the start frame closely. 24fps, ~3s (~11GB VRAM)",
+    description: "HunyuanVideo image-to-video (v2) — follows the start frame closely. 24fps, ~3s (16GB VRAM)",
     type: "hunyuan",
     nativeFps: 24,
     maxFrames: 129,
@@ -413,6 +443,7 @@ export const withDurationTiers = (presets, registryMeta) => {
 /** Duration presets for a model. The preset fps must match the model's native
  *  rate — muxing 24fps-native frames at 16fps plays every clip in slow motion. */
 export const durationPresetsFor = (model, registryMeta) => {
+  if (MODEL_OPTIONS[model]?.durationPresets) return MODEL_OPTIONS[model].durationPresets;
   if (isMinimaxModel(model, registryMeta)) return withDurationTiers(MINIMAX_DURATION_PRESETS, registryMeta);
   if (isHunyuanModel(model, registryMeta)) return HUNYUAN_DURATION_PRESETS;
   if (isLtxModel(model, registryMeta)) return LTX_DURATION_PRESETS;
@@ -440,6 +471,27 @@ export const aspectRatiosFor = (model, registryMeta) => {
 export const resolveAspectRatio = (model, aspectRatio, registryMeta) => {
   const allowed = aspectRatiosFor(model, registryMeta);
   return allowed[aspectRatio] ? aspectRatio : Object.keys(allowed)[0];
+};
+
+/** Largest seed the box accepts: the range the backend draws random seeds from. */
+export const MAX_SEED = 2 ** 31 - 1;
+
+/** The Seed box's text as a seed, or null for a new random seed per clip. */
+export const parseSeed = (text) => {
+  const t = String(text ?? "").trim();
+  if (!/^\d+$/.test(t)) return null;
+  const n = Number(t);
+  return n <= MAX_SEED ? n : null;
+};
+
+/** The size on a model's declared canvas: the short side fixed, the long side
+ *  following the aspect up to its cap, snapped to the model's grid. */
+export const canvasDimensions = (canvas, ratio, align = 16) => {
+  const { shortSide, maxLongSide } = canvas;
+  const wide = ratio >= 1 ? ratio : 1 / ratio;
+  let longSide = Math.max(shortSide, Math.round(Math.min(shortSide * wide, maxLongSide) / align) * align);
+  if (longSide > maxLongSide) longSide = Math.floor(maxLongSide / align) * align;
+  return ratio >= 1 ? { width: longSide, height: shortSide } : { width: shortSide, height: longSide };
 };
 
 export const snapDimensions = (width, height, model, registryMeta) => {

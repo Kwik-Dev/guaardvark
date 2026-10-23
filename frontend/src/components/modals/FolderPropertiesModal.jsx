@@ -3,6 +3,7 @@
 
 import React, { useState, useEffect } from 'react';
 import {
+  Alert,
   Dialog,
   DialogTitle,
   DialogContent,
@@ -27,7 +28,12 @@ import {
 } from '@mui/icons-material';
 import * as apiService from '../../api';
 import axios from 'axios';
+import { formatUiError } from '../../utils/uiError';
+import ConfirmActionDialog from '../settings/ui/ConfirmActionDialog';
 import CollapsibleAlert from "../common/CollapsibleAlert";
+
+// The server's reason from an axios error, else the error's own text.
+const reasonOf = (err) => formatUiError(err?.response?.data) || formatUiError(err) || 'the request failed';
 
 const API_BASE = '/api/files';
 
@@ -47,6 +53,9 @@ const FolderPropertiesModal = ({
   const [isRepository, setIsRepository] = useState(false);
   const [togglingRepo, setTogglingRepo] = useState(false);
   const [parentProps, setParentProps] = useState(null); // Inherited properties from parent
+  // A failed load, save, delete or repository toggle, said in the dialog.
+  const [failure, setFailure] = useState(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const [formData, setFormData] = useState({
     client_id: null,
@@ -137,8 +146,12 @@ const FolderPropertiesModal = ({
       setClients(Array.isArray(clientsList) ? clientsList : []);
       setProjects(Array.isArray(projectsList) ? projectsList : []);
       setWebsites(Array.isArray(websitesList) ? websitesList : []);
+      // These services answer { error } instead of throwing.
+      const refused = [clientsList, projectsList, websitesList].find((l) => !Array.isArray(l) && l?.error);
+      if (refused) setFailure(`Clients, projects or websites could not be loaded: ${formatUiError(refused.error)}.`);
     } catch (err) {
       console.error('Failed to load entities:', err);
+      setFailure(`Clients, projects or websites could not be loaded: ${reasonOf(err)}.`);
     } finally {
       setLoading(false);
     }
@@ -148,6 +161,7 @@ const FolderPropertiesModal = ({
     if (!folderData) return;
 
     setSaving(true);
+    setFailure(null);
     try {
       const payload = {
         client_id: formData.client_id,
@@ -161,6 +175,7 @@ const FolderPropertiesModal = ({
       await onSave(folderData.id, payload);
     } catch (err) {
       console.error('Failed to save folder properties:', err);
+      setFailure(`The folder properties were not saved: ${reasonOf(err)}.`);
     } finally {
       setSaving(false);
     }
@@ -168,32 +183,35 @@ const FolderPropertiesModal = ({
 
   const handleDelete = async () => {
     if (!folderData) return;
-    
-    if (confirm(`Delete folder "${folderData?.name}" and all its contents?`)) {
-      setDeleting(true);
-      const fid = folderData.id;
+    setConfirmingDelete(false);
+    setDeleting(true);
+    setFailure(null);
+    const fid = folderData.id;
+    try {
+      // Optimistic event for instant UI remove (parent will also close + refresh)
       try {
-        // Optimistic event for instant UI remove (parent will also close + refresh)
-        try {
-          window.dispatchEvent(new CustomEvent('documents-items-removed', { detail: { keys: [`folder-${fid}`], contextKey: 'folder-properties' } }));
-        } catch (_) {
-          // Ignore event dispatch failure
-        }
-        await onDelete(fid);
-      } finally {
-        setDeleting(false);
+        window.dispatchEvent(new CustomEvent('documents-items-removed', { detail: { keys: [`folder-${fid}`], contextKey: 'folder-properties' } }));
+      } catch (_) {
+        // Ignore event dispatch failure
       }
+      await onDelete(fid);
+    } catch (err) {
+      setFailure(`The folder was not deleted: ${reasonOf(err)}.`);
+    } finally {
+      setDeleting(false);
     }
   };
 
   const handleToggleRepository = async () => {
     if (!folderData) return;
     setTogglingRepo(true);
+    setFailure(null);
     try {
       await axios.put(`${API_BASE}/folder/${folderData.id}/toggle-repo`);
       setIsRepository(prev => !prev);
     } catch (err) {
       console.error('Failed to toggle repository status:', err);
+      setFailure(`The repository setting was not changed: ${reasonOf(err)}.`);
     } finally {
       setTogglingRepo(false);
     }
@@ -218,6 +236,11 @@ const FolderPropertiesModal = ({
       </DialogTitle>
 
       <DialogContent dividers>
+        {failure && (
+          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setFailure(null)}>
+            {failure}
+          </Alert>
+        )}
         {/* Folder Information */}
         <Box sx={{ mb: 3 }}>
           <Typography variant="subtitle2" color="text.secondary" gutterBottom>
@@ -409,7 +432,7 @@ const FolderPropertiesModal = ({
           {onDelete && (
             <Button
               startIcon={deleting ? <CircularProgress size={16} /> : <DeleteIcon />}
-              onClick={handleDelete}
+              onClick={() => setConfirmingDelete(true)}
               color="error"
               variant="outlined"
               size="small"
@@ -431,6 +454,14 @@ const FolderPropertiesModal = ({
           </Button>
         </Box>
       </DialogActions>
+      <ConfirmActionDialog
+        open={confirmingDelete}
+        title="Delete this folder"
+        description={`"${folderData?.name}" and everything in it are deleted.`}
+        confirmLabel="Delete folder"
+        onConfirm={handleDelete}
+        onClose={() => setConfirmingDelete(false)}
+      />
     </Dialog>
   );
 };

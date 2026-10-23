@@ -249,6 +249,91 @@ def _queue_stopped(doc_id, job_id, dispatched, total, exc):
     }), 503
 
 
+def _dispatch_document(progress_system, index_document_task, doc):
+    """Queue one document of a batch under its own progress record.
+
+    The record is created here, in the web process, because the Activity list
+    reads this process's records and the Redis relay only updates ones it
+    holds; the worker continues it under the same id. The batch's own record
+    only counts what was queued. Returns the TaskNotStarted that stopped the
+    dispatch, or None.
+    """
+    job_id = progress_system.create_process(
+        ProcessType.INDEXING,
+        f"Indexing document {doc.id}: {doc.filename}",
+        {"document_id": doc.id},
+    )
+    doc.indexing_job_id = job_id
+    db.session.commit()
+    try:
+        index_document_task.apply_async((doc.id, job_id), queue='indexing')
+    except TaskNotStarted as e:
+        mark_progress_not_started(job_id, e)
+        return e
+    return None
+
+
+# Documents an emptied index must take again: the indexed ones, those being
+# indexed, and those whose last run failed (their vectors were kept until a
+# successful run, and an index rebuilt from scratch should try them again).
+# PENDING ones are already waiting: the resume beat (GUAARDVARK_INDEX_AUTO_RESUME,
+# on by default) indexes them with the new model, and queuing them here would
+# override an install that holds its backlog. NOT_INDEXED, STORED and
+# STORAGE_FAILED rows were never meant to be searchable.
+REBUILD_STATUSES = ("INDEXED", "INDEXING", "ERROR")
+
+
+def requeue_documents_for_new_index() -> dict:
+    """requeue_indexed_documents for every document in REBUILD_STATUSES, after
+    the vector tables were emptied (an embedding model switch). Also returns
+    ``by_status``: how many of each status were taken."""
+    return _requeue(REBUILD_STATUSES)
+
+
+def requeue_indexed_documents() -> dict:
+    """Index every INDEXED document again, after its vectors were cleared.
+
+    For an embedding model change: the documents that were searchable before
+    are queued straight away rather than left PENDING, where the unhurried
+    resume task would reach them behind any backlog. While indexing is paused,
+    or once the queue refuses a task, the rest are left PENDING for it (the
+    refused one ERROR, as in a bulk run). Returns {"queued": n, "pending": n},
+    where pending counts every document not queued.
+    """
+    out = _requeue(("INDEXED",))
+    return {"queued": out["queued"], "pending": out["pending"]}
+
+
+def _requeue(statuses) -> dict:
+    """Queue every document whose status is in ``statuses`` (see
+    requeue_indexed_documents); adds ``by_status``."""
+    docs = (DBDocument.query.filter(DBDocument.index_status.in_(list(statuses)))
+            .order_by(DBDocument.id).all())
+    by_status: dict = {}
+    for doc in docs:
+        by_status[doc.index_status] = by_status.get(doc.index_status, 0) + 1
+    if not docs:
+        return {"queued": 0, "pending": 0, "by_status": by_status}
+    progress_system = get_unified_progress()
+    from backend.celery_tasks_isolated import index_document_task
+    queued = 0
+    stopped = _get_indexing_paused_setting()
+    for doc in docs:
+        if not stopped:
+            update_document_status(doc.id, "INDEXING")
+            refused = _dispatch_document(progress_system, index_document_task, doc)
+            if refused is None:
+                queued += 1
+                continue
+            # As in a bulk run: nothing is indexing it, and Resume pending
+            # indexing re-queues ERROR rows once the queue is back.
+            update_document_status(doc.id, "ERROR", str(refused))
+            stopped = True
+            continue
+        update_document_status(doc.id, "PENDING")
+    return {"queued": queued, "pending": len(docs) - queued, "by_status": by_status}
+
+
 def _get_all_document_ids_recursive(folder_id):
     """Get all document IDs from a folder and all its subfolders recursively."""
     doc_ids = [d.id for d in DBDocument.query.filter_by(folder_id=folder_id).all()]
@@ -340,13 +425,13 @@ def trigger_bulk_indexing():
                     logger.debug(f"Hash check failed for doc {doc_id}, will re-index: {e}")
 
             update_document_status(doc.id, "INDEXING")
-            try:
-                index_document_task.apply_async((doc.id, job_id), queue='indexing')
-            except TaskNotStarted as e:
-                return _queue_stopped(doc.id, job_id, dispatched, len(all_doc_ids), e)
+            stopped = _dispatch_document(progress_system, index_document_task, doc)
+            if stopped:
+                return _queue_stopped(doc.id, job_id, dispatched, len(all_doc_ids), stopped)
             dispatched += 1
 
-        logger.info(f"Bulk indexing: dispatched {dispatched} tasks, skipped {skipped} unchanged, under job {job_id}")
+        progress_system.complete_process(job_id, f"Queued {dispatched} for indexing, {skipped} unchanged")
+        logger.info(f"Bulk indexing: dispatched {dispatched} tasks, skipped {skipped} unchanged (batch job {job_id})")
 
         # Auto-trigger repository analysis for folders with enough code files
         from backend.utils.code_chunker import CODE_LANGUAGE_MAP
@@ -464,13 +549,13 @@ def resume_pending_indexing():
             if not doc:
                 continue
             update_document_status(doc.id, "INDEXING")
-            try:
-                index_document_task.apply_async((doc.id, job_id), queue='indexing')
-            except TaskNotStarted as e:
-                return _queue_stopped(doc.id, job_id, dispatched, len(doc_ids), e)
+            stopped = _dispatch_document(progress_system, index_document_task, doc)
+            if stopped:
+                return _queue_stopped(doc.id, job_id, dispatched, len(doc_ids), stopped)
             dispatched += 1
 
-        logger.info(f"Resume pending: dispatched {dispatched} indexing tasks under job {job_id}")
+        progress_system.complete_process(job_id, f"Queued {dispatched} for indexing")
+        logger.info(f"Resume pending: dispatched {dispatched} indexing tasks (batch job {job_id})")
 
         return jsonify({
             "message": f"Resumed indexing for {dispatched} pending/error documents.",

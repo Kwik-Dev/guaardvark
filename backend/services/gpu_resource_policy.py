@@ -193,6 +193,7 @@ def evict_ollama_models() -> bool:
 
 
 _AUDIO_FOUNDRY_URL = "http://127.0.0.1:8206"
+_UPSCALING_URL = "http://127.0.0.1:8202"
 
 
 def evict_audio_foundry_backends() -> list:
@@ -228,11 +229,54 @@ def evict_audio_foundry_backends() -> list:
             except (requests.RequestException, ValueError) as e:
                 log.warning("audio_foundry evict %s failed (non-fatal): %s", intent, e)
         if unloaded:
-            log.info("Reclaim: audio_foundry unloaded %s", ", ".join(unloaded))
+            # WARNING, as for the upscaler: backend.log keeps WARNING and up
+            # unless BACKEND_LOG_LEVEL lowers it.
+            log.warning("Reclaim: audio_foundry unloaded %s to make room on the GPU", ", ".join(unloaded))
         return unloaded
     except Exception as e:  # noqa: BLE001
         log.warning("audio_foundry eviction failed (non-fatal): %s", e)
         return []
+
+
+def evict_upscaler_model(keep: Optional[str] = None) -> Optional[str]:
+    """Ask the upscaling service to unload its model. Never raises.
+
+    The service holds its model and CUDA context in its own process, where no
+    other reclaim reaches: a single image left its whole peak on the card (2140
+    MiB with 4x-UltraSharp at 1024x1024, measured 2026-10-12). Its /evict
+    refuses while a job runs or waits, so a live upscale is never cut off.
+    ``keep`` names the model an upscale about to run will use; that one stays.
+    Returns the model unloaded, or None.
+    """
+    try:
+        import requests
+
+        from backend.utils.sidecar_guard import read_internal_token
+
+        try:
+            from backend.api.upscaling_api import UPSCALING_URL as base
+        except Exception:  # noqa: BLE001
+            base = _UPSCALING_URL
+        token = read_internal_token("upscaling")
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        try:
+            status = requests.get(f"{base}/status", headers=headers, timeout=(1.0, 5.0)).json()
+        except (requests.RequestException, ValueError):
+            return None  # service not running
+        loaded = status.get("model_loaded")
+        if not loaded or (keep and loaded == keep) or status.get("busy"):
+            return None
+        resp = requests.post(f"{base}/evict", headers=headers, timeout=(1.0, 30.0))
+        if resp.ok and resp.json().get("unloaded"):
+            # WARNING, not INFO: backend.log keeps WARNING and up unless
+            # BACKEND_LOG_LEVEL lowers it, and unloading another service's
+            # model is the line someone looks for when an upscale reloads.
+            log.warning("Reclaim: upscaler unloaded %s to make room on the GPU", loaded)
+            return loaded
+        return None
+    except Exception as e:  # noqa: BLE001
+        log.warning("upscaler eviction failed (non-fatal): %s", e)
+        return None
 
 
 def reclaim_in_process_vram(needed_mb: int = 0) -> int:
@@ -281,6 +325,18 @@ def reclaim_in_process_vram(needed_mb: int = 0) -> int:
 
 _RECLAIM_POLL_S = 0.5
 _RECLAIM_POLLS = 34  # with the 3 s settle: up to 20 s for a freed model to leave the card
+_REEVICT_EVERY = 4   # polls between checks for an Ollama model that loaded while a job waits
+
+
+def _ollama_has_loaded_model() -> bool:
+    """True when Ollama reports a loaded model. False when it is empty, down or slow."""
+    try:
+        import requests
+        from backend.config import OLLAMA_BASE_URL
+        r = requests.get(f"{OLLAMA_BASE_URL}/api/ps", timeout=2)
+        return bool(r.ok and r.json().get("models"))
+    except Exception:  # noqa: BLE001 — a probe; the fit check decides
+        return False
 
 
 def vram_holders_text(*, limit: int = 6) -> str:
@@ -311,19 +367,26 @@ def vram_holders_text(*, limit: int = 6) -> str:
         return "unavailable"
 
 
-def _wait_until_fits(vram_estimate_mb: int, reserve_mb: int, op_id: str) -> None:
+def _wait_until_fits(vram_estimate_mb: int, reserve_mb: int, op_id: str,
+                     evict_ollama: bool = False) -> None:
     """ComfyUI answers /free before the memory is actually back. After the
     fixed settle, poll the fit up to _RECLAIM_POLLS times instead of trusting
     the settle alone: a 12 GB FLUX unload took longer than 3 s, so a chat edit
     that followed an identity render was refused with "try again shortly"
-    every time. Returns as soon as the job fits; the caller re-checks anyway."""
+    every time. Returns as soon as the job fits; the caller re-checks anyway.
+
+    With ``evict_ollama``, a model Ollama loads during the wait is evicted
+    again, and only then: a Celery worker's first task builds the app, and its
+    start-up asks Ollama for an embedding model inside this very window."""
     time.sleep(_RECLAIM_SETTLE_S)
-    for _ in range(_RECLAIM_POLLS):
+    for poll in range(_RECLAIM_POLLS):
         try:
             if fit_verdict(vram_estimate_mb, reserve_mb=reserve_mb).ok:
                 return
         except Exception:  # noqa: BLE001 — the real check follows
             return
+        if evict_ollama and poll % _REEVICT_EVERY == _REEVICT_EVERY - 1 and _ollama_has_loaded_model():
+            evict_ollama_models()
         time.sleep(_RECLAIM_POLL_S)
     waited = _RECLAIM_SETTLE_S + _RECLAIM_POLLS * _RECLAIM_POLL_S
     fit = None
@@ -346,14 +409,19 @@ def reclaim_gpu(
     free_comfyui: bool = False,
     in_process: bool = False,
     needed_mb: int = 0,
+    upscale_model: Optional[str] = None,
 ) -> None:
-    """Run the requested VRAM reclaims before a render uses the card. Best-effort."""
+    """Run the requested VRAM reclaims before a render uses the card. Best-effort.
+
+    ``upscale_model`` is the model an upscale about to run will use; the
+    upscaling service keeps it loaded."""
     if evict_ollama:
         evict_ollama_models()
     if free_comfyui:
         free_comfyui_vram()
     if in_process:
         evict_audio_foundry_backends()
+        evict_upscaler_model(keep=upscale_model)
         reclaim_in_process_vram(needed_mb)
 
 
@@ -747,6 +815,21 @@ def _load_release(weight) -> None:
         log.warning("GlobalLoadGate release failed (%s)", e)
 
 
+def _noting_wait(admission, on_wait):
+    """``on_wait`` that also records the reason on the job's place in line, so
+    the Activity page says what an admitted job still waits for. With no
+    admission (job order off) it is ``on_wait`` itself."""
+    if admission is None:
+        return on_wait
+
+    def _on_wait(reason):
+        admission.note(reason)
+        if on_wait is not None:
+            on_wait(reason)
+
+    return _on_wait
+
+
 # --- The front door -----------------------------------------------------------
 
 @contextlib.contextmanager
@@ -767,6 +850,7 @@ def gpu_session(
     vram_reserve_mb: int = 0,
     cancel_event=None,
     image_model: Optional[str] = None,
+    upscale_model: Optional[str] = None,
     on_wait=None,
 ) -> Iterator[bool]:
     """Claim the GPU for a unit of work — exclusivity + VRAM reclaim/budget in one place.
@@ -786,10 +870,17 @@ def gpu_session(
 
     An image pipeline kept loaded after a batch is unloaded first, unless
     ``image_model`` names the model it holds (the job will render with it).
+    ``upscale_model`` does the same for the upscaling service's model when the
+    reclaim reaches it.
 
     A refusal raised after the claim releases the gate without its post-release
     cooldown: nothing touched the card. Teardown runs in reverse order and before
     the gate release, so ComfyUI's /free and the lease release precede it.
+
+    With the job order setting on, the claim is admitted by the job arbiter
+    first (job_arbiter.gpu_admission): only the head of the line tries the gate,
+    and a job that would unload Ollama waits while a swarm agent holds a model.
+    With it off the arbiter is not consulted.
 
     With all defaults this is a pure pass-through to the gate (no eviction, no budget),
     so adopting it in one caller never changes another's behavior. Yields the gate's
@@ -803,10 +894,18 @@ def gpu_session(
         yield True
         return
 
+    from backend.services import job_arbiter
     from backend.services.job_operation_gate import GpuBusyError, get_gate
 
     gate = get_gate()
     _slot = slot_id or f"{getattr(kind, 'value', kind)}:{op_id}"
+    # The caller's place in line; None while job order is off.
+    admission_scope = contextlib.ExitStack()
+    admission = admission_scope.enter_context(
+        job_arbiter.gpu_admission(
+            kind, op_id, evicts_ollama=evict_ollama, slot_id=slot_id, polls=(on_busy == "wait"),
+        )
+    )
     acquired = False
     lease_held = False
     heartbeat_stop = None
@@ -850,9 +949,10 @@ def gpu_session(
                 _release_cross_process_lease(_slot)
                 lease_held = False
 
-    with gate.gpu_exclusive(
+    with admission_scope, gate.gpu_exclusive(
         kind, op_id, on_busy=on_busy, wait_timeout=wait_timeout,
-        cancel_event=cancel_event, on_wait=on_wait,
+        cancel_event=cancel_event, on_wait=_noting_wait(admission, on_wait),
+        admit=job_arbiter.admit_callable(admission),
     ) as acq:
         acquired = acq
         if acquired:
@@ -883,13 +983,15 @@ def gpu_session(
                             free_comfyui=free_comfyui,
                             in_process=True,
                             needed_mb=vram_estimate_mb,
+                            upscale_model=upscale_model,
                         )
                         # Every resident answers its eviction before the memory
                         # is actually back: ComfyUI acks /free early, and Ollama's
                         # keep_alive=0 returns before the runner drops its CUDA
                         # context. Waiting only for ComfyUI left the Ollama-only
                         # callers measuring mid-unload and refusing a job that fits.
-                        _wait_until_fits(vram_estimate_mb, vram_reserve_mb, op_id)
+                        _wait_until_fits(vram_estimate_mb, vram_reserve_mb, op_id,
+                                         evict_ollama=evict_ollama)
                     else:
                         log.info("gpu_session(%s): %d MB already fits; skipping eviction", op_id, vram_estimate_mb)
                 elif evict_ollama or free_comfyui:
@@ -919,6 +1021,8 @@ def gpu_session(
                 _session_tls.held = False
                 _teardown()
                 raise
+        if admission is not None:
+            admission.started()
         try:
             yield acquired
             # Clean exit: LOADING -> LOADED so the orchestrator's tracked VRAM
@@ -933,10 +1037,27 @@ def gpu_session(
             if acquired:
                 _session_tls.held = False
                 _teardown()
+            if admission is not None:
+                admission.finished()
 
 
 class GpuWaitStopped(Exception):
     """The person stopped the request while it waited for the GPU."""
+
+
+class RenderStopped(Exception):
+    """The person stopped the request while it rendered.
+
+    Raised by a renderer that was handed a ``should_stop`` callable once that
+    callable answers True. Not a RuntimeError, so the offline generator's OOM
+    recovery ladder never treats a stop as a failure to retry.
+    """
+
+
+def raise_if_stopped(should_stop, where: str) -> None:
+    """Raise ``RenderStopped`` when ``should_stop`` is given and says stop."""
+    if should_stop is not None and should_stop():
+        raise RenderStopped(f"stopped {where}")
 
 
 @contextlib.contextmanager
@@ -961,37 +1082,74 @@ def gpu_session_when_free(
 
     ``on_wait(reason)`` is called before each retry. ``should_stop()`` is
     polled while waiting; True ends the wait with ``GpuWaitStopped``.
-    """
-    from backend.services.job_operation_gate import GpuBusyError, GpuCapacityError
 
-    deadline = time.monotonic() + max(0.0, float(wait_s))
-    backoff = 2.0
-    while True:
-        if should_stop and should_stop():
-            raise GpuWaitStopped("stopped while waiting for the GPU")
-        stack = contextlib.ExitStack()
-        try:
-            held = stack.enter_context(
-                gpu_session(kind, op_id, on_busy="raise", **session_kwargs)
-            )
-        except GpuCapacityError:
-            raise
-        except GpuBusyError as e:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+    With job order on, the whole wait is one place in the job arbiter's line,
+    and the ticket is kept fresh through backoff sleeps so the job does not
+    lose its turn. A refusal that is cheap to ask again (another job is ahead,
+    ``GpuQueuedError``, or the card is held or cooling down) is retried every
+    job_priority_data.POLL_S without growing the backoff, so the head of the
+    line does not sleep through the release it is waiting for. A refusal over
+    free VRAM keeps the backoff: each try of that kind may evict residents.
+    """
+    from backend.services import job_arbiter
+    from backend.services.job_operation_gate import (
+        GpuBusyError, GpuCapacityError, GpuQueuedError, gpu_holder_label,
+    )
+    from backend.services.job_priority_data import POLL_S
+
+    # Nested inside a session this thread already holds, the inner gpu_session
+    # is a pass-through, so this wait never queues and takes no place in line.
+    if getattr(_session_tls, "held", False):
+        admission_cm = contextlib.nullcontext(None)
+    else:
+        # The whole wait is one place in line; giving up leaves it.
+        admission_cm = job_arbiter.gpu_admission(
+            kind, op_id, evicts_ollama=bool(session_kwargs.get("evict_ollama")),
+            slot_id=session_kwargs.get("slot_id"), keep_on_refusal=False,
+        )
+    with admission_cm as admission:
+        deadline = time.monotonic() + max(0.0, float(wait_s))
+        backoff = 2.0
+        while True:
+            if should_stop and should_stop():
+                raise GpuWaitStopped("stopped while waiting for the GPU")
+            stack = contextlib.ExitStack()
+            try:
+                held = stack.enter_context(
+                    gpu_session(kind, op_id, on_busy="raise", **session_kwargs)
+                )
+            except GpuCapacityError:
                 raise
-            if on_wait:
-                try:
-                    on_wait(str(e))
-                except Exception:  # noqa: BLE001 — a status line must not end the wait
-                    pass
-            end = time.monotonic() + min(backoff, remaining)
-            while time.monotonic() < end:
-                if should_stop and should_stop():
-                    raise GpuWaitStopped("stopped while waiting for the GPU") from e
-                time.sleep(max(0.0, min(0.5, end - time.monotonic())))
-            backoff = min(15.0, backoff * 1.5)
-            continue
-        with stack:
-            yield held
-        return
+            except GpuBusyError as e:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                if on_wait:
+                    try:
+                        on_wait(str(e))
+                    except Exception:  # noqa: BLE001 — a status line must not end the wait
+                        pass
+                if admission is not None and not isinstance(e, GpuQueuedError):
+                    admission.note(str(e))
+                queued = isinstance(e, GpuQueuedError) or (
+                    admission is not None
+                    and (gpu_holder_label(e) is not None or "cooling down" in str(e))
+                )
+                end = time.monotonic() + min(POLL_S if queued else backoff, remaining)
+                touched = time.monotonic()
+                while time.monotonic() < end:
+                    if should_stop and should_stop():
+                        raise GpuWaitStopped("stopped while waiting for the GPU") from e
+                    time.sleep(max(0.0, min(0.5, end - time.monotonic())))
+                    if admission is not None and time.monotonic() - touched >= POLL_S:
+                        touched = time.monotonic()
+                        try:
+                            admission.touch()
+                        except Exception:  # noqa: BLE001 — a missed touch only risks the turn
+                            pass
+                if not queued:
+                    backoff = min(15.0, backoff * 1.5)
+                continue
+            with stack:
+                yield held
+            return

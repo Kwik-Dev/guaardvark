@@ -123,15 +123,15 @@ const ClosedNotesDrawer = ({ open, onClose, closedNotes, onReopen, onDeleteReque
               <Typography
                 variant="caption"
                 noWrap
-                sx={{ display: "block", color: "text.disabled", pl: 3, mt: 0.25 }}
+                sx={{ display: "block", color: "text.secondary", pl: 3, mt: 0.25 }}
               >
                 {preview}
               </Typography>
             )}
             {note.closedAt && (
               <Box sx={{ display: "flex", alignItems: "center", gap: 0.25, pl: 3, mt: 0.5 }}>
-                <AccessTimeIcon sx={{ fontSize: 11, color: "text.disabled" }} />
-                <Typography variant="caption" color="text.disabled" sx={{ fontSize: "0.7rem" }}>
+                <AccessTimeIcon sx={{ fontSize: 11, color: "text.secondary" }} />
+                <Typography variant="caption" color="text.secondary" sx={{ fontSize: "0.7rem" }}>
                   {formatRelative(note.closedAt)}
                 </Typography>
               </Box>
@@ -153,7 +153,7 @@ const ClosedNotesDrawer = ({ open, onClose, closedNotes, onReopen, onDeleteReque
             pt: 1.5,
             pb: 0.5,
             display: "block",
-            color: "text.disabled",
+            color: "text.secondary",
             letterSpacing: 1,
             fontSize: "0.65rem",
           }}
@@ -201,7 +201,7 @@ const ClosedNotesDrawer = ({ open, onClose, closedNotes, onReopen, onDeleteReque
       </Box>
       <List sx={{ flex: 1, overflow: "auto", pt: 0 }}>
         {filtered.length === 0 ? (
-          <Typography variant="body2" color="text.disabled" sx={{ px: 2.5, pt: 2 }}>
+          <Typography variant="body2" color="text.secondary" sx={{ px: 2.5, pt: 2 }}>
             {entries.length === 0 ? "No closed notes" : "No matches"}
           </Typography>
         ) : (

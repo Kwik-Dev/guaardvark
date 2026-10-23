@@ -390,12 +390,16 @@ def execute_agent():
                 agent_tool_registry, llm, max_iterations=agent.max_iterations, agent=agent
             )
             from backend.services.agent_prompt_blocks import user_context_line
+            from backend.utils.display_paths import display_params
             result = executor.execute(message, session_context=user_context_line(context))
 
+            # The reply is read on screen (the Agents page Test dialog), so paths
+            # inside the checkout show as ./data/outputs/... and ones under the
+            # home directory as ~/...; the tools ran, and wrote, with the real paths.
             return jsonify({
                 "success": True,
                 "agent_used": agent.id,
-                "result": {
+                "result": display_params({
                     "final_answer": result.final_answer,
                     "iterations": result.iterations,
                     "success": result.success,
@@ -412,7 +416,7 @@ def execute_agent():
                         }
                         for s in result.steps
                     ]
-                }
+                })
             })
 
         except Exception as exec_error:

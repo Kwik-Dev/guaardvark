@@ -54,6 +54,14 @@ MEMORY_SOURCES = {
 
 MEMORY_STATUSES = {"active", "archived", "wrong"}
 
+# Rows that log an event rather than state something: each occurrence is its
+# own row, so add_memory writes them even when the same text is already saved.
+# The lesson reconciler counts belief_update rows as the sessions that saw an
+# element missing, and each candidate_recipe row is the audit entry of one
+# recipe induction.
+EVENT_MEMORY_TYPES = frozenset({"belief_update"})
+EVENT_MEMORY_SOURCES = frozenset({"candidate_recipe"})
+
 DEFAULT_IMPORTANCE_BY_TYPE = {
     "fact": 0.85,
     "note": 0.80,
@@ -91,6 +99,26 @@ def normalize_memory_source(value: Any, default: str = "manual") -> str:
 def normalize_memory_status(value: Any, default: str = "active") -> str:
     raw = str(value or default).strip().lower()
     return raw if raw in MEMORY_STATUSES else default
+
+
+def is_event_memory(memory_type: Any, source: Any) -> bool:
+    """True for a row that records one occurrence (see EVENT_MEMORY_TYPES)."""
+    return (
+        normalize_memory_type(memory_type) in EVENT_MEMORY_TYPES
+        or normalize_memory_source(source) in EVENT_MEMORY_SOURCES
+    )
+
+
+def normalize_memory_text(text: Any) -> str:
+    """The form two memories are compared in to tell whether they are copies.
+
+    Case-folded, runs of whitespace collapsed to one space, and trailing
+    sentence punctuation (. , ; : !) dropped, so "Prefers  metric units." and
+    "prefers metric units" are the same memory. Anything else, a question mark
+    or a changed word included, makes a different memory.
+    """
+    collapsed = " ".join(str(text or "").casefold().split())
+    return collapsed.rstrip(".,;:! ")
 
 
 def normalize_tags(tags: Any) -> list[str]:

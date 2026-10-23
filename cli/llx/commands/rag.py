@@ -115,22 +115,15 @@ def rag_entities(
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
-    """List extracted entities from the RAG knowledge graph."""
-    server = server or get_global_server()
+    """Not available: Guaardvark does not build an entity graph from your documents."""
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
-    try:
-        output.print_error(
-            "Guaardvark does not build an entity graph from your documents, so there is nothing "
-            "to list. `guaardvark rag status` shows what is indexed.", code="NOT_AVAILABLE")
-        raise typer.Exit(1)
-
-    except LlxConnectionError as e:
-        output.print_error(str(e), code="CONNECTION_ERROR")
-        raise typer.Exit(1)
-    except LlxError as e:
-        output.print_error(e.message, code="API_ERROR")
-        raise typer.Exit(1)
+    message = ("Not available: Guaardvark does not build an entity graph from your documents, so "
+               "there is nothing to list. `guaardvark rag status` shows what is indexed.")
+    if json_out or output.is_pipe():
+        output.print_json({"status": "success", "data": {"available": False, "entities": [], "message": message}})
+        return
+    console.print(f"[llx.dim]{message}[/llx.dim]")
 
 
 def _score(value) -> str:

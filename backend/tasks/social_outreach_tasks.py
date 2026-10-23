@@ -1,12 +1,11 @@
 """
 Celery tasks for the social outreach loop.
 
-Three task types:
-  social_outreach_reddit  — discover + draft + (maybe) post on a subreddit
-  social_outreach_share   — submit a link-post to a subreddit
-  social_outreach_discord — celery-driven discord pass (rarely used; the cog
-                            polls itself, this is here so the unified scheduler
-                            can trigger an on-demand pass)
+The loops scout threads and draft replies and link posts; every draft waits
+for a person's approval, and nothing here posts on a schedule.
+post_watched_draft posts one approved Reddit, YouTube or Facebook draft when a
+person starts it with the Agent Screen open; the Discord bot sends approved
+Discord drafts itself.
 
 Each task wraps the loop in a Flask app context — celery workers don't have one
 by default, and the SQLAlchemy/audit code needs it.
@@ -15,8 +14,7 @@ by default, and the SQLAlchemy/audit code needs it.
 from __future__ import annotations
 
 import logging
-from contextlib import ExitStack
-from typing import Any, Optional
+from typing import Any
 
 from celery import shared_task
 
@@ -197,13 +195,14 @@ def tick_recon_youtube(self) -> dict:
 @shared_task(name="social_outreach.tick_recon_youtube_replies", bind=True)
 def tick_recon_youtube_replies(self) -> dict:
     """Beat tick — scan the channel's own YouTube videos for new replies to
-    Guaardvark's comments. Emits status="candidate" rows with action="reply"
-    that the Content agent drafts a response for, the grader scores, and
-    tick_process_approved_drafts dispatches through post_youtube_reply_via_servo.
+    the account's comments. Emits status="candidate" rows with action="reply"
+    that the Content agent drafts a response for and the grader scores; once
+    approved, a person posts one with post_watched_draft
+    (post_youtube_reply_via_servo).
 
     Read-only: no servo, no posting. Same kill-switch gate as other recon
     ticks. NOT scheduled in celery_app beat until
-    recon._fetch_recent_replies_to_guaardvark is implemented (stub returns []).
+    recon._fetch_recent_replies_to_own_comments is implemented (stub returns []).
     Fire on demand via /run-pass or hand-seed via
     recon.enqueue_youtube_reply_candidate(...).
 
@@ -220,9 +219,9 @@ def tick_recon_youtube_replies(self) -> dict:
 def tick_self_share(self) -> dict:
     """Beat tick — pick next share sub + URL, draft a supervised link post.
 
-    Rotates `reddit.share_urls` (GitHub, channel Shorts, site) via Redis
-    round-robin so successive ticks market different assets. Falls back to
-    `reddit.default_share_url` then persona.SITE_URL / GITHUB_URL.
+    Rotates `reddit.share_urls` via Redis round-robin so successive ticks
+    market different assets. Falls back to `reddit.default_share_url`, then
+    the profile's site; with none of those the tick is skipped.
     """
     skipped = _skip_if_kill_switch_off()
     if skipped:
@@ -233,7 +232,7 @@ def tick_self_share(self) -> dict:
     sub = _next_target("reddit_share", subs)
     if not sub:
         return {"skipped": True, "reason": "no_targets"}
-    from backend.services.social_outreach.persona import GITHUB_URL, SITE_URL
+    from backend.services.social_outreach import profile
     share_urls = [
         u.strip() for u in (reddit.get("share_urls") or [])
         if isinstance(u, str) and u.strip()
@@ -241,290 +240,72 @@ def tick_self_share(self) -> dict:
     if share_urls:
         link_url = _next_target("reddit_share_url", share_urls) or share_urls[0]
     else:
-        link_url = (reddit.get("default_share_url") or "").strip() or GITHUB_URL or SITE_URL
+        link_url = (reddit.get("default_share_url") or "").strip() or profile.site_url()
+    if not link_url:
+        return {"skipped": True, "reason": profile.no_link_reason()}
     from backend.services.social_outreach.self_share import SelfShareLoop
     return _with_app_context(SelfShareLoop().run_one_pass, sub, link_url)
 
 
-# What the approved-drafts tick can post, by action. Comments go to the
-# BiDi posters (Reddit, YouTube, Facebook) or the general agent loop
-# (X/Twitter); only YouTube has a reply poster; a share is a Reddit link post.
-# Platforms are compared lowercased.
-_POSTABLE_PLATFORMS = {
-    "comment": ("reddit", "youtube", "x", "twitter", "facebook"),
-    "reply": ("youtube",),
-    "share": ("reddit",),
-}
-
-
 @shared_task(name="social_outreach.tick_process_approved_drafts", bind=True)
 def tick_process_approved_drafts(self) -> dict:
-    """Beat tick — process UI-approved drafts for Reddit and YouTube.
+    """Beat tick — close approved drafts that nothing here will post. Posts nothing.
 
-    Cadence is enforced here (same Redis caps as unsupervised would_post).
-    At most one successful post per platform per tick; remaining approved
-    rows stay approved for a later tick. A row whose action has no poster on
-    its platform (``_POSTABLE_PLATFORMS``) is moved to ``unsupported`` without
-    being claimed. While the tick posts, the agent browser runs with its
-    control port open (``agent_browser_control``); while the agent is busy,
-    rows stay approved.
+    Reddit, YouTube and Facebook drafts are posted one at a time, each started
+    by a person watching the Agent Screen (post_watched_draft); Discord drafts
+    are sent by the Discord bot. An approved draft for a platform nothing here
+    posts to (platforms.REFUSED, X and LinkedIn) or for an action no poster
+    handles on its platform moves to ``unsupported`` with the reason, rather
+    than waiting forever. Other approved rows are left as they are.
     """
     skipped = _skip_if_kill_switch_off()
     if skipped:
-        return {"processed": 0, "reason": "kill_switch_off"}
+        return {"unsupported": 0, "reason": "kill_switch_off"}
 
-    def _run(browser: ExitStack):
-        # Posting reaches an outside site, so web access (Settings) gates it
-        # like the scouting does; approved rows stay approved until it is on.
-        from backend.utils.settings_utils import web_access_block_reason
-        if web_access_block_reason("post approved outreach drafts"):
-            return {"processed": 0, "reason": "web_access_off"}
-        from backend.models import SocialOutreachLog
-        from backend.services.social_outreach import kill_switch, transitions
-        from backend.services.social_outreach.reddit_outreach import post_comment_via_servo as reddit_post_comment, record_post_via_backend
-        from backend.services.social_outreach.youtube_outreach import (
-            post_youtube_comment_via_servo,
-            post_youtube_reply_via_servo,
-        )
-        from backend.services.social_outreach.self_share import _submit_post_via_servo
-        from backend.utils.agent_browser_control import agent_browser_control
-        import json
-        import requests
+    def _run():
         from sqlalchemy import func
-        from backend.services.social_outreach.reddit_outreach import backend_url
-        from backend.services.social_outreach.reddit_outreach import REDDIT_BASE
 
-        # Reddit/YouTube/Facebook have BiDi posters; x/twitter post through
-        # the general agent loop (general_poster).
+        from backend.models import SocialOutreachLog
+        from backend.services.social_outreach import platforms, transitions
+
+        watched = platforms.platforms_in(platforms.WATCHED)
         rows = (
             SocialOutreachLog.query
             .filter(SocialOutreachLog.status == "approved")
-            .filter(func.lower(SocialOutreachLog.platform).in_(_POSTABLE_PLATFORMS["comment"]))
+            .filter(func.lower(SocialOutreachLog.platform).in_(
+                watched + platforms.platforms_in(platforms.REFUSED)))
             .order_by(SocialOutreachLog.created_at.asc())
-            .limit(20)
+            .limit(200)
             .all()
         )
-        
-        if not rows:
-            return {"processed": 0, "reason": "no_approved_drafts"}
-            
-        processed = 0
-        skipped_cadence = 0
-        skipped_not_approved = 0
-        withdrawn = 0
-        unsupported = 0
-        skipped_browser_busy = 0
-        posted_platforms: set[str] = set()
-        # Every poster here reads the page back over the agent browser's
-        # control port. It is opened before the first claim and closed when
-        # the tick ends (``browser``); a refusal means the agent is in use.
-        browser_refusal: list[Optional[str]] = []
-
-        def _browser_refusal() -> Optional[str]:
-            if not browser_refusal:
-                browser_refusal.append(browser.enter_context(agent_browser_control()))
-            return browser_refusal[0]
-
-        def _give_up(row_id: int, reason: str) -> None:
-            # A row rejected while the poster was working stays rejected.
-            nonlocal withdrawn
-            if reason == transitions.WITHDRAWN_BEFORE_SUBMIT:
-                withdrawn += 1
-                logger.info("process-approved: row %s was withdrawn before submit", row_id)
-            transitions.abort_in_flight(row_id, f"servo: {reason}")
-
+        unsupported = waiting = 0
         for row in rows:
             platform = (row.platform or "").strip().lower()
             action = (row.action or "").strip().lower()
-            if platform not in _POSTABLE_PLATFORMS.get(action, ()):
-                if transitions.mark_unsupported(
-                    row.id, f"unsupported: no poster for action '{action}' on platform '{platform}'",
-                ):
-                    unsupported += 1
-                    logger.info(
-                        "process-approved: row %s unsupported (%s on %s)", row.id, action, platform,
-                    )
+            reason = platforms.refusal_for(platform)
+            if not reason and not platforms.posts(platform, action):
+                reason = f"unsupported: no poster for action '{action}' on platform '{platform}'"
+            if not reason:
+                waiting += 1
                 continue
-            if platform in posted_platforms:
-                # One successful post per platform per tick — leave the rest
-                # approved for the next minute's beat.
-                continue
+            if transitions.mark_unsupported(row.id, reason):
+                unsupported += 1
+                logger.info("process-approved: row %s unsupported (%s on %s)", row.id, action, platform)
+        return {"unsupported": unsupported, "waiting_for_watched_post": waiting}
 
-            cadence_ok, cadence_reason = kill_switch.cadence_allows_post(platform)
-            if not cadence_ok:
-                skipped_cadence += 1
-                logger.info(
-                    "process-approved: cadence block for %s row %s: %s",
-                    platform, row.id, cadence_reason,
-                )
-                continue
+    return _with_app_context(_run)
 
-            # Rows stay approved while the agent is busy, as with web access off.
-            if _browser_refusal():
-                skipped_browser_busy += 1
-                continue
 
-            # Claim the row up-front so a mid-flight failure (servo crash,
-            # record-post HTTP blip) doesn't leave it as "approved" and trigger
-            # a double-post on the next 60s tick. The claim only succeeds if
-            # the row is still approved: `rows` was read before the earlier
-            # rows in this batch drove a browser for minutes, and a draft
-            # rejected in that time must not be picked up.
-            if not transitions.claim(row.id):
-                skipped_not_approved += 1
-                continue
-            # Each poster calls this immediately before it publishes. It moves
-            # the row processing -> submitting, and refuses if the row was
-            # rejected after the claim.
-            before_submit = transitions.submit_gate(row.id)
+@shared_task(name="social_outreach.post_watched_draft", bind=True)
+def post_watched_draft(self, event_id: int, clicked_at: float) -> dict:
+    """One browser post a person started with "Post now, I'm watching"
+    (watched_post.start). Posts that draft only, then frees the running slot."""
+    from backend.services.social_outreach import watched_post
 
-            if action == "comment":
-                # Pipeline (Phase 2) writes UTM-tagged copy into posted_text; legacy
-                # /draft-comment rows leave posted_text NULL and the engage_with
-                # path tags inline at servo time. Prefer posted_text so we don't
-                # silently drop the tags Content already applied.
-                comment_text = row.posted_text or row.draft_text
-
-                # Branch on platform. Reddit, YouTube and Facebook use their BiDi
-                # posters; everything else (X/Twitter, …) posts through the
-                # general NL agent loop, driven by the grounded eye.
-                if platform == "reddit":
-                    success, reason = reddit_post_comment(
-                        row.target_url, comment_text, before_submit=before_submit,
-                    )
-                elif platform == "youtube":
-                    success, reason = post_youtube_comment_via_servo(
-                        row.target_url, comment_text, row.task_id, before_submit=before_submit,
-                    )
-                elif platform == "facebook":
-                    from backend.services.social_outreach.facebook_outreach import post_comment_via_bidi
-                    success, reason = post_comment_via_bidi(
-                        row.target_url, comment_text, before_submit=before_submit,
-                    )
-                else:
-                    from backend.services.social_outreach.general_poster import post_via_agent_loop
-                    success, reason = post_via_agent_loop(
-                        platform, row.target_url, comment_text, action="comment",
-                        before_submit=before_submit,
-                    )
-
-                if success:
-                    record_post_via_backend(
-                        row.id, row.target_url, row.target_thread_id,
-                        comment_text, row.task_id, platform=platform,
-                    )
-                    processed += 1
-                    posted_platforms.add(platform)
-                else:
-                    _give_up(row.id, reason)
-            elif action == "reply":
-                # ContentAgent writes a JSON envelope to draft_text for
-                # replies because mark_drafted_from_candidate overwrites
-                # draft_text and there's no extras column to carry the
-                # parent-comment anchor through. Plain reply text lives
-                # in posted_text (typed directly into the composer), the
-                # envelope in draft_text carries {draft, anchor, incoming_*}.
-                reply_text = (row.posted_text or "").strip()
-                anchor_hint = ""
-                try:
-                    if row.draft_text and row.draft_text.strip().startswith("{"):
-                        envelope = json.loads(row.draft_text)
-                        anchor_hint = (
-                            envelope.get("anchor")
-                            or envelope.get("anchor_hint")
-                            or envelope.get("parent_text")
-                            or ""
-                        )[:200]
-                        # If posted_text wasn't filled (legacy row, supervised
-                        # edit dropped it, etc.) fall back to the envelope's
-                        # draft field — better than aborting.
-                        if not reply_text:
-                            reply_text = (envelope.get("draft") or "").strip()
-                except (json.JSONDecodeError, AttributeError, TypeError) as e:
-                    logger.warning("reply envelope parse failed for row %s: %s", row.id, e)
-                if not anchor_hint or not reply_text:
-                    transitions.abort_in_flight(row.id, "reply_missing_anchor_or_text")
-                    continue
-                success, reason = post_youtube_reply_via_servo(
-                    row.target_url, anchor_hint, reply_text, row.task_id,
-                    before_submit=before_submit,
-                )
-                if success:
-                    record_post_via_backend(
-                        row.id, row.target_url, row.target_thread_id,
-                        reply_text, row.task_id, platform=platform,
-                    )
-                    processed += 1
-                    posted_platforms.add(platform)
-                else:
-                    # Move the row to "aborted" so it doesn't stay stuck at
-                    # "processing" forever. The user can re-approve via UI to
-                    # retry — far better UX than the original "human deals
-                    # with it" comment that left rows in limbo.
-                    _give_up(row.id, reason)
-            elif action == "share":
-                from backend.services.social_outreach.persona import SITE_URL
-                payload = {}
-                try:
-                    payload = json.loads(row.draft_text or "{}")
-                    title = (payload.get("title") or "").strip()
-                except json.JSONDecodeError:
-                    title = (row.draft_text or "").strip()
-
-                # Extract subreddit from target_url (e.g. https://old.reddit.com/r/SideProject)
-                import re
-                # `or ""` so a row with a NULL target_url doesn't TypeError out
-                # of the whole batch — re.search on "" just fails to match.
-                m = re.search(r"/r/([^/]+)", row.target_url or "")
-                subreddit = m.group(1) if m else ""
-
-                # Read link_url from the draft payload — falls back to SITE_URL
-                # only for legacy rows drafted before we started storing it.
-                link_url = (payload.get("link_url") or "").strip() or SITE_URL
-                
-                if subreddit and title:
-                    success, reason = _submit_post_via_servo(
-                        subreddit, title, link_url, before_submit=before_submit,
-                    )
-                    if success:
-                        try:
-                            requests.post(
-                                f"{backend_url()}/social-outreach/record-post",
-                                json={
-                                    "audit_id": row.id,
-                                    "platform": "reddit",
-                                    "posted_text": f"{title}\n{link_url}",
-                                    "target_url": row.target_url,
-                                    "target_thread_id": None,
-                                    "task_id": row.task_id,
-                                },
-                                timeout=10,
-                            )
-                        except Exception as e:
-                            logger.warning("record-post failed: %s", e)
-                        processed += 1
-                        posted_platforms.add(platform)
-                    else:
-                        # Same recovery path as the comment branch — abort
-                        # cleanly so the row isn't stranded at "processing".
-                        _give_up(row.id, reason)
-                else:
-                    # Couldn't even attempt — sub or title missing. Mark
-                    # aborted with a clear reason so the user can fix the row.
-                    transitions.abort_in_flight(row.id, "share row missing subreddit or title")
-        return {
-            "processed": processed,
-            "skipped_cadence": skipped_cadence,
-            "skipped_not_approved": skipped_not_approved,
-            "withdrawn": withdrawn,
-            "unsupported": unsupported,
-            "skipped_browser_busy": skipped_browser_busy,
-            "browser_refusal": browser_refusal[0] if browser_refusal else None,
-            "posted_platforms": sorted(posted_platforms),
-        }
-
-    with ExitStack() as browser:
-        return _with_app_context(_run, browser)
+    try:
+        return _with_app_context(watched_post.run, event_id, clicked_at)
+    finally:
+        watched_post.release_slot(event_id)
 
 
 # How long a row may sit at status=processing or submitting before we abort it

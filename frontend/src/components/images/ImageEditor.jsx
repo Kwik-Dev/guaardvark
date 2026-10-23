@@ -2,7 +2,7 @@
 // Full-screen image editor with zoom, pan, rotate, flip, crop, and save-as.
 // Uses react-image-crop for crop selection, backend Pillow for actual processing.
 
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import ReactCrop from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
 import {
@@ -24,6 +24,7 @@ import {
   InputLabel,
   CircularProgress,
   Divider,
+  Alert,
 } from '@mui/material';
 import {
   ZoomIn as ZoomInIcon,
@@ -39,11 +40,18 @@ import {
   ArrowBack as BackIcon,
 } from '@mui/icons-material';
 
+import {
+  cropRectFromOperations, cropIsAvailable, fitScale, CROP_AFTER_TRANSFORM_REASON,
+} from '../../utils/imageEditOps';
+import { useSnackbar } from '../common/SnackbarProvider';
+
 const FlipVIcon = () => (
   <FlipHIcon sx={{ transform: 'rotate(90deg)' }} />
 );
 
 const API_BASE = '/api/files';
+// The editor covers the viewer (9999); its own popups must sit above it.
+const EDITOR_Z = 10000;
 
 const ImageEditor = ({
   imageUrl,
@@ -70,6 +78,10 @@ const ImageEditor = ({
   const [saveFormat, setSaveFormat] = useState('');
   const [saveQuality, setSaveQuality] = useState(90);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  // Null outside the app's provider (component tests); the dialog shows the
+  // error either way.
+  const snackbar = useSnackbar();
 
   // Image info
   const [_imageInfo, setImageInfo] = useState(null);
@@ -77,6 +89,30 @@ const ImageEditor = ({
 
   // Undo stack (stores operations)
   const [operations, setOperations] = useState([]);
+
+  // The preview shows what the applied crops keep; undoing a crop restores
+  // the earlier region because the rectangle is derived from the list.
+  const cropRect = useMemo(() => cropRectFromOperations(operations), [operations]);
+  const canCrop = cropIsAvailable(operations);
+
+  // A rotate or flip applied while cropping (R key) would put the crop after
+  // it; leave crop mode instead.
+  useEffect(() => {
+    if (!canCrop && cropMode) {
+      setCropMode(false);
+      setCrop(undefined);
+      setCompletedCrop(null);
+    }
+  }, [canCrop, cropMode]);
+
+  // Viewport size, for fitting the cropped preview the way CSS fits the
+  // uncropped one.
+  const [viewport, setViewport] = useState({ w: window.innerWidth, h: window.innerHeight });
+  useEffect(() => {
+    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   // Refs
   const imgRef = useRef(null);
@@ -122,7 +158,7 @@ const ImageEditor = ({
       else if (e.key === '0') { setZoom(1); setPan({ x: 0, y: 0 }); }
       else if (e.key === 'r' && !e.ctrlKey) handleRotateCW();
       else if (e.key === 'r' && e.ctrlKey) { e.preventDefault(); handleRotateCCW(); }
-      else if (e.key === 'c' && !e.ctrlKey && !e.metaKey) setCropMode(m => !m);
+      else if (e.key === 'c' && !e.ctrlKey && !e.metaKey) { if (canCrop) setCropMode(m => !m); }
       else if ((e.key === 'z' || e.key === 'Z') && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         handleUndo();
@@ -134,7 +170,7 @@ const ImageEditor = ({
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [cropMode, saveDialogOpen, onClose]);
+  }, [cropMode, saveDialogOpen, onClose, canCrop]);
 
   // Mouse wheel zoom
   useEffect(() => {
@@ -196,9 +232,8 @@ const ImageEditor = ({
       } else if (last.type === 'flip') {
         if (last.direction === 'horizontal') setFlipH(f => !f);
         else setFlipV(f => !f);
-      } else if (last.type === 'crop') {
-        // Can't visually undo crop in preview, but remove from ops list
       }
+      // A crop needs nothing here: the preview's crop rectangle follows the list.
       return ops.slice(0, -1);
     });
   }, []);
@@ -210,7 +245,7 @@ const ImageEditor = ({
 
   // Apply crop
   const handleApplyCrop = useCallback(() => {
-    if (!completedCrop || !imgRef.current) return;
+    if (!completedCrop || !imgRef.current || !canCrop) return;
 
     const img = imgRef.current;
     const scaleX = naturalSize.w / img.width;
@@ -229,12 +264,18 @@ const ImageEditor = ({
     setCropMode(false);
     setCrop(undefined);
     setCompletedCrop(null);
-  }, [completedCrop, naturalSize]);
+  }, [completedCrop, naturalSize, canCrop]);
 
   // Save
   const handleSave = useCallback(async () => {
     if (!documentId) return;
     setSaving(true);
+    setSaveError(null);
+    const fail = (reason) => {
+      const message = `Save failed: ${reason}`;
+      setSaveError(message);
+      snackbar?.showMessage?.(message, 'error');
+    };
     try {
       const body = {
         document_id: documentId,
@@ -259,14 +300,14 @@ const ImageEditor = ({
         setFlipV(false);
         onSaved?.(data.data);
       } else {
-        alert(`Save failed: ${data.message || data.error || 'Unknown error'}`);
+        fail(data.message || data.error || 'Unknown error');
       }
     } catch (err) {
-      alert(`Save failed: ${err.message}`);
+      fail(err.message);
     } finally {
       setSaving(false);
     }
-  }, [documentId, operations, saveMode, saveFormat, saveQuality, onSaved]);
+  }, [documentId, operations, saveMode, saveFormat, saveQuality, onSaved, snackbar]);
 
   const hasEdits = operations.length > 0;
   const transformStyle = {
@@ -276,13 +317,61 @@ const ImageEditor = ({
 
   if (!imageUrl) return null;
 
+  // The image as the applied operations leave it. With a crop applied, a
+  // clipped box shows only the kept region, scaled as CSS would scale the whole
+  // image. The <img> keeps a layout width of natural width x scale, so
+  // handleApplyCrop's naturalSize / img.width conversion holds in both forms,
+  // and a crop drawn on the clipped box is relative to the cropped image, which
+  // is how the backend applies a second crop.
+  const imageProps = {
+    component: 'img',
+    ref: imgRef,
+    src: imageUrl,
+    alt: imageName,
+    onLoad: handleImageLoad,
+    draggable: false,
+  };
+  let preview;
+  if (cropRect) {
+    const s = fitScale(cropRect.width, cropRect.height, viewport.w, viewport.h);
+    preview = (
+      <Box sx={{ width: cropRect.width * s, height: cropRect.height * s, overflow: 'hidden', position: 'relative' }}>
+        <Box
+          {...imageProps}
+          sx={{
+            position: 'absolute',
+            left: -cropRect.x * s,
+            top: -cropRect.y * s,
+            width: naturalSize.w * s,
+            height: naturalSize.h * s,
+            maxWidth: 'none',
+            maxHeight: 'none',
+            display: 'block',
+          }}
+        />
+      </Box>
+    );
+  } else {
+    preview = (
+      <Box
+        {...imageProps}
+        sx={{
+          maxWidth: '90vw',
+          maxHeight: 'calc(100vh - 52px)',
+          objectFit: 'contain',
+          display: 'block',
+        }}
+      />
+    );
+  }
+
   return (
     <Box
       sx={{
         position: 'fixed',
         top: 0, left: 0, right: 0, bottom: 0,
         backgroundColor: 'rgba(0,0,0,0.95)',
-        zIndex: 10000,
+        zIndex: EDITOR_Z,
         display: 'flex',
         flexDirection: 'column',
       }}
@@ -369,8 +458,10 @@ const ImageEditor = ({
         <Divider orientation="vertical" flexItem sx={{ borderColor: 'rgba(255,255,255,0.15)', mx: 0.5 }} />
 
         {/* Crop */}
-        <Tooltip title={cropMode ? "Cancel crop (Esc)" : "Crop (C)"}>
+        <Tooltip title={!canCrop ? CROP_AFTER_TRANSFORM_REASON : cropMode ? "Cancel crop (Esc)" : "Crop (C)"}>
+          <span>
           <IconButton
+            disabled={!canCrop}
             onClick={() => {
               if (cropMode) {
                 setCropMode(false);
@@ -385,11 +476,12 @@ const ImageEditor = ({
                 setCrop({ unit: '%', x: 10, y: 10, width: 80, height: 80 });
               }
             }}
-            sx={{ color: cropMode ? '#4CAF50' : 'white' }}
+            sx={{ color: !canCrop ? 'rgba(255,255,255,0.3)' : cropMode ? '#4CAF50' : 'white' }}
             size="small"
           >
             <CropIcon fontSize="small" />
           </IconButton>
+          </span>
         </Tooltip>
         {cropMode && completedCrop && completedCrop.width > 0 && (
           <Button
@@ -419,7 +511,7 @@ const ImageEditor = ({
         {/* Image dimensions */}
         {naturalSize.w > 0 && (
           <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.5)', mr: 1 }}>
-            {naturalSize.w} x {naturalSize.h}
+            {cropRect ? `${cropRect.width} x ${cropRect.height}` : `${naturalSize.w} x ${naturalSize.h}`}
           </Typography>
         )}
 
@@ -462,37 +554,11 @@ const ImageEditor = ({
               onChange={(c) => setCrop(c)}
               onComplete={(c) => setCompletedCrop(c)}
             >
-              <Box
-                component="img"
-                ref={imgRef}
-                src={imageUrl}
-                alt={imageName}
-                onLoad={handleImageLoad}
-                draggable={false}
-                sx={{
-                  maxWidth: '90vw',
-                  maxHeight: 'calc(100vh - 52px)',
-                  objectFit: 'contain',
-                  display: 'block',
-                }}
-              />
+              {preview}
             </ReactCrop>
           </Box>
         ) : (
-          <Box
-            component="img"
-            ref={imgRef}
-            src={imageUrl}
-            alt={imageName}
-            onLoad={handleImageLoad}
-            draggable={false}
-            sx={{
-              maxWidth: '90vw',
-              maxHeight: 'calc(100vh - 52px)',
-              objectFit: 'contain',
-              ...transformStyle,
-            }}
-          />
+          <Box sx={transformStyle}>{preview}</Box>
         )}
       </Box>
 
@@ -511,12 +577,13 @@ const ImageEditor = ({
         </Typography>
       </Box>
 
-      {/* Save Dialog */}
+      {/* Save Dialog: above the editor, or it opens hidden behind it */}
       <Dialog
         open={saveDialogOpen}
         onClose={() => !saving && setSaveDialogOpen(false)}
         maxWidth="xs"
         fullWidth
+        sx={{ zIndex: EDITOR_Z + 1 }}
         PaperProps={{ sx: { backgroundColor: '#1e1e1e', color: 'white' } }}
       >
         <DialogTitle>Save Image</DialogTitle>
@@ -547,6 +614,7 @@ const ImageEditor = ({
                 value={saveFormat}
                 onChange={(e) => setSaveFormat(e.target.value)}
                 label="Format"
+                MenuProps={{ sx: { zIndex: EDITOR_Z + 2 } }}
                 sx={{ color: 'white', '& .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(255,255,255,0.2)' } }}
               >
                 <MenuItem value="">Keep Original</MenuItem>
@@ -577,6 +645,12 @@ const ImageEditor = ({
               {operations.length} edit{operations.length !== 1 ? 's' : ''} to apply:
               {' '}{operations.map(op => op.type).join(', ') || 'none'}
             </Typography>
+
+            {saveError && (
+              <Alert severity="error" variant="outlined" onClose={() => setSaveError(null)}>
+                {saveError}
+              </Alert>
+            )}
           </Box>
         </DialogContent>
         <DialogActions>

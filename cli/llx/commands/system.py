@@ -1,5 +1,7 @@
 import os
+import re
 import subprocess
+import sys
 import typer
 
 from llx.client import get_client, LlxError, LlxConnectionError
@@ -86,9 +88,13 @@ def _doctor_cli_check() -> None:
     else:
         checks.append(("CLI config", True, f"{CONFIG_FILE} (not created yet)"))
 
+    # The launch contract is optional: only `guaardvark launch` writes it, and
+    # without it the mode is full. Reported, never a failure.
     launch_path = launch_cfg_path()
     launch_exists = launch_path.is_file()
-    checks.append(("~/.guaardvark/config.json", launch_exists, str(launch_path)))
+    checks.append(("~/.guaardvark/config.json", True,
+                   str(launch_path) if launch_exists
+                   else f"{launch_path} (not created; optional, `guaardvark launch` writes it)"))
 
     mode = "full"
     if launch_exists:
@@ -124,16 +130,20 @@ def _doctor_cli_check() -> None:
         pass
 
     console.print("[llx.brand]CLI Doctor[/llx.brand]\n")
-    all_ok = True
+    failed = []
     for label, ok, detail in checks:
         icon = ICON_ONLINE if ok else ICON_OFFLINE
         style = "llx.status.online" if ok else "llx.status.offline"
         console.print(f"  [{style}]{icon}[/{style}] [llx.kv.key]{label}:[/llx.kv.key] {detail}")
         if label not in ("lite/full note", "launch mode", "terminal", "tmux") and not ok:
-            all_ok = False
+            failed.append(label)
 
-    if not all_ok:
-        console.print("\n[llx.warning]Some checks failed. Try: guaardvark start --backend-only[/llx.warning]")
+    if failed:
+        hints = {"backend health": "guaardvark start --backend-only",
+                 "install root (start.sh)": "run from the install folder or set GUAARDVARK_ROOT"}
+        tries = [hints[label] for label in failed if label in hints]
+        console.print(f"\n[llx.warning]Failed: {', '.join(failed)}."
+                      + (f" Try: {'; '.join(tries)}" if tries else "") + "[/llx.warning]")
         raise typer.Exit(1)
     console.print("\n[llx.success]CLI checks passed.[/llx.success]")
 
@@ -150,6 +160,9 @@ def stop(
         raise typer.Exit(1)
     result = subprocess.run([stop_script], cwd=target)
     raise typer.Exit(result.returncode)
+
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
 def doctor(
@@ -169,7 +182,14 @@ def doctor(
         output.print_error(f"System manager not found at {manager_script}")
         raise typer.Exit(1)
     cmd = [manager_script, "repair" if repair else "check", target]
-    result = subprocess.run(cmd)
+    if sys.stdout.isatty() and not os.environ.get("NO_COLOR"):
+        result = subprocess.run(cmd)
+    else:
+        # system-manager colours its output unconditionally; strip that for
+        # pipes, files and NO_COLOR.
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        sys.stdout.write(_ANSI_ESCAPE.sub("", result.stdout))
+        sys.stderr.write(_ANSI_ESCAPE.sub("", result.stderr))
     raise typer.Exit(result.returncode)
 
 

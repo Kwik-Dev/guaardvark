@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from backend.services.model_capability_data import (
+    DECISION_NAME_PATTERNS,
     INLINE_REASONING_TAGS,
     MODEL_CAPABILITY_ROWS,
     OVERRIDABLE_FIELDS,
@@ -59,6 +60,7 @@ class ModelRecord:
     size_mb: float
     architecture: str
     evidence: Dict[str, str] = field(default_factory=dict)
+    decision: bool = False        # Ollama lists "decision": a label-only model, no chat reply
 
     @property
     def sends_think_flag(self) -> bool:
@@ -73,6 +75,13 @@ def thinks_by_name(tag: Optional[str]) -> bool:
         and any(re.search(p, lower) for p in THINKING_NAME_PATTERNS)
         and not any(re.search(p, lower) for p in THINKING_NAME_EXCLUDE_PATTERNS)
     )
+
+
+def decides_by_name(tag: Optional[str]) -> bool:
+    """DECISION_NAME_PATTERNS matches the tag: the rule for when Ollama cannot
+    describe the model."""
+    lower = (tag or "").lower()
+    return bool(lower) and any(re.search(p, lower) for p in DECISION_NAME_PATTERNS)
 
 
 def _tag_pairs(value: Any) -> Tuple[Tuple[str, str], ...]:
@@ -149,6 +158,7 @@ def record_from_info(tag: str, info: Optional[dict], *, with_vision: bool = True
         "tools": "tools" in caps,
         "thinking": "thinking" in caps,
         "embedding": "embedding" in caps,
+        "decision": "decision" in caps,
         "native_context": int((info or {}).get("native_context") or 0),
         "embedding_dim": int((info or {}).get("embedding_length") or 0),
     }
@@ -189,4 +199,52 @@ def record_from_info(tag: str, info: Optional[dict], *, with_vision: bool = True
         size_mb=float((info or {}).get("size_mb") or 0.0),
         architecture=(info or {}).get("architecture") or "unknown",
         evidence=evidence,
+        decision=bool(values["decision"]),
     )
+
+
+# ── start.sh's model bootstrap ────────────────────────────────────────────
+# Names that mark an embedding model, used only for a tag Ollama could not
+# describe and no declared row covers (start.sh's older rule).
+_EMBED_NAME_FALLBACK = re.compile(r"embed|minilm", re.IGNORECASE)
+
+
+def model_kind(tag: str) -> Tuple[str, str]:
+    """("embedding" | "chat", why) for an installed Ollama tag: Ollama's own
+    capabilities, then a declared row's ``embedding`` (record_from_info), and
+    only when neither answers, the name."""
+    record = capabilities_for(tag, with_vision=False)
+    declared = record.evidence.get("embedding") in ("declared_row", "local_row")
+    if record.exists or declared:
+        return ("embedding" if record.embedding else "chat"), record.evidence.get("embedding", "")
+    return ("embedding" if _EMBED_NAME_FALLBACK.search(tag) else "chat"), "name_fallback"
+
+
+def _tags_from_ollama_list(text: str) -> list:
+    """Model tags from ``ollama list`` output (first column, header skipped)."""
+    tags = []
+    for line in (text or "").splitlines():
+        first = line.split()[0] if line.split() else ""
+        if first and first != "NAME" and ":" in first:
+            tags.append(first)
+    return tags
+
+
+def main(argv=None) -> int:
+    """``python -m backend.services.model_capabilities kinds`` reads
+    ``ollama list`` on stdin and prints ``<tag>\t<embedding|chat>\t<why>``
+    per model, for start.sh to tell chat models from embedding models."""
+    import sys
+    args = argv if argv is not None else sys.argv[1:]
+    if args[:1] != ["kinds"]:
+        print("usage: python -m backend.services.model_capabilities kinds < ollama-list-output",
+              file=sys.stderr)
+        return 2
+    for tag in _tags_from_ollama_list(sys.stdin.read()):
+        kind, why = model_kind(tag)
+        print(f"{tag}\t{kind}\t{why}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

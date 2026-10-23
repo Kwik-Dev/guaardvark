@@ -135,8 +135,15 @@ def _not_running(why: str = ""):
     """The service itself is down. ``plugin_running: false`` tells callers
     this apart from a 503 the running service sends (a model that cannot run
     on this machine), which comes back verbatim with FastAPI's ``detail``."""
+    from backend.services.plugin_bridge import service_down_message
     message = "Audio Foundry service not running" + (f" ({why})" if why else "")
-    return jsonify({"error": message, "plugin_running": False}), 503
+    return jsonify({
+        "error": message,
+        # What to do about it, the same sentence every tool gives for a down service.
+        "message": service_down_message("audio_foundry", context="audio", why=why),
+        "error_kind": "service_down",
+        "plugin_running": False,
+    }), 503
 
 
 def _proxy_get(path: str, timeout: int = QUICK_TIMEOUT):
@@ -429,10 +436,14 @@ def generate_music():
         from backend.services import comfyui_music_generator as m3
         from backend.services.plugin_bridge import job_service_start_enabled
         from backend.services.video_model_registry import prepare_video_model, preflight_video_model
+        from backend.services.video_model_registry import comfyui_down_failure
         check = prepare_video_model if job_service_start_enabled() else preflight_video_model
         ready, err = check(model)
         if not ready:
-            return jsonify({"success": False, "error": err}), 400
+            err = comfyui_down_failure(err, "audio")
+            kind = getattr(getattr(err, "kind", None), "value", None)
+            return jsonify({"success": False, "error": err,
+                            **({"error_kind": kind} if kind else {})}), 400
         try:
             seconds = float(payload.get("duration_s") or payload.get("seconds") or 60)
         except (TypeError, ValueError):
@@ -554,6 +565,7 @@ def job_status(job_id):
         _update_audio_generation_from_job(job_id, {"status": status, "error": job.get("error"),
                                                    "result": result})
         return jsonify({"id": job_id, "status": status, "error": job.get("error"),
+                        "error_kind": job.get("error_kind"),
                         "progress": {"current": 0, "total": 0}, "result": result}), 200
     body, status_code = _proxy_get(f"/jobs/{job_id}")
     if status_code < 400:

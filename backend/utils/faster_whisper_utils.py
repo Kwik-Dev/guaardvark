@@ -34,6 +34,10 @@ SPEECH_MODEL_MISSING_MESSAGE = "Install the speech model to use voice"
 # Global cache for the loaded model
 _whisper_model = None
 _current_model_size = None
+# Set when CTranslate2 could not run on the card here (its CUDA libraries, such
+# as libcublas.so.12, are missing beside an older CUDA build of torch); every
+# later load in this process then uses the CPU.
+_cuda_unusable: Optional[str] = None
 
 
 class SpeechModelMissing(RuntimeError):
@@ -104,6 +108,8 @@ def pick_device() -> str:
     forced = os.environ.get("GUAARDVARK_WHISPER_DEVICE", "").strip().lower()
     if forced in ("cpu", "cuda"):
         return forced
+    if _cuda_unusable:
+        return "cpu"
     try:
         from backend.utils.backend_http import in_mcp_process
         # Memory held by the MCP process is invisible to the backend's GPU admission.
@@ -200,6 +206,60 @@ def unload() -> bool:
     return True
 
 
+def decode_audio(input_file, sampling_rate: int = 16000):
+    """Decode audio to mono float32 at ``sampling_rate``, as
+    faster_whisper.audio.decode_audio does. faster-whisper 1.2.1 opens the
+    file with ``metadata_errors=``, which PyAV 19 removed from ``av.open``, so
+    its decoder raises TypeError there; this one works with PyAV 18 and 19.
+    """
+    import gc
+    import io
+    import itertools
+
+    import av
+    import numpy as np
+
+    resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=sampling_rate)
+    raw = io.BytesIO()
+    dtype = None
+
+    def frames_of(container):
+        iterator = iter(container.decode(audio=0))
+        while True:
+            try:
+                frame = next(iterator)
+            except StopIteration:
+                return
+            except av.error.InvalidDataError:
+                continue
+            frame.pts = None  # Ignore timestamp checks, as faster-whisper does.
+            yield frame
+
+    def grouped(frames, num_samples=500000):
+        fifo = av.audio.fifo.AudioFifo()
+        for frame in frames:
+            fifo.write(frame)
+            if fifo.samples >= num_samples:
+                yield fifo.read()
+        if fifo.samples > 0:
+            yield fifo.read()
+
+    with av.open(input_file, mode="r") as container:
+        # None flushes the resampler.
+        for frame in itertools.chain(grouped(frames_of(container)), [None]):
+            for out in resampler.resample(frame):
+                array = out.to_ndarray()
+                dtype = array.dtype
+                raw.write(array)
+
+    # PyAV's resampler holds memory until a collection (faster-whisper #390).
+    del resampler
+    gc.collect()
+    if dtype is None:
+        return np.zeros(0, dtype=np.float32)
+    return np.frombuffer(raw.getbuffer(), dtype=dtype).astype(np.float32) / 32768.0
+
+
 def transcribe_audio_faster(audio_input, model_size: str = "tiny.en") -> Tuple[str, float]:
     """Transcribe an audio file or numpy array using faster-whisper.
 
@@ -210,17 +270,39 @@ def transcribe_audio_faster(audio_input, model_size: str = "tiny.en") -> Tuple[s
     Returns:
         Tuple of (transcribed_text, processing_time_seconds)
     """
+    global _cuda_unusable
     model = get_faster_whisper_model(model_size=model_size)
     start = time.time()
+    if isinstance(audio_input, (str, bytes)) or hasattr(audio_input, "read"):
+        # A path or file: decode here, since faster-whisper's own decoder fails
+        # under PyAV 19 (see decode_audio).
+        import io
+        audio_input = decode_audio(io.BytesIO(audio_input) if isinstance(audio_input, bytes) else audio_input)
 
-    segments, info = model.transcribe(
-        audio_input,
-        beam_size=5,
-        vad_filter=True,
-        vad_parameters=dict(min_silence_duration_ms=500),
-    )
+    def run(m):
+        segments, _info = m.transcribe(
+            audio_input,
+            beam_size=5,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500),
+        )
+        # Segments are lazy: the card is first used here.
+        return " ".join(segment.text for segment in segments)
 
-    text = " ".join(segment.text for segment in segments)
+    try:
+        text = run(model)
+    except RuntimeError as e:
+        # CTranslate2 loads a CUDA model without its CUDA libraries and fails
+        # on the first encode. Fall back to the CPU for this process.
+        if getattr(model.model, "device", "") != "cuda" or not any(
+            word in str(e).lower() for word in ("libcublas", "libcudnn", "cuda")
+        ):
+            raise
+        _cuda_unusable = str(e)
+        logger.warning("faster-whisper cannot use the GPU here (%s); speech-to-text runs on the CPU", e)
+        unload()
+        model = get_faster_whisper_model(model_size=model_size, device="cpu")
+        text = run(model)
     duration = time.time() - start
 
     return text.strip(), duration

@@ -72,6 +72,62 @@ def app():
     def outreach_status():
         return {"ok": True}
 
+    @test_app.route("/api/wordpress/sites", methods=["GET", "POST"])
+    def wordpress_sites():
+        return {"ok": True}
+
+    @test_app.route("/api/wordpress/pull/list", methods=["POST"])
+    def wordpress_pull_list():
+        return {"ok": True}
+
+    @test_app.route("/api/wordpress/pages", methods=["GET"])
+    def wordpress_pages():
+        return {"ok": True}
+
+    @test_app.route("/api/code-execution/python", methods=["POST"])
+    def code_execution_python():
+        return {"ok": True}
+
+    @test_app.route("/api/tools/execute", methods=["POST"])
+    def tools_execute():
+        return {"ok": True}
+
+    @test_app.route("/api/tools/execute_python", methods=["GET"])
+    def tools_execute_python_schema():
+        return {"ok": True}
+
+    @test_app.route("/api/automation/mcp/execute", methods=["POST"])
+    def automation_mcp_execute():
+        return {"ok": True, "approved": auth_guard.caller_is_authorized()}
+
+    @test_app.route("/api/code-execution/format", methods=["POST"])
+    def code_execution_format():
+        return {"ok": True}
+
+    @test_app.route("/api/automation/mcp/servers/<name>", methods=["GET", "PUT", "DELETE"])
+    def automation_mcp_server(name):
+        return {"ok": True}
+
+    @test_app.route("/api/automation/mcp/connect", methods=["POST"])
+    def automation_mcp_connect():
+        return {"ok": True}
+
+    @test_app.route("/api/automation/mcp/reload-config", methods=["POST"])
+    def automation_mcp_reload():
+        return {"ok": True}
+
+    @test_app.route("/api/self-improvement/pending-fixes/<int:fix_id>/apply", methods=["POST"])
+    def pending_fix_apply(fix_id):
+        return {"ok": True}
+
+    @test_app.route("/api/self-improvement/pending-fixes/<int:fix_id>", methods=["GET"])
+    def pending_fix_read(fix_id):
+        return {"ok": True}
+
+    @test_app.route("/api/tools/jobs/<job_id>", methods=["GET"])
+    def tools_job(job_id):
+        return {"ok": True}
+
     return test_app
 
 
@@ -189,6 +245,119 @@ def test_every_connections_route_refuses_another_host_without_api_key(monkeypatc
     assert len(checked) >= 20
 
 
+# WordPress sites hold each site's API key or Application Password, and pulling
+# sends it to the site: the same rule as Connections.
+WORDPRESS_REQUESTS = [
+    ("GET", "/api/wordpress/sites"),
+    ("POST", "/api/wordpress/sites"),
+    ("POST", "/api/wordpress/pull/list"),
+    ("GET", "/api/wordpress/pages"),
+]
+
+
+@pytest.mark.parametrize("method,path", WORDPRESS_REQUESTS)
+def test_wordpress_refuses_another_host_without_api_key(app, monkeypatch, method, path):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    client = app.test_client()
+
+    direct = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "192.168.1.20"})
+    proxied = client.open(
+        path, method=method, json={},
+        headers={"X-Forwarded-For": "192.168.1.20"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    for response in (direct, proxied):
+        assert response.status_code == 403
+        assert response.get_json()["code"] == auth_guard.LOCAL_ONLY_CODE
+
+
+@pytest.mark.parametrize("method,path", WORDPRESS_REQUESTS)
+def test_wordpress_answers_this_machine_without_api_key(app, monkeypatch, method, path):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    client = app.test_client()
+
+    direct = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    proxied = client.open(
+        path, method=method, json={},
+        headers={"X-Forwarded-For": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert direct.status_code == 200
+    assert proxied.status_code == 200
+
+
+@pytest.mark.parametrize("method,path", WORDPRESS_REQUESTS)
+def test_wordpress_needs_the_key_once_one_is_configured(app, monkeypatch, method, path):
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "secret")
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    client = app.test_client()
+
+    def send(addr, **headers):
+        return client.open(path, method=method, json={}, headers=headers, environ_base={"REMOTE_ADDR": addr})
+
+    assert send("192.168.1.20").status_code == 401
+    assert send("192.168.1.20").get_json()["code"] == auth_guard.API_KEY_CODE
+    assert send("127.0.0.1").status_code == 401
+    assert send("192.168.1.20", **{"X-API-Key": "not-it"}).status_code == 401
+    assert send("192.168.1.20", **{"X-API-Key": "secret"}).status_code == 200
+    assert send("127.0.0.1", **{"X-API-Key": "secret"}).status_code == 200
+
+
+@pytest.mark.parametrize("network_access", [None, "1"])
+@pytest.mark.parametrize("api_key", [None, "secret"])
+@pytest.mark.parametrize("addr", ["192.168.1.20", "127.0.0.1", "8.8.8.8"])
+def test_wordpress_gets_the_same_answer_as_connections(app, monkeypatch, network_access, api_key, addr):
+    """Network access opens WordPress to the local network exactly as it opens
+    the other protected routes, and an address outside it still needs the key."""
+    for name, value in (("GUAARDVARK_NETWORK_ACCESS", network_access), ("GUAARDVARK_API_KEY", api_key)):
+        if value:
+            monkeypatch.setenv(name, value)
+        else:
+            monkeypatch.delenv(name, raising=False)
+    client = app.test_client()
+
+    connections = client.get("/api/connections", environ_base={"REMOTE_ADDR": addr})
+    wordpress = client.get("/api/wordpress/sites", environ_base={"REMOTE_ADDR": addr})
+
+    assert wordpress.status_code == connections.status_code
+    assert wordpress.get_json() == connections.get_json()
+
+
+def test_every_wordpress_route_refuses_another_host_without_api_key(monkeypatch):
+    """Each route the WordPress blueprint serves, not only the sampled ones."""
+    import re
+
+    from backend.api.wordpress_api import wordpress_bp
+
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    real_app = Flask(__name__)
+    real_app.before_request(auth_guard.check_endpoint_auth)
+    real_app.register_blueprint(wordpress_bp)
+    client = real_app.test_client()
+
+    checked = []
+    for rule in real_app.url_map.iter_rules():
+        if not rule.endpoint.startswith(f"{wordpress_bp.name}."):
+            continue
+        path = re.sub(r"<(?:\w+:)?\w+>", "1", rule.rule)
+        for method in sorted(rule.methods - {"HEAD", "OPTIONS"}):
+            response = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "192.168.1.20"})
+            assert response.status_code == 403, f"{method} {path}"
+            checked.append((method, path))
+
+    # Fewer would mean the blueprint lost routes or the walk above missed them.
+    assert len(checked) >= 17
+
+
+def test_settings_access_lists_wordpress():
+    assert any("WordPress" in item for item in auth_guard.protected_summary())
+
+
 def test_profile_write_blocked_from_remote_host_but_readable(app, monkeypatch):
     monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
     client = app.test_client()
@@ -249,7 +418,7 @@ def test_other_meta_mutation_still_blocked_from_remote_host(app, monkeypatch):
     )
 
     assert response.status_code == 403
-    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE
+    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE.format(machine=auth_guard.machine_name())
 
 
 def test_lan_device_via_local_proxy_is_still_treated_as_remote(app, monkeypatch):
@@ -265,7 +434,7 @@ def test_lan_device_via_local_proxy_is_still_treated_as_remote(app, monkeypatch)
     )
 
     assert response.status_code == 403
-    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE
+    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE.format(machine=auth_guard.machine_name())
 
 
 def test_forged_xff_from_direct_remote_peer_is_ignored(app, monkeypatch):
@@ -282,7 +451,7 @@ def test_forged_xff_from_direct_remote_peer_is_ignored(app, monkeypatch):
     )
 
     assert response.status_code == 403
-    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE
+    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE.format(machine=auth_guard.machine_name())
 
 
 def test_forged_xff_through_the_proxy_is_ignored(app, monkeypatch):
@@ -298,7 +467,7 @@ def test_forged_xff_through_the_proxy_is_ignored(app, monkeypatch):
     )
 
     assert response.status_code == 403
-    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE
+    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE.format(machine=auth_guard.machine_name())
 
 
 def test_genuine_localhost_via_proxy_is_allowed(app, monkeypatch):
@@ -326,7 +495,7 @@ def test_remote_file_mutation_is_blocked_without_api_key(app, monkeypatch):
     )
 
     assert response.status_code == 403
-    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE
+    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE.format(machine=auth_guard.machine_name())
 
 
 def test_remote_self_code_read_is_blocked_without_api_key(app, monkeypatch):
@@ -339,7 +508,7 @@ def test_remote_self_code_read_is_blocked_without_api_key(app, monkeypatch):
     )
 
     assert response.status_code == 403
-    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE
+    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE.format(machine=auth_guard.machine_name())
 
 
 def test_read_only_file_browser_get_remains_unprotected(app, monkeypatch):
@@ -383,7 +552,7 @@ def test_remote_memory_clear_is_blocked_without_api_key(app, monkeypatch):
     )
 
     assert response.status_code == 403
-    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE
+    assert response.get_json()["error"] == auth_guard.LOCAL_ONLY_MESSAGE.format(machine=auth_guard.machine_name())
 
 
 def test_remote_memory_read_remains_unprotected(app, monkeypatch):
@@ -397,3 +566,396 @@ def test_remote_memory_read_remains_unprotected(app, monkeypatch):
 
     assert response.status_code == 200
     assert response.get_json() == {"ok": True}
+
+
+# Network access (Settings → Access) opens the protected routes to the local
+# network, key or not, except the routes that run code a caller supplies.
+
+RUNS_CODE_REQUESTS = [
+    ("POST", "/api/code-execution/python"),
+    ("POST", "/api/tools/execute"),
+    ("POST", "/api/automation/mcp/execute"),
+    ("PUT", "/api/automation/mcp/servers/evil"),
+    ("DELETE", "/api/automation/mcp/servers/evil"),
+    ("POST", "/api/automation/mcp/connect"),
+    ("POST", "/api/automation/mcp/reload-config"),
+    ("POST", "/api/self-improvement/pending-fixes/7/apply"),
+]
+# Protected routes network access still opens: formatting only runs a
+# formatter over the text, and reading a server entry or a staged fix runs
+# nothing.
+OPENED_BY_NETWORK_ACCESS = [
+    ("POST", "/api/files/write"),
+    ("POST", "/api/code-execution/format"),
+    ("GET", "/api/automation/mcp/servers/evil"),
+    ("GET", "/api/self-improvement/pending-fixes/7"),
+]
+LAN_DEVICE = "192.168.1.20"
+
+
+@pytest.fixture
+def network_access_on(monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+
+
+@pytest.mark.parametrize("method,path", OPENED_BY_NETWORK_ACCESS)
+def test_network_access_opens_a_protected_route_to_the_local_network(app, monkeypatch, network_access_on, method, path):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    response = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("method,path", RUNS_CODE_REQUESTS)
+def test_this_machine_keeps_passing_under_network_access_once_a_key_is_set(app, monkeypatch, network_access_on, method, path):
+    """A browser on the machine itself that never signed in: network access
+    passed it before the code routes were set apart, and still does."""
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "secret")
+    client = app.test_client()
+
+    direct = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    proxied = client.open(
+        path, method=method, json={},
+        headers={"X-Forwarded-For": "127.0.0.1"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert direct.status_code == 200
+    assert proxied.status_code == 200
+
+
+def test_this_machine_needs_the_key_on_code_routes_while_network_access_is_off(app, monkeypatch):
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "secret")
+    client = app.test_client()
+
+    response = client.post("/api/code-execution/python", json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"})
+
+    assert response.status_code == 401
+
+
+def test_the_tool_endpoint_opt_out_does_not_open_code_routes_to_other_hosts(app, monkeypatch):
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    monkeypatch.setenv("GUAARDVARK_PROTECT_TOOL_ENDPOINTS", "false")
+    client = app.test_client()
+
+    for method, path in (("POST", "/api/tools/execute"), ("POST", "/api/automation/mcp/execute"),
+                         ("POST", "/api/automation/mcp/connect")):
+        remote = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+        assert remote.status_code == 403, f"{method} {path}"
+        assert remote.get_json()["code"] == auth_guard.LOCAL_ONLY_CODE
+        assert client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"}).status_code == 200
+    # The opt-out still opens what it opened before: tool jobs.
+    assert client.get("/api/tools/jobs/j1", environ_base={"REMOTE_ADDR": LAN_DEVICE}).status_code == 200
+
+
+@pytest.mark.parametrize("method,path", RUNS_CODE_REQUESTS)
+def test_network_access_does_not_open_code_execution_to_a_lan_device(app, monkeypatch, network_access_on, method, path):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    direct = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+    proxied = client.open(
+        path, method=method, json={},
+        headers={"X-Forwarded-For": LAN_DEVICE},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    for response in (direct, proxied):
+        assert response.status_code == 403
+        assert response.get_json()["code"] == auth_guard.RUNS_CODE_CODE
+        assert response.get_json()["error"] == auth_guard.RUNS_CODE_MESSAGE.format(machine=auth_guard.machine_name())
+
+
+@pytest.mark.parametrize("method,path", RUNS_CODE_REQUESTS)
+def test_code_execution_answers_this_machine_while_network_access_is_on(app, monkeypatch, network_access_on, method, path):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    response = client.open(path, method=method, json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"})
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("method,path", RUNS_CODE_REQUESTS)
+def test_code_execution_takes_the_key_from_a_lan_device_while_network_access_is_on(app, monkeypatch, network_access_on, method, path):
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "secret")
+    client = app.test_client()
+
+    def send(**headers):
+        return client.open(path, method=method, json={}, headers=headers, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+
+    without_key = send()
+    wrong_key = send(**{"X-API-Key": "not-it"})
+
+    assert without_key.status_code == 401
+    assert without_key.get_json()["code"] == auth_guard.API_KEY_CODE
+    assert wrong_key.status_code == 401
+    assert wrong_key.get_json()["credential_rejected"] is True
+    assert send(**{"X-API-Key": "secret"}).status_code == 200
+    # The other protected routes stay open to the device, as before.
+    for other_method, other_path in OPENED_BY_NETWORK_ACCESS:
+        assert client.open(other_path, method=other_method, json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE}).status_code == 200
+
+
+def test_code_execution_takes_a_signed_in_browser_on_the_lan(app, monkeypatch, network_access_on):
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "secret")
+    monkeypatch.setattr(auth_guard, "request_has_valid_session", lambda: True)
+    client = app.test_client()
+
+    response = client.post("/api/code-execution/python", json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+
+    assert response.status_code == 200
+
+
+def test_a_tool_schema_read_is_not_a_tool_call(app, monkeypatch, network_access_on):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    response = client.get("/api/tools/execute_python", environ_base={"REMOTE_ADDR": LAN_DEVICE})
+
+    assert response.status_code == 200
+
+
+def test_code_execution_outside_the_local_network_is_refused_the_same_way(app, monkeypatch, network_access_on):
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    response = client.post("/api/code-execution/python", json={}, environ_base={"REMOTE_ADDR": "8.8.8.8"})
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == auth_guard.RUNS_CODE_CODE
+
+
+def test_caller_is_authorized_agrees_with_the_hook_on_code_routes(app, monkeypatch, network_access_on):
+    """automation_api passes caller_is_authorized() as the approval for
+    policy-gated MCP tools; it must say what the hook says."""
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    local = client.post("/api/automation/mcp/execute", json={}, environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    assert local.status_code == 200
+    assert local.get_json()["approved"] is True
+
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "secret")
+    with_key = client.post(
+        "/api/automation/mcp/execute", json={},
+        headers={"X-API-Key": "secret"},
+        environ_base={"REMOTE_ADDR": LAN_DEVICE},
+    )
+    assert with_key.status_code == 200
+    assert with_key.get_json()["approved"] is True
+
+
+def test_network_access_off_keeps_the_local_only_refusal_for_code_routes(app, monkeypatch):
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    client = app.test_client()
+
+    response = client.post("/api/code-execution/python", json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == auth_guard.LOCAL_ONLY_CODE
+
+
+# ---- Interconnector operator routes ---------------------------------------
+
+# Every path below is an Interconnector operator route (auth_guard FLEET_*),
+# with the method the route answers.
+INTERCONNECTOR_OPERATOR_ROUTES = (
+    ("GET", "/api/interconnector/config"),
+    ("POST", "/api/interconnector/config"),
+    ("POST", "/api/interconnector/config/generate-key"),
+    ("GET", "/api/interconnector/approvals/pending"),
+    ("POST", "/api/interconnector/approvals/7/decide"),
+    ("POST", "/api/interconnector/broadcast/push"),
+    ("GET", "/api/interconnector/broadcast/status/b-1"),
+    ("POST", "/api/interconnector/sync/manual"),
+    ("POST", "/api/interconnector/ask-family"),
+    ("POST", "/api/interconnector/route-inference"),
+    ("POST", "/api/interconnector/nodes/test-all"),
+    ("POST", "/api/cluster/routing-table/recompute"),
+    ("POST", "/api/interconnector/enrol"),
+    ("GET", "/api/interconnector/enrolments"),
+    ("GET", "/api/interconnector/nodes"),
+    ("DELETE", "/api/interconnector/nodes/n-1"),
+    ("POST", "/api/interconnector/nodes/n-1/test"),
+    ("GET", "/api/interconnector/debug/nodes"),
+    ("POST", "/api/interconnector/test-connection"),
+    ("POST", "/api/interconnector/updates/apply"),
+    ("POST", "/api/interconnector/sync/preferences"),
+    ("GET", "/api/interconnector/sync/files/test"),
+    ("POST", "/api/interconnector/sync/files/verify"),
+    ("GET", "/api/interconnector/backups"),
+    ("POST", "/api/interconnector/transition"),
+)
+INTERCONNECTOR_OPERATOR_PREFIXES = (
+    "/api/interconnector/config",
+    "/api/interconnector/approvals/",
+    "/api/interconnector/broadcast/",
+    "/api/interconnector/sync/manual",
+    "/api/interconnector/ask-family",
+    "/api/interconnector/route-inference",
+    "/api/interconnector/nodes/test-all",
+    "/api/cluster/routing-table/recompute",
+    "/api/interconnector/enrol",
+    "/api/interconnector/debug/",
+    "/api/interconnector/test-connection",
+    "/api/interconnector/updates/apply",
+    "/api/interconnector/sync/files/test",
+    "/api/interconnector/sync/files/verify",
+    "/api/interconnector/backups",
+    "/api/interconnector/transition",
+)
+# Routes other machines call. The guard leaves them to the route, which checks
+# the calling machine itself; and reads that stay open.
+INTERCONNECTOR_NODE_ROUTES = (
+    ("GET", "/api/interconnector/status"),
+    ("POST", "/api/interconnector/nodes/register"),
+    ("POST", "/api/interconnector/nodes/n-1/heartbeat"),
+    ("GET", "/api/interconnector/nodes/local-identity"),
+    ("GET", "/api/interconnector/sync/pull"),
+    ("GET", "/api/interconnector/sync/files/pull"),
+    ("GET", "/api/interconnector/updates/manifest"),
+    ("GET", "/api/interconnector/sync/history"),
+    ("GET", "/api/interconnector/sync/preferences"),
+)
+OTHER_MACHINE = {"REMOTE_ADDR": "192.0.2.44"}
+THIS_MACHINE = {"REMOTE_ADDR": "127.0.0.1"}
+
+
+@pytest.fixture
+def interconnector_app(monkeypatch):
+    # This machine is loopback only, whatever the test box's own address is.
+    monkeypatch.setattr(auth_guard, "_local_ips_cache", {"127.0.0.1", "::1", "localhost"})
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    monkeypatch.delenv("GUAARDVARK_NETWORK_ACCESS", raising=False)
+    test_app = Flask(__name__)
+    test_app.before_request(auth_guard.check_endpoint_auth)
+    routes = INTERCONNECTOR_OPERATOR_ROUTES + INTERCONNECTOR_NODE_ROUTES
+    for index, (method, path) in enumerate(routes):
+        test_app.add_url_rule(path, f"route_{index}", lambda **_kw: {"ok": True}, methods=[method])
+    return test_app
+
+
+def _call(client, method, path, environ, headers=None):
+    return client.open(path, method=method, environ_base=environ, headers=headers or {})
+
+
+def test_every_interconnector_operator_prefix_is_a_fleet_route():
+    for prefix in INTERCONNECTOR_OPERATOR_PREFIXES:
+        assert prefix in auth_guard.FLEET_PREFIXES, prefix
+
+
+@pytest.mark.parametrize("method,path,fleet", [
+    ("GET", "/api/interconnector/nodes", True),
+    ("GET", "/api/interconnector/nodes/", True),
+    ("DELETE", "/api/interconnector/nodes/n-1", True),
+    ("POST", "/api/interconnector/nodes/n-1/test", True),
+    ("POST", "/api/interconnector/sync/preferences", True),
+    ("GET", "/api/interconnector/sync/preferences", False),
+    ("POST", "/api/interconnector/nodes/register", False),
+    ("POST", "/api/interconnector/nodes/n-1/heartbeat", False),
+    ("GET", "/api/interconnector/nodes/local-identity", False),
+    ("GET", "/api/interconnector/status", False),
+    ("GET", "/api/interconnector/updates/manifest", False),
+    ("POST", "/api/interconnector/receive-directive", False),
+])
+def test_which_requests_control_the_fleet(method, path, fleet):
+    with Flask(__name__).test_request_context(path, method=method):
+        assert auth_guard.request_controls_fleet() is fleet
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_interconnector_operator_route_refuses_another_machine_without_a_key(interconnector_app, method, path):
+    response = _call(interconnector_app.test_client(), method, path, OTHER_MACHINE)
+    assert response.status_code == 403
+    assert response.get_json()["code"] == auth_guard.LOCAL_ONLY_CODE
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_interconnector_operator_route_refuses_a_lan_device_behind_the_local_proxy(interconnector_app, method, path):
+    response = _call(interconnector_app.test_client(), method, path, THIS_MACHINE,
+                     headers={"X-Forwarded-For": "192.0.2.44"})
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_interconnector_operator_route_answers_this_machine(interconnector_app, method, path):
+    assert _call(interconnector_app.test_client(), method, path, THIS_MACHINE).status_code == 200
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_interconnector_operator_route_takes_the_install_key_from_any_host(interconnector_app, monkeypatch, method, path):
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "install-key")
+    client = interconnector_app.test_client()
+    assert _call(client, method, path, OTHER_MACHINE).status_code == 401
+    assert _call(client, method, path, OTHER_MACHINE, headers={"X-API-Key": "wrong"}).status_code == 401
+    assert _call(client, method, path, OTHER_MACHINE, headers={"X-API-Key": "install-key"}).status_code == 200
+    # Once a key is set it is asked of this machine too.
+    assert _call(client, method, path, THIS_MACHINE).status_code == 401
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_NODE_ROUTES)
+def test_interconnector_node_routes_are_left_to_the_route(interconnector_app, method, path):
+    assert _call(interconnector_app.test_client(), method, path, OTHER_MACHINE).status_code == 200
+
+
+# Network access opens protected routes to the local network, but the
+# Interconnector's operator routes stay with this machine and the key.
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_network_access_does_not_open_a_fleet_route_to_a_lan_device(interconnector_app, monkeypatch, method, path):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+    client = interconnector_app.test_client()
+
+    direct = _call(client, method, path, {"REMOTE_ADDR": LAN_DEVICE})
+    proxied = _call(client, method, path, THIS_MACHINE, headers={"X-Forwarded-For": LAN_DEVICE})
+
+    for response in (direct, proxied):
+        assert response.status_code == 403
+        assert response.get_json()["code"] == auth_guard.FLEET_CODE
+        assert response.get_json()["error"] == auth_guard.FLEET_MESSAGE.format(machine=auth_guard.machine_name())
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_a_fleet_route_answers_this_machine_while_network_access_is_on(interconnector_app, monkeypatch, method, path):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+    assert _call(interconnector_app.test_client(), method, path, THIS_MACHINE).status_code == 200
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_OPERATOR_ROUTES)
+def test_a_fleet_route_takes_the_key_from_a_lan_device_while_network_access_is_on(interconnector_app, monkeypatch, method, path):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "install-key")
+    client = interconnector_app.test_client()
+    lan = {"REMOTE_ADDR": LAN_DEVICE}
+
+    without_key = _call(client, method, path, lan)
+    assert without_key.status_code == 401
+    assert without_key.get_json()["code"] == auth_guard.API_KEY_CODE
+    assert _call(client, method, path, lan, headers={"X-API-Key": "install-key"}).status_code == 200
+
+
+def test_a_fleet_route_takes_a_signed_in_browser_on_the_lan(interconnector_app, monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+    monkeypatch.setenv("GUAARDVARK_API_KEY", "install-key")
+    monkeypatch.setattr(auth_guard, "request_has_valid_session", lambda: True)
+    response = _call(interconnector_app.test_client(), "GET", "/api/interconnector/config", {"REMOTE_ADDR": LAN_DEVICE})
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("method,path", INTERCONNECTOR_NODE_ROUTES)
+def test_network_access_leaves_the_node_routes_to_the_route(interconnector_app, monkeypatch, method, path):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+    assert _call(interconnector_app.test_client(), method, path, {"REMOTE_ADDR": LAN_DEVICE}).status_code == 200
+
+
+def test_network_access_still_opens_other_protected_routes_beside_the_fleet(app, monkeypatch):
+    monkeypatch.setenv("GUAARDVARK_NETWORK_ACCESS", "1")
+    monkeypatch.delenv("GUAARDVARK_API_KEY", raising=False)
+    response = app.test_client().post("/api/files/write", json={}, environ_base={"REMOTE_ADDR": LAN_DEVICE})
+    assert response.status_code == 200

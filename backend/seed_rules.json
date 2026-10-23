@@ -102,7 +102,7 @@
       "description": "Primary system prompt for enhanced chat with file handling capabilities",
       "id": 8,
       "is_active": false,
-      "level": "USER_GLOBAL",
+      "level": "SYSTEM",
       "name": "enhanced_chat",
       "output_schema_name": null,
       "project_id": null,

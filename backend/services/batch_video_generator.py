@@ -132,6 +132,41 @@ def _get_video_logger():
     return logger
 
 
+# Item metadata keys a retry, restore or re-render has to carry over: the
+# reference inputs a reference-to-video item renders from.
+ITEM_METADATA_KEYS = ("ref_images", "ref_videos", "ref_audios")
+
+
+def _finished_results(raw_results, item_ids, batch_dir) -> List["BatchVideoResult"]:
+    """Successful results from a batch's saved metadata whose clip file still
+    exists, for the items it lists. Clip paths are relative to the batch dir."""
+    wanted = set(item_ids or [])
+    out = []
+    for res in raw_results or []:
+        if not isinstance(res, dict) or not res.get("success") or res.get("item_id") not in wanted:
+            continue
+        path = res.get("video_path")
+        if not path:
+            continue
+        clip = Path(path)
+        if not (clip if clip.is_absolute() else Path(batch_dir) / clip).is_file():
+            continue
+        try:
+            out.append(BatchVideoResult(**res))
+        except TypeError:
+            continue
+    return out
+
+
+def _reused_item_ids(ids, count: int) -> List[str]:
+    """The item ids a resumed batch had, when they line up with its items;
+    fresh ids otherwise (a new batch, a retry, a re-render)."""
+    ids = [str(i) for i in (ids or []) if i]
+    if len(ids) == count and len(set(ids)) == count:
+        return ids
+    return [str(uuid.uuid4()) for _ in range(count)]
+
+
 @dataclass
 class BatchVideoItem:
     id: str
@@ -169,7 +204,6 @@ class BatchVideoRequest:
     fidelity_mode: bool = False  # "Exact text / preserve fidelity" — light enhancement only
     wan_sampler_profile: Optional[str] = None  # Wan 5B: "adaptive" | "official"
     negative_prompt: str = ""
-    freeu: bool = False
     face_restore: bool = False
     lora_name: Optional[str] = None
     lora_strength: float = 1.0
@@ -279,13 +313,17 @@ def clip_quality_record(
     The frame checker's flags (``flags``: code and a plain message) mark a clip
     that finished but is not usable; ``expected`` holds the width, height and
     frame count the request resolved to. ``cinematic`` with a ``keyframe_path``
-    adds the keyframe colour match; ``vlm_review`` adds the vision review.
+    compares the keyframe with the middle frame: by the image encoder
+    (``keyframe_match``) once it is installed, by colour (``colour_match``)
+    until then or when the encoder could not score the clip. ``vlm_review``
+    adds the vision review.
     """
     try:
         from backend.services.video_consistency_metrics import (
             compute_basic_video_stats,
             inspect_video_frames,
             colour_match,
+            keyframe_match,
             QUALITY_THRESHOLDS,
             review_video_quality,
             not_reviewed,
@@ -313,21 +351,40 @@ def clip_quality_record(
         logger.warning("frame quality check skipped for %s: %s", video_path, e)
 
     if cinematic and keyframe_path and Path(keyframe_path).exists():
-        # The keyframe's palette against the middle frame: a colour match,
-        # not a check of who is in the shot.
-        match = colour_match(
-            keyframe_path, video_path, frame_count=(quality.get("frames") or {}).get("frames"),
-        )
-        quality["colour_match"] = match
-        score = match.get("score")
-        if isinstance(score, (int, float)) and score < QUALITY_THRESHOLDS["colour_match_floor"]["value"]:
-            quality["flagged"] = True
-            quality["flag_reasons"].append(f"low_colour_match:{score:.2f}")
-            quality["flags"].append({
-                "code": "low_colour_match",
-                "message": (f"colours drift from the keyframe: colour match {score:.2f} "
-                            f"at frame {match['frame_index']} of {match['frames']}"),
-            })
+        frame_count = (quality.get("frames") or {}).get("frames")
+        try:
+            seen = keyframe_match(keyframe_path, video_path, frame_count=frame_count)
+        except Exception as e:  # noqa: BLE001 — the check must never fail a render
+            logger.warning("keyframe match skipped for %s: %s", video_path, e)
+            seen = None
+        if seen is not None:
+            quality["keyframe_match"] = seen
+        score = (seen or {}).get("score")
+        if isinstance(score, (int, float)):
+            if score < QUALITY_THRESHOLDS["keyframe_match_floor"]["value"]:
+                quality["flagged"] = True
+                quality["flag_reasons"].append(f"low_keyframe_match:{score:.2f}")
+                quality["flags"].append({
+                    "code": "low_keyframe_match",
+                    "message": (f"the middle of the clip no longer shows what the keyframe "
+                                f"showed: keyframe match {score:.2f} at frame "
+                                f"{seen['frame_index']} of {seen['frames']}"),
+                })
+        else:
+            # No encoder, or it could not score this clip: the keyframe's
+            # palette against the middle frame, which is a colour match and not
+            # a check of what is in the shot.
+            match = colour_match(keyframe_path, video_path, frame_count=frame_count)
+            quality["colour_match"] = match
+            score = match.get("score")
+            if isinstance(score, (int, float)) and score < QUALITY_THRESHOLDS["colour_match_floor"]["value"]:
+                quality["flagged"] = True
+                quality["flag_reasons"].append(f"low_colour_match:{score:.2f}")
+                quality["flags"].append({
+                    "code": "low_colour_match",
+                    "message": (f"colours drift from the keyframe: colour match {score:.2f} "
+                                f"at frame {match['frame_index']} of {match['frames']}"),
+                })
 
     # The VLM review, where the caller enables it. A review that did not
     # produce a score is recorded as "not reviewed" with its reason, never
@@ -441,6 +498,12 @@ class BatchVideoGenerator:
 
                 params = dict(rd.get("params") or {})
                 params["batch_id"] = batch_id
+                # Keep the clips that finished before the restart: same item ids,
+                # their results carried over, only the rest rendered.
+                item_ids = list(rd.get("item_ids") or [])
+                if item_ids:
+                    params["item_ids"] = item_ids
+                    params["carried_results"] = _finished_results(data.get("results"), item_ids, batch_dir)
                 mode = rd.get("mode")
                 try:
                     if mode == "text":
@@ -478,15 +541,7 @@ class BatchVideoGenerator:
                 continue
 
             try:
-                cancel_event = self.cancel_events.get(batch_request.batch_id)
-                if cancel_event and cancel_event.is_set():
-                    status.status = "cancelled"
-                    status.error_kind = RenderErrorKind.CANCELLED.value
-                    status.end_time = datetime.now()
-                    if not status.error:
-                        status.error = "Cancelled before start"
-                    self._save_metadata(status)
-                    logger.info(f"Skipped cancelled batch {batch_request.batch_id}")
+                if self._skip_if_cancelled(batch_request.batch_id, status):
                     continue
 
                 self._running_batch_id = batch_request.batch_id
@@ -507,6 +562,29 @@ class BatchVideoGenerator:
                         # so the UI can show recent history. _cleanup_stale_batches
                         # already trims old data.
                         pass
+
+    def _skip_if_cancelled(self, batch_id: str, status: "BatchVideoStatus") -> bool:
+        """The worker's check as it dequeues a batch: True when the batch was
+        cancelled while it waited, in which case it is marked and not rendered.
+
+        The cancel event is the only thing that tells the worker to skip, so
+        it must outlive everything else (Clear Completed included) until the
+        worker has dequeued the batch; it is consumed here.
+        """
+        with self.batch_lock:
+            cancel_event = self.cancel_events.get(batch_id)
+        if not (cancel_event and cancel_event.is_set()):
+            return False
+        status.status = "cancelled"
+        status.error_kind = RenderErrorKind.CANCELLED.value
+        status.end_time = datetime.now()
+        if not status.error:
+            status.error = "Cancelled before start"
+        self._save_metadata(status)
+        with self.batch_lock:
+            self.cancel_events.pop(batch_id, None)
+        logger.info(f"Skipped cancelled batch {batch_id}")
+        return True
 
     @staticmethod
     def _extract_thumbnail(video_path: Path, thumbnail_path: Path) -> bool:
@@ -680,6 +758,9 @@ class BatchVideoGenerator:
         params["seed"] = None  # the same seed would render the same clip
         params["metadata"] = {**dict(params.get("metadata") or {}),
                               "rerender_of": {"batch_id": batch_id, "item_id": item_id}}
+        for key in ("guides", "last_frame_paths"):
+            per_item = list(params.get(key) or [])
+            params[key] = per_item[index:index + 1]
         if rd.get("mode") == "image":
             image_paths = rd.get("image_paths") or []
             if index >= len(image_paths):
@@ -765,8 +846,12 @@ class BatchVideoGenerator:
                 serializable["start_time"] = batch_status.start_time.isoformat()
             if batch_status.end_time:
                 serializable["end_time"] = batch_status.end_time.isoformat()
-            with open(metadata_file, "w") as f:
+            # Written to a temp file and swapped in, so the page polling this
+            # file never reads it half-written.
+            tmp_file = metadata_file.with_suffix(".json.tmp")
+            with open(tmp_file, "w") as f:
                 json.dump(serializable, f, indent=2)
+            os.replace(tmp_file, metadata_file)
 
             try:
                 from backend.socketio_instance import socketio
@@ -826,18 +911,19 @@ class BatchVideoGenerator:
         except Exception as e:  # noqa: BLE001 — director must never fail a render
             logger.warning(f"Director pass skipped for batch {batch_request.batch_id} (non-fatal): {e}")
 
-    def _apply_storyboard(self, batch_request: BatchVideoRequest) -> None:
+    def _apply_storyboard(self, batch_request: BatchVideoRequest) -> bool:
         """Expand a single concept into one connected shot per item.
 
         Mutates each item's prompt in place with the Storyboard agent's output and turns
         off the lighter downstream enhancer (the shots are already full cinematic prompts).
-        Never raises — on failure the placeholder prompts (the raw concept) stand."""
+        Never raises — on failure the placeholder prompts (the raw concept) stand.
+        Returns True when the shots replaced the placeholders."""
         try:
             from backend.services.director_service import plan, DirectorBrief, DirectorMode
             concept = (batch_request.storyboard_concept or "").strip()
             n = len(batch_request.items)
             if not concept or n == 0:
-                return
+                return False
             style = (batch_request.metadata or {}).get("look_and_feel") or batch_request.prompt_style
             result = plan(DirectorBrief(
                 mode=DirectorMode.CONCEPT_EXPANSION,
@@ -864,8 +950,25 @@ class BatchVideoGenerator:
                     f"Storyboard returned no shots beyond the concept for batch "
                     f"{batch_request.batch_id}; placeholder prompts and the light enhancer stand."
                 )
+            return bool(changed)
         except Exception as e:  # noqa: BLE001 — storyboard must never fail a render
             logger.warning(f"Storyboard expansion skipped for batch {batch_request.batch_id} (non-fatal): {e}")
+            return False
+
+    def _record_storyboard_shots(self, status: "BatchVideoStatus", batch_request: BatchVideoRequest) -> None:
+        """Write the planned shots into retry_data so a retry, a re-render or a
+        restart renders these shots, not a fresh plan (or the raw concept N times)."""
+        rd = status.retry_data or {}
+        ids = list(rd.get("item_ids") or [])
+        prompts = list(rd.get("prompts") or [])
+        if rd.get("mode") != "text" or len(ids) != len(prompts):
+            return
+        shot_by_id = {it.id: it.prompt for it in batch_request.items}
+        rd["prompts"] = [shot_by_id.get(iid, p) for iid, p in zip(ids, prompts)]
+        params = rd.setdefault("params", {})
+        params["storyboard_concept"] = None
+        params["enhance_prompt"] = False
+        self._save_metadata(status)
 
     def _render_with_retries(self, gen_request, cancel_event, item_id: str):
         """Render one clip. With GUAARDVARK_VIDEO_AUTO_RETRY on, a failure whose
@@ -1269,7 +1372,8 @@ class BatchVideoGenerator:
                 # Storyboard is intentional expansion of a concept into N shots — still
                 # allowed under verbatim for the concept→shots step; per-shot enhance is off.
                 self._set_stage(status, "storyboard")
-                self._apply_storyboard(batch_request)
+                if self._apply_storyboard(batch_request):
+                    self._record_storyboard_shots(status, batch_request)
             elif getattr(batch_request, "director_mode", False):
                 self._set_stage(status, "director")
                 self._apply_director(batch_request)
@@ -1408,7 +1512,6 @@ class BatchVideoGenerator:
                             enhance_prompt=batch_request.enhance_prompt,
                             fidelity_mode=batch_request.fidelity_mode,
                             wan_sampler_profile=batch_request.wan_sampler_profile,
-                            freeu=batch_request.freeu,
                             face_restore=batch_request.face_restore,
                             lora_name=batch_request.lora_name,
                             lora_strength=batch_request.lora_strength,
@@ -1592,11 +1695,18 @@ class BatchVideoGenerator:
         **params,
     ) -> BatchVideoStatus:
         from backend.services.output_registration import bates_name
-        batch_id = params.get("batch_id") or bates_name("video_batch", "", self.base_output_dir)
+        batch_id = params.pop("batch_id", None) or bates_name("video_batch", "", self.base_output_dir)
+        # Index-paired with prompts: guides and an end frame per item (l2v).
+        # item_metadata goes on every item: the reference inputs the render
+        # worker reads from there.
         guides_per_item = list(params.pop("guides", None) or [])
+        last_frame_paths = list(params.pop("last_frame_paths", None) or [])
+        item_metadata = dict(params.pop("item_metadata", None) or {})
+        item_ids = _reused_item_ids(params.pop("item_ids", None), len(prompts))
         items = [
             BatchVideoItem(
-                id=str(uuid.uuid4()), prompt=p, metadata={"source": "prompt"},
+                id=item_ids[i], prompt=p, metadata={**item_metadata, "source": "prompt"},
+                last_frame_path=(last_frame_paths[i] if i < len(last_frame_paths) else None) or None,
                 guides=list(guides_per_item[i] or []) if i < len(guides_per_item) else [],
             )
             for i, p in enumerate(prompts)
@@ -1613,15 +1723,16 @@ class BatchVideoGenerator:
         **params,
     ) -> BatchVideoStatus:
         from backend.services.output_registration import bates_name
-        batch_id = params.get("batch_id") or bates_name("video_batch", "", self.base_output_dir)
+        batch_id = params.pop("batch_id", None) or bates_name("video_batch", "", self.base_output_dir)
         user_prompt = params.pop("prompt", "")
         # Index-paired with image_paths: an end frame per item (flf2v) and the
         # guides per item. Shorter lists leave the remaining items without.
         last_frame_paths = list(params.pop("last_frame_paths", None) or [])
         guides_per_item = list(params.pop("guides", None) or [])
+        item_ids = _reused_item_ids(params.pop("item_ids", None), len(image_paths))
         items = [
             BatchVideoItem(
-                id=str(uuid.uuid4()),
+                id=item_ids[i],
                 # Left empty on purpose: the render worker auto-captions the
                 # image so the prompt describes the actual content (a filename
                 # placeholder here used to drive identity drift in LTX I2V).
@@ -1644,6 +1755,12 @@ class BatchVideoGenerator:
     def _start_batch(self, batch_id: str, items: List[BatchVideoItem], **params) -> BatchVideoStatus:
         batch_dir = self._get_batch_dir(batch_id)
         batch_dir.mkdir(parents=True, exist_ok=True)
+        # Clips a resumed batch already finished (_restore_pending_batches):
+        # they keep their results and are not rendered again. retry_data still
+        # lists every item, so retry and re-render see the whole batch.
+        carried_results = list(params.pop("carried_results", None) or [])
+        carried_ids = {r.item_id for r in carried_results}
+        pending_items = [i for i in items if i.id not in carried_ids]
 
         seed_param = params.get("seed")
         seed_value = None
@@ -1671,7 +1788,7 @@ class BatchVideoGenerator:
 
         batch_request = BatchVideoRequest(
             batch_id=batch_id,
-            items=items,
+            items=pending_items,
             output_dir=str(batch_dir),
             model=model_id,
             duration_frames=_param_int("duration_frames", native["duration_frames"]),
@@ -1692,7 +1809,6 @@ class BatchVideoGenerator:
             fidelity_mode=bool(params.get("fidelity_mode", False)),
             wan_sampler_profile=params.get("wan_sampler_profile") or None,
             negative_prompt=params.get("negative_prompt", "") or "",
-            freeu=bool(params.get("freeu", False)),
             face_restore=bool(params.get("face_restore", False)),
             lora_name=params.get("lora_name"),
             lora_strength=float(params.get("lora_strength", 1.0)),
@@ -1712,6 +1828,8 @@ class BatchVideoGenerator:
             batch_id=batch_id,
             status="queued",
             total_videos=len(items),
+            completed_videos=len(carried_results),
+            results=carried_results,
             output_dir=str(batch_dir),
             metadata=params.get("metadata", {}),
             stage="queued",
@@ -1719,7 +1837,7 @@ class BatchVideoGenerator:
         )
 
         # Persist enough info to allow one-click retry for failed batches without
-        # user re-entering all prompts, images, model, steps, fidelity, lora, freeu, tiers etc.
+        # user re-entering all prompts, images, model, steps, fidelity, lora, tiers etc.
         try:
             is_image_mode = any(getattr(i, "image_path", None) for i in items)
             prompts_list = [i.prompt for i in items]
@@ -1748,7 +1866,6 @@ class BatchVideoGenerator:
                 "speed_profile": batch_request.speed_profile,
                 "style_embedding": batch_request.style_embedding,
                 "negative_prompt": batch_request.negative_prompt,
-                "freeu": batch_request.freeu,
                 "face_restore": batch_request.face_restore,
                 "lora_name": batch_request.lora_name,
                 "lora_strength": batch_request.lora_strength,
@@ -1757,10 +1874,23 @@ class BatchVideoGenerator:
                 "subject_ids": list(batch_request.subject_ids or []),
                 "cinematic_keyframe": bool(batch_request.cinematic_keyframe),
                 "director_mode": bool(batch_request.director_mode),
+                # The storyboard rewrite runs in the worker, after this snapshot:
+                # the prompts saved here are the concept placeholders, so a retry
+                # without the concept would render the raw concept N times.
+                "storyboard_concept": batch_request.storyboard_concept,
+                "director_guidance": batch_request.director_guidance,
                 "metadata": dict(batch_request.metadata or {}),
                 # Exact control-panel snapshot for "Adjust & Retry" (restore the UI verbatim).
                 "ui_config": params.get("ui_config"),
+                # Per-item inputs, index-paired with prompts / image_paths; the
+                # start_batch_* methods pop them back off on retry and restore.
+                "guides": [list(i.guides or []) for i in items],
+                "last_frame_paths": [i.last_frame_path for i in items],
             }
+            shared_item_meta = {k: v for k, v in (items[0].metadata or {}).items()
+                                if k in ITEM_METADATA_KEYS} if items else {}
+            if shared_item_meta:
+                retry_params["item_metadata"] = shared_item_meta
             # item_ids is index-paired with prompts / image_paths, so one clip
             # can be rendered again on its own (rerender_item).
             if is_image_mode:
@@ -1794,7 +1924,7 @@ class BatchVideoGenerator:
         # Stack it on the queue. The single worker thread drains one batch at a time.
         self.batch_queue.put((batch_request, status))
         logger.info(
-            f"Enqueued batch {batch_id} ({len(items)} items) — "
+            f"Enqueued batch {batch_id} ({len(pending_items)} of {len(items)} items to render) — "
             f"queue depth ~{self.batch_queue.qsize()}"
         )
 
@@ -2142,6 +2272,38 @@ class BatchVideoGenerator:
                 "error": status.error,
             })
         return snapshot
+
+    _FINISHED_STATUSES = frozenset({"completed", "error", "cancelled"})
+
+    def clear_finished_queue(self) -> List[str]:
+        """Drop finished batches (completed, error, cancelled) from the queue
+        snapshot that ``list_queue`` serves, for every browser at once.
+
+        Only the in-memory bookkeeping goes: the batch folder, its clips and
+        its metadata stay, and the batch keeps showing in ``list_batches``.
+        A batch that is queued or running is never touched. Returns the ids
+        removed, in queue order.
+
+        Cancel events are kept: a batch cancelled while it waited is still in
+        the worker's input queue, and its set event is what makes the worker
+        skip it instead of rendering it (``_skip_if_cancelled`` consumes it).
+        """
+        removed: List[str] = []
+        with self.batch_lock:
+            for batch_id in list(self.queue_order):
+                status = self.active_batches.get(batch_id)
+                if status is None:
+                    # Deleted meanwhile; nothing to show for it either way.
+                    self.queue_order.remove(batch_id)
+                    continue
+                if status.status not in self._FINISHED_STATUSES or batch_id == self._running_batch_id:
+                    continue
+                self.queue_order.remove(batch_id)
+                self.active_batches.pop(batch_id, None)
+                removed.append(batch_id)
+        if removed:
+            logger.info("Cleared %d finished batch(es) from the queue view: %s", len(removed), removed)
+        return removed
 
     def _cleanup_stale_batches(self) -> None:
         """Mark batches stuck in running/pending/processing as cancelled.

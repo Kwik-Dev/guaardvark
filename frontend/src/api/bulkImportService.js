@@ -64,7 +64,8 @@ export const getBulkImportStatus = async (jobId) => {
         errorData.message ||
         (typeof errorData.error === 'object' ? errorData.error.message : errorData.error) ||
         `HTTP ${response.status}`;
-      throw new Error(errorMessage);
+      // The status says which: 404 is a job the server no longer keeps.
+      throw Object.assign(new Error(errorMessage), { status: response.status });
     }
     const data = await response.json();
     return data;

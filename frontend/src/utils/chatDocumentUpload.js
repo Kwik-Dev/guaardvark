@@ -124,6 +124,9 @@ function indexingLines({ outcome, reason }) {
   }
 }
 
+// The text sent as the user turn after an upload. A plain upload is acknowledged
+// with a notice; in codegen mode a readable code file becomes a request instead,
+// so `request` tells the caller which one it is sending.
 function uploadNotice({ file, documentId, indexing, codeGenMode }) {
   const fileType = file.name.split(".").pop().toLowerCase();
   const isCodeFile = CODE_EXTENSIONS.has("." + fileType);
@@ -133,7 +136,9 @@ function uploadNotice({ file, documentId, indexing, codeGenMode }) {
   const lines = indexingLines(indexing);
 
   if (codeGenMode && isCodeFile && readable) {
-    return `/codegen
+    return {
+      request: true,
+      message: `/codegen
 
 Please analyze and refactor the uploaded code file: ${file.name}
 
@@ -143,16 +148,22 @@ Requirements:
 - Maintain all functionality while improving code structure
 - Fix any obvious issues or inefficiencies
 
-Document ID: ${documentId}`;
+Document ID: ${documentId}`,
+    };
   }
   if (codeGenMode && !readable) {
-    return `**File Uploaded - Not Ready Yet**
+    return {
+      request: false,
+      message: `**File Uploaded - Not Ready Yet**
 
 **Status:** ${lines.status}
-Please wait for indexing to finish before processing. File: ${file.name} (${fileSizeKB} KB)`;
+Please wait for indexing to finish before processing. File: ${file.name} (${fileSizeKB} KB)`,
+    };
   }
   if (isCodeFile) {
-    return `**Code File Uploaded Successfully**
+    return {
+      request: false,
+      message: `**Code File Uploaded Successfully**
 
 **File Details:**
 - **Name:** ${file.name}
@@ -165,9 +176,12 @@ ${lines.now}
 
 ${readable
     ? "You can ask questions about this code file and I'll analyze the complete content."
-    : "Ask about the code once indexing has finished."}`;
+    : "Ask about the code once indexing has finished."}`,
+    };
   }
-  return `**Document Uploaded Successfully**
+  return {
+    request: false,
+    message: `**Document Uploaded Successfully**
 
 **File Details:**
 - **Name:** ${file.name}
@@ -176,7 +190,8 @@ ${readable
 - **Document ID:** ${documentId || "N/A"}
 
 **Status:** ${lines.status}
-${lines.now}`;
+${lines.now}`,
+  };
 }
 
 // The indexer leaves a document PENDING with this message when the vector store
@@ -228,8 +243,9 @@ async function waitForIndexing(documentId, onStage) {
  * @param {string} opts.sessionId      chat session the document is tagged with
  * @param {boolean} [opts.codeGenMode] send a /codegen request for code files
  * @param {function} [opts.onStage]    called with { progress, indexing } as it goes
- * @returns {Promise<{ok: boolean, message: string, indexing?: string, error?: string}>}
- *   the notice to send, and the indexing outcome it reports (see indexOutcome)
+ * @returns {Promise<{ok: boolean, message: string, request?: boolean, indexing?: string, error?: string}>}
+ *   the text to send and the indexing outcome it reports (see indexOutcome);
+ *   `request` is true when the text is a codegen request rather than a notice
  */
 export async function uploadChatDocument(file, { sessionId, codeGenMode = false, onStage } = {}) {
   try {
@@ -247,11 +263,8 @@ export async function uploadChatDocument(file, { sessionId, codeGenMode = false,
     const indexing = await waitForIndexing(result.document_id, onStage);
     onStage?.({ progress: 100, indexing: false });
 
-    return {
-      ok: true,
-      indexing: indexing.outcome,
-      message: uploadNotice({ file, documentId: result.document_id, indexing, codeGenMode }),
-    };
+    const { message, request } = uploadNotice({ file, documentId: result.document_id, indexing, codeGenMode });
+    return { ok: true, indexing: indexing.outcome, message, request };
   } catch (error) {
     console.error("File upload failed:", error);
     return {

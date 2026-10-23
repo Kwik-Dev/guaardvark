@@ -447,7 +447,7 @@ export class VoiceSessionEngine {
 
   _micAllowed() {
     if (this.settings.micEnabled === false) {
-      this._fail("mic-off", "The microphone is turned off in Settings → Voice.");
+      this._fail("mic-off", "The microphone is turned off in Voice Settings (Settings → Chat → Voice chat).");
       return false;
     }
     if (!this.deps.isSecureContext() || !this.deps.hasMediaDevices()) {

@@ -23,7 +23,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
+
+from backend.services.gpu_resource_policy import RenderStopped
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,19 @@ def zimage_via_comfyui_enabled() -> bool:
     """
     _v = os.environ.get("GUAARDVARK_ZIMAGE_USE_COMFYUI", "").strip().lower()
     return _v in ("1", "true", "yes", "on")
+
+
+def configured_auto_model() -> str | None:
+    """The catalog key an Auto still renders with when a Stills model was chosen
+    in Settings > Generation and it can run here; None leaves Auto to the offline
+    router's per-card pick (OfflineImageGenerator.configured_default_for_auto
+    logs why)."""
+    try:
+        from backend.services.offline_image_generator import get_image_generator
+        return get_image_generator().configured_default_for_auto()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Stills default not consulted for Auto: %s", e)
+        return None
 
 
 @dataclass
@@ -82,6 +97,18 @@ class StillResult:
         }
 
 
+def _stopped_still(prompt: str, enhance_mode: str, **sampling) -> StillResult:
+    """The result for a still the caller stopped before it finished."""
+    return StillResult(
+        success=False,
+        error="Stopped before the image finished; nothing was saved.",
+        prompt_used=prompt,
+        enhance_mode=enhance_mode,
+        metadata={"stopped": True},
+        **sampling,
+    )
+
+
 def run_stills_pipeline(
     prompts: list[str],
     *,
@@ -115,8 +142,14 @@ def run_stills_pipeline(
     hold_gpu: bool = True,
     replace_legacy_sd_markers: bool = True,
     allow_model_download: bool = False,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[StillResult]:
-    """Generate one or more stills with shared policy. Never raises for per-prompt failures."""
+    """Generate one or more stills with shared policy. Never raises for per-prompt failures.
+
+    ``should_stop`` is asked before each still and while it renders; once it
+    answers True the render in flight ends, the stills not yet started are
+    skipped, and each of those results has ``metadata["stopped"]`` set.
+    """
     from backend.services.image_prompt_sanitize import sanitize_image_prompt
     from backend.services.stills_defaults import resolve_stills_defaults
     from backend.services.stills_policy import (
@@ -140,6 +173,17 @@ def run_stills_pipeline(
             cleaned.append(s)
     if not cleaned:
         return [StillResult(success=False, error="No valid prompts after sanitize")]
+
+    # Auto honours the Stills model chosen in Settings > Generation, resolved here
+    # so the family defaults below and the engine dispatch in _generate_one agree
+    # with the model that renders (a FLUX default routes to ComfyUI like an
+    # explicit flux-dev pick). With no choice made, "auto" reaches the offline
+    # router unchanged.
+    if (model or "").strip().lower() in ("", "auto"):
+        preferred = configured_auto_model()
+        if preferred:
+            logger.info("stills_pipeline: Auto renders with the Stills default %r (%s)", preferred, source)
+            model = preferred
 
     # "comfyui" / "comfy" is a generic selector: the actual engine (Z-Image,
     # FLUX-dev, FLUX-schnell) is chosen from the live ComfyUI. Resolve it once
@@ -213,6 +257,9 @@ def run_stills_pipeline(
 
     results: list[StillResult] = []
     for prompt_text, prompt_mode, prompt_auto_enhance in plan:
+        if should_stop is not None and should_stop():
+            results.append(_stopped_still(prompt_text, prompt_mode, width=w, height=h, steps=st, guidance=g))
+            continue
         results.append(
             _generate_one(
                 prompt=prompt_text,
@@ -243,6 +290,7 @@ def run_stills_pipeline(
                 remove_background=remove_background,
                 hold_gpu=hold_gpu,
                 allow_model_download=allow_model_download,
+                should_stop=should_stop,
             )
         )
     for result in results:
@@ -284,22 +332,26 @@ def _generate_one(
     remove_background: bool,
     hold_gpu: bool,
     allow_model_download: bool = False,
+    should_stop: Callable[[], bool] | None = None,
 ) -> StillResult:
     from backend.services.offline_image_generator import (
         ImageGenerationRequest,
         get_image_generator,
     )
 
-    # FLUX via Comfy is still a separate engine; offline path is the default.
-    # "comfyui" / "comfy" is a generic ComfyUI backend selector: auto-pick an
-    # installed engine (Z-Image when GUAARDVARK_ZIMAGE_USE_COMFYUI=1, else FLUX).
+    # ComfyUI stills families (FLUX, Qwen-Image 2.1) are a separate engine; the
+    # offline path is the default. "comfyui" / "comfy" is a generic ComfyUI
+    # backend selector: auto-pick an installed engine (Z-Image when
+    # GUAARDVARK_ZIMAGE_USE_COMFYUI=1, else FLUX).
+    from backend.services.user_model_families import comfy_t2i_family
     mid = (model or "").lower()
-    if "flux" in mid:
+    if comfy_t2i_family(model):
         return _generate_comfy_flux(
             prompt=prompt, negative=negative, model=model,
             width=width, height=height, steps=steps, guidance=guidance,
             steps_explicit=steps_explicit,
             seed=seed, enhance_mode=enhance_mode, output=output, output_dir=output_dir,
+            hold_gpu=hold_gpu, should_stop=should_stop,
         )
     if mid in ("comfyui", "comfy"):
         # run_stills_pipeline resolves the engine once and hands it down so the
@@ -323,13 +375,14 @@ def _generate_one(
                 prompt=prompt, negative=negative, model=f"comfyui ({engine})",
                 width=width, height=height, steps=steps, guidance=guidance,
                 seed=seed, enhance_mode=enhance_mode, output=output, output_dir=output_dir,
+                should_stop=should_stop,
             )
         return _generate_comfy_flux(
             prompt=prompt, negative=negative, model=f"comfyui ({engine})",
             width=width, height=height, steps=steps, steps_explicit=steps_explicit,
             guidance=guidance,
             seed=seed, enhance_mode=enhance_mode, output=output, output_dir=output_dir,
-            comfy_model=comfy_model,
+            comfy_model=comfy_model, should_stop=should_stop,
         )
 
     try:
@@ -376,6 +429,7 @@ def _generate_one(
         loras=loras,
         lora_scale=lora_scale,
         allow_model_download=allow_model_download,
+        should_stop=should_stop,
     )
 
     try:
@@ -464,6 +518,8 @@ def _generate_one(
         error=gen_result.error if not gen_result.success else None,
         metadata={"source": source},
     )
+    if (getattr(gen_result, "metadata", None) or {}).get("stopped"):
+        base.metadata["stopped"] = True
 
     if not gen_result.success or not gen_result.image_path:
         return base
@@ -509,12 +565,26 @@ def _generate_comfy_flux(
     output: str,
     output_dir: Path | str | None,
     comfy_model: str | None = None,
+    hold_gpu: bool = False,
+    should_stop: Callable[[], bool] | None = None,
 ) -> StillResult:
     # The caller's model tag chooses the graph (upstream #218): "flux" + "dev" is
-    # the FLUX-dev graph, plain "flux" the schnell GGUF branch. The generic
-    # ``comfyui`` selector passes the engine it resolved via ``comfy_model`` so
-    # dispatch matches the family defaults it was resolved from.
+    # the FLUX-dev graph, plain "flux" the schnell GGUF branch, "qwen-image-21"
+    # the Qwen-Image 2.1 graph. The generic ``comfyui`` selector passes the
+    # engine it resolved via ``comfy_model`` so dispatch matches the family
+    # defaults it was resolved from. A user-added model resolves to its family's
+    # graph with its own UNET file.
     model_tag = comfy_model or model
+    unet_kwargs: dict = {}
+    target = _user_comfy_target(model) if comfy_model is None else None
+    if target and target.get("unet"):
+        model_tag = target["tag"]
+        if target["family"] == "qwen-image-21":
+            unet_kwargs["qwen21_unet"] = target["unet"]
+        elif model_tag == "flux-schnell":
+            unet_kwargs["flux_unet"] = target["unet"]
+        else:
+            unet_kwargs["flux_dev_unet"] = target["unet"]
     try:
         from backend.services.comfyui_image_generator import ComfyUIImageGenerator
         from backend.services.image_render_limits import resolve_canvas, strict_limits_enabled
@@ -522,7 +592,7 @@ def _generate_comfy_flux(
             # FLUX's ~2 MP design range applies here too; the offline path and
             # the Studio batch already clamp, this path sent the size as asked.
             width, height, _ = resolve_canvas(width, height, model)
-        gen = ComfyUIImageGenerator()
+        gen = ComfyUIImageGenerator(**unet_kwargs)
         out_path = None
         if output_dir:
             out_path = str(Path(output_dir) / f"flux_{uuid.uuid4().hex[:8]}.png")
@@ -537,6 +607,8 @@ def _generate_comfy_flux(
             steps=steps,
             steps_explicit=steps_explicit,
             cfg=guidance,
+            admit_vram_mb=_comfy_admission_mb(model_tag) if hold_gpu else None,
+            should_stop=should_stop,
         )
         url = None
         if output == "chat_copy" and path:
@@ -565,6 +637,8 @@ def _generate_comfy_flux(
             guidance=guidance,
             enhance_mode=enhance_mode,
         )
+    except RenderStopped:
+        return _stopped_still(prompt, enhance_mode, width=width, height=height, steps=steps, guidance=guidance)
     except Exception as e:
         return StillResult(
             success=False,
@@ -585,6 +659,33 @@ _COMFYUI_ENGINE_FAMILY = {
     "flux-dev": "flux",
     "flux-schnell": "flux",
 }
+
+
+def _user_comfy_target(model: str | None) -> dict | None:
+    """A user-added ComfyUI model's {family, tag, unet}; None for shipped ids,
+    offline models and when the generator cannot be read."""
+    from backend.services.user_image_models import is_user_model_id
+    if not is_user_model_id(model or ""):
+        return None
+    try:
+        from backend.services.offline_image_generator import get_image_generator
+        from backend.services.user_image_models import comfy_t2i_target
+        return comfy_t2i_target(get_image_generator(), model)
+    except Exception as e:  # noqa: BLE001 — the graph then loads its registry file
+        logger.debug("user comfy target for %r not resolved: %s", model, e)
+        return None
+
+
+def _comfy_admission_mb(model_tag: str | None) -> int | None:
+    """The VRAM a chat render on ``model_tag`` is admitted at, from the family's
+    registry entry; None for the FLUX graphs, which chat has always queued
+    without a claim."""
+    from backend.services.user_model_families import comfy_t2i_family
+    family = comfy_t2i_family(model_tag)
+    if family != "qwen-image-21":
+        return None
+    from backend.services.video_model_registry import vram_mb_for_model
+    return int(vram_mb_for_model(family))
 
 
 def _comfyui_backend_choice() -> tuple[str, str] | None:
@@ -634,6 +735,7 @@ def _generate_comfy_zimage(
     enhance_mode: str,
     output: str,
     output_dir: Path | str | None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> StillResult:
     try:
         from backend.services.comfyui_image_generator import ComfyUIImageGenerator
@@ -658,6 +760,7 @@ def _generate_comfy_zimage(
             model="zimage",
             steps=steps,
             cfg=cfg,
+            should_stop=should_stop,
         )
         url = None
         if output == "chat_copy" and path:
@@ -686,6 +789,8 @@ def _generate_comfy_zimage(
             guidance=guidance,
             enhance_mode=enhance_mode,
         )
+    except RenderStopped:
+        return _stopped_still(prompt, enhance_mode, width=width, height=height, steps=steps, guidance=guidance)
     except Exception as e:
         return StillResult(
             success=False,

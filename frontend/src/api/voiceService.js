@@ -1289,7 +1289,8 @@ const voiceService = new VoiceService();
 
 // Named exports for backward compatibility
 export const speechToText = (audioBlob) => voiceService.speechToText(audioBlob);
-export const textToSpeech = (text, voice = 'libritts') => voiceService.textToSpeech(text, voice);
+export const textToSpeech = (text, voice = 'libritts', engine = null, options = {}) =>
+  voiceService.textToSpeech(text, voice, engine, options);
 export const getAvailableVoices = () => voiceService.getVoices();
 export const getVoiceStatus = () => voiceService.getStatus();
 export const playAudio = (audioUrl, options = {}) => voiceService.playAudio(audioUrl, options);

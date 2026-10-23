@@ -2,12 +2,14 @@
 
 The method these replace divided the smoke PNG's byte count by the mean
 reference byte count and showed the result as an identity score, green above
-0.75. These tests pin the three things that stop that returning: the smoke path
-cannot reach "size", a method with no measured rows cannot show a score, and a
-model that fails or will not answer cannot produce a match.
+0.75. These tests pin the things that stop that returning: the smoke path
+cannot reach "size", a method without a measured row for the model it used
+cannot show a score, a model that fails or will not answer cannot produce a
+match, and the encoder is read from its verified install folder or not at all.
 
-Every model call is mocked. Nothing here loads weights, reaches Ollama, or
-touches the network.
+Every model call is mocked, and the encoder is a stand-in
+(backend/tests/fixtures/identity_encoder_stub.py) laid out under tmp_path.
+Nothing here loads weights, reaches Ollama, or touches the network.
 """
 from __future__ import annotations
 
@@ -19,8 +21,10 @@ from unittest.mock import patch
 import pytest
 from PIL import Image
 
+from backend.services import identity_encoder
 from backend.services import identity_method_data as data
 from backend.services import video_consistency_metrics as vcm
+from backend.tests.fixtures import identity_encoder_stub as stub
 
 
 @pytest.fixture
@@ -78,21 +82,24 @@ def proven_vlm(monkeypatch):
 # ── The smoke path never returns a file-size score ───────────────────────────
 
 def test_smoke_path_returns_no_score_and_no_size_method(images):
+    """No encoder installed: no number, and the reason names where to install it."""
     ref, cand = images
     identity = vcm.score_smoke_identity([ref], cand)
 
     assert identity["status"] == "not_measured"
     assert identity["score"] is None
     assert identity["method"] is None
-    assert identity["reason"] == data.NOT_PROVEN_REASON
+    assert identity["reason"] == f"embed: {vcm.ENCODER_NOT_INSTALLED}"
 
 
 def test_smoke_path_does_not_consult_the_size_method(images):
-    """Shipped state: no method has rows, so nothing runs and nothing is scored."""
+    """Only a method with a measured row is tried — embed, not vlm — and never size."""
     ref, cand = images
-    with patch.object(vcm, "score_identity_preservation") as scorer:
+    with patch.object(
+        vcm, "score_identity_preservation", wraps=vcm.score_identity_preservation
+    ) as scorer:
         vcm.score_smoke_vs_refs([ref], cand)
-    assert scorer.call_args_list == []
+    assert [c.kwargs.get("method") for c in scorer.call_args_list] == ["embed"]
 
 
 def test_score_smoke_vs_refs_keeps_its_stats_and_identity_shape(images):
@@ -223,7 +230,7 @@ def test_vlm_all_yes_is_still_withheld_without_a_measured_row(images):
     assert result["details"]["raw_score"] == 1.0
 
 
-# ── embed without weights ────────────────────────────────────────────────────
+# ── embed: read from the verified install folder, or not at all ──────────────
 
 class _Loader:
     """A from_pretrained that records how it was called and reports no local copy."""
@@ -243,7 +250,15 @@ def _clear_encoder_cache():
     vcm._ENCODER_CACHE.clear()
 
 
-def test_embed_without_weights_is_not_measured_and_asks_for_local_files_only(images):
+@pytest.fixture
+def install_root(tmp_path, monkeypatch):
+    """An empty install root of this test's own; stub.fake_install fills it."""
+    root = tmp_path / "identity_encoder"
+    monkeypatch.setattr(identity_encoder, "install_root", lambda: root)
+    return root
+
+
+def test_embed_not_installed_loads_nothing(images, install_root):
     ref, cand = images
     processor, model = _Loader(), _Loader()
     with patch.object(vcm, "_image_encoder_classes", return_value=(processor, model)):
@@ -251,15 +266,77 @@ def test_embed_without_weights_is_not_measured_and_asks_for_local_files_only(ima
 
     assert result["status"] == "not_measured"
     assert result["score"] is None
-    assert result["reason"] == "image encoder not installed"
+    assert result["reason"] == vcm.ENCODER_NOT_INSTALLED
+    assert processor.calls == [] and model.calls == [], "nothing is loaded without an install"
 
+
+@pytest.mark.parametrize("record", [
+    {"revision": "0" * 40},  # an install of another commit
+    {"sha256": "0" * 64},    # weights that did not match the pin
+])
+def test_an_install_of_other_weights_is_not_installed(images, install_root, record):
+    stub.fake_install(install_root, **record)
+    assert identity_encoder.installed_path() is None
+    ref, cand = images
+    result = vcm.score_identity_preservation([ref], cand, method="embed")
+    assert result["reason"] == vcm.ENCODER_NOT_INSTALLED
+
+
+def test_embed_reads_the_install_folder_with_local_files_only(images, install_root):
+    folder = stub.fake_install(install_root)
+    ref, cand = images
+    processor, model = _Loader(), _Loader()
+    with patch.object(vcm, "_image_encoder_classes", return_value=(processor, model)):
+        result = vcm.score_identity_preservation([ref], cand, method="embed")
+
+    assert result["status"] == "not_measured"
+    assert result["reason"] == vcm.ENCODER_NOT_INSTALLED
     assert processor.calls, "the encoder load was attempted"
-    for _name, kwargs in processor.calls + model.calls:
+    for name, kwargs in processor.calls + model.calls:
+        assert name == str(folder), "loaded from the install folder, not by hub id"
         assert kwargs.get("local_files_only") is True
     assert not vcm._ENCODER_CACHE, "a failed load is not cached"
 
 
-def test_embed_never_reaches_the_hub_or_a_download_path(images):
+def _coloured(tmp_path, name, rgb):
+    path = tmp_path / name
+    Image.new("RGB", (32, 32), rgb).save(path)
+    return str(path)
+
+
+def test_installed_and_proven_embed_scores_against_the_measured_threshold(tmp_path, install_root):
+    """The shipped row proves the pinned encoder, so a score comes back with
+    the declared threshold; same picture matches, a different one does not."""
+    stub.fake_install(install_root)
+    red = _coloured(tmp_path, "red.png", (230, 20, 20))
+    red2 = _coloured(tmp_path, "red2.png", (225, 25, 15))
+    blue = _coloured(tmp_path, "blue.png", (20, 20, 230))
+    with patch.object(vcm, "_image_encoder_classes", return_value=stub.stub_classes()):
+        same = vcm.score_smoke_identity([red, red2], red)
+        other = vcm.score_smoke_identity([red, red2], blue)
+
+    threshold = data.IDENTITY_METHODS["embed"]["threshold"]
+    assert same["status"] == "measured" and same["method"] == "embed"
+    assert same["threshold"] == threshold and same["match"] is True
+    assert other["status"] == "measured" and other["match"] is False
+    assert other["score"] < threshold <= same["score"]
+
+
+def test_remove_drops_the_loaded_encoder(tmp_path, install_root):
+    """A copy loaded before Remove must not keep scoring after it."""
+    folder = stub.fake_install(install_root)
+    red = _coloured(tmp_path, "red.png", (230, 20, 20))
+    with patch.object(vcm, "_image_encoder_classes", return_value=stub.stub_classes()):
+        assert vcm.score_smoke_identity([red], red)["status"] == "measured"
+        assert vcm._ENCODER_CACHE
+        identity_encoder.remove()
+        after = vcm.score_smoke_identity([red], red)
+    assert not folder.exists()
+    assert after["score"] is None and vcm.ENCODER_NOT_INSTALLED in after["reason"]
+    assert not vcm._ENCODER_CACHE
+
+
+def test_embed_never_reaches_the_hub_or_a_download_path(images, install_root):
     """The identity check is not allowed to be the thing that starts a download."""
     ref, cand = images
     processor, model = _Loader(), _Loader()
@@ -273,14 +350,45 @@ def test_embed_never_reaches_the_hub_or_a_download_path(images):
 
 # ── The evidence gate ────────────────────────────────────────────────────────
 
-def test_every_shipped_method_has_an_empty_measured_list():
-    for method, spec in data.IDENTITY_METHODS.items():
-        assert spec["measured"] == [], f"{method} ships with evidence it did not earn"
+def test_every_method_declares_a_floor_and_a_threshold():
+    for spec in data.IDENTITY_METHODS.values():
         assert spec["floor"] >= data.DEFAULT_IDENTITY_FLOOR
         assert 0.0 < spec["threshold"] < 1.0
 
 
-def test_empty_measured_list_is_not_proven():
+def test_vlm_ships_without_evidence():
+    """Its model is whichever vision model the machine has; no shipped row can be for it."""
+    assert data.IDENTITY_METHODS["vlm"]["measured"] == []
+
+
+def test_every_shipped_embed_row_says_what_it_was_measured_against():
+    spec = data.IDENTITY_METHODS["embed"]
+    entry = data.IMAGE_ENCODERS[spec["encoder"]]
+    assert spec["measured"], "the embed pass mark is measured"
+    for row in spec["measured"]:
+        assert row["model"] == spec["encoder"]
+        assert entry["weights_sha256"].startswith(row["digest"]) and len(row["digest"]) >= 12
+        assert row["revision"] == entry["revision"]
+        assert row["threshold"] == spec["threshold"]
+        assert 0 < row["correct"] <= row["n"]
+        assert row["date"] and row["set"]
+
+
+def test_the_shipped_row_proves_only_the_pinned_weights():
+    spec = data.IDENTITY_METHODS["embed"]
+    pinned = data.IMAGE_ENCODERS[spec["encoder"]]["weights_sha256"]
+    assert data.proven_for_model("embed", spec["encoder"], digest=pinned) is True
+    assert data.proven_for_model("embed", spec["encoder"], digest="f" * 64) is False
+
+
+def test_a_row_scored_at_another_pass_mark_is_not_proof(monkeypatch):
+    row = dict(data.IDENTITY_METHODS["embed"]["measured"][0])
+    monkeypatch.setitem(data.IDENTITY_METHODS["embed"], "threshold", row["threshold"] + 0.1)
+    assert data.proven_for_model("embed", row["model"]) is False
+
+
+def test_empty_measured_list_is_not_proven(monkeypatch):
+    monkeypatch.setitem(data.IDENTITY_METHODS["embed"], "measured", [])
     assert data.proven_for_model("vlm", "vlm-test:latest") is False
     assert data.proven_for_model("embed", "facebook/dinov2-base") is False
 
@@ -355,8 +463,10 @@ def harness():
 
 def test_the_harness_prints_the_row_the_gate_reads(harness):
     """A row the gate cannot read is a row nobody can paste in."""
-    row = harness.measured_row({"model": "vlm-test:latest", "correct": 96, "n": 100})
-    assert set(row) == {"model", "digest", "correct", "n", "date"}
+    row = harness.measured_row({"method": "vlm", "model": "vlm-test:latest",
+                                "threshold": data.IDENTITY_METHODS["vlm"]["threshold"],
+                                "correct": 96, "n": 100})
+    assert set(row) == {"model", "digest", "threshold", "correct", "n", "date"}
 
     with patch.dict(data.IDENTITY_METHODS["vlm"], {"measured": [row]}):
         assert data.proven_for_model("vlm", "vlm-test:latest") is True
@@ -381,3 +491,36 @@ def test_the_harness_builds_balanced_labelled_pairs(harness):
     assert sum(1 for p in pairs if not p["same"]) == 2
     assert all(p["subjects"][0] == p["subjects"][1] for p in pairs if p["same"])
     assert all(3 not in p["subjects"] for p in pairs)
+
+
+def test_the_harness_reports_both_distributions_and_the_best_cut(harness):
+    scores = [{"same": True, "raw_score": v} for v in (0.5, 0.6, 0.7)]
+    scores += [{"same": False, "raw_score": v} for v in (0.1, 0.2, 0.3)]
+    cut = harness.best_cut(scores)
+    assert cut["threshold"] == pytest.approx(0.4) and cut["gap"] == pytest.approx(0.2)
+    assert cut["correct"] == 6
+
+    overlapping = scores + [{"same": False, "raw_score": 0.65}]
+    cut = harness.best_cut(overlapping)
+    assert cut["gap"] is None and cut["correct"] == 6
+    assert harness.distribution([0.1, 0.3, 0.2]) == {"min": 0.1, "median": 0.2, "max": 0.3, "n": 3}
+
+
+def test_the_harness_does_not_ask_the_gpu_for_cpu_methods(harness, monkeypatch):
+    """embed and hist run on the CPU, so a render holding the card does not stop them."""
+    monkeypatch.setattr(harness, "gpu_is_busy", lambda: pytest.fail("asked about the GPU"))
+    monkeypatch.setattr(harness, "subject_images", lambda kind: [])
+    assert harness.main(["--methods", "embed,hist"]) == 1
+
+
+def test_the_harness_asks_the_running_backend_whether_the_gpu_is_held(harness):
+    """The job gate lives in the backend process; one built in the script reads free."""
+    from backend.utils import backend_http
+    held = backend_http.BackendResponse(200, None, {
+        "gpu_busy": True, "gpu_holder": {"kind": "lora_train", "native_id": "smoke_7"}})
+    with patch.object(backend_http, "request_json", return_value=held) as ask:
+        assert harness.gpu_is_busy() == "lora_train (smoke_7)"
+    assert ask.call_args.args == ("GET", "/api/jobs/gate")
+    down = backend_http.BackendError("unreachable", "not answering")
+    with patch.object(backend_http, "request_json", side_effect=down):
+        assert harness.gpu_is_busy() is None

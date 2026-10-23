@@ -551,7 +551,11 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
             consentImage={tc.consentImage}
             consentPrompt={tc.consentPrompt}
             onApproval={(approved, scope) =>
-              chatService.sendToolApproval(sessionId, approved, scope ? { scope, tools: [tc.tool] } : undefined)
+              chatService.sendToolApproval(sessionId, approved, {
+                ...(scope ? { scope, tools: [tc.tool] } : {}),
+                approvalId: tc.approvalId,
+                requestId: tc.approvalRequestId,
+              })
             }
           />
         ))}
@@ -693,13 +697,13 @@ const StreamingMessage = forwardRef(({ chatService, sessionId, onComplete }, ref
               label={`↑ ${tokenUsage.input_tokens.toLocaleString()} in`}
               size="small"
               variant="outlined"
-              sx={{ fontSize: "0.6rem", height: 18, color: "text.disabled", borderColor: "divider" }}
+              sx={{ fontSize: "0.6rem", height: 18, color: "text.secondary", borderColor: "divider" }}
             />
             <Chip
               label={`↓ ${tokenUsage.output_tokens.toLocaleString()} out`}
               size="small"
               variant="outlined"
-              sx={{ fontSize: "0.6rem", height: 18, color: "text.disabled", borderColor: "divider" }}
+              sx={{ fontSize: "0.6rem", height: 18, color: "text.secondary", borderColor: "divider" }}
             />
           </Box>
         )}

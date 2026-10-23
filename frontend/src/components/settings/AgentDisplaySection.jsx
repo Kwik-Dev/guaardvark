@@ -17,6 +17,7 @@ import RestartAltIcon from '@mui/icons-material/RestartAlt';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 
 import { ActionButton, Hint, Line, StatusPill } from './ui';
+import copyText from '../../utils/copyText';
 import {
   getDisplayStatus,
   installDisplay,
@@ -137,11 +138,10 @@ const AgentDisplaySection = ({ showMessage }) => {
   };
 
   const onCopyCommand = async (command) => {
-    try {
-      await navigator.clipboard.writeText(command);
+    // Clipboard needs a secure context; over plain http on a LAN IP copyText falls back to execCommand.
+    if (await copyText(command)) {
       showMessage?.('Command copied to clipboard.', 'success');
-    } catch (e) {
-      // Clipboard needs a secure context; over plain http on a LAN IP it is absent.
+    } else {
       showMessage?.('Could not copy — select the command and copy it manually.', 'warning');
     }
   };

@@ -25,28 +25,31 @@ class CheckInboundChangeTool(BaseTool):
     read_only = True
     observation_chars = 4000
     description = (
-        "Read a code change the way Guaardvark's inbound guard will before it lands, and say whether it "
-        "would be allowed, held for a person, or blocked, with each finding (rule, file:line, why). "
-        "Give either a git range of this checkout (range, e.g. 'main...my-branch') or one file's change: "
-        "filepath plus new_text, and old_text when new_text replaces that exact text in the file (without "
-        "old_text, new_text is the whole new file). Reads only; records nothing and holds nothing."
+        "Check a code change against Guaardvark's inbound guard before it lands in this checkout: the "
+        "rules that decide whether a merge is allowed, held for a person to read, or blocked. Returns "
+        "'Inbound guard: ALLOW|HOLD|BLOCK — N finding(s) over F file(s), +L line(s).' and up to 25 "
+        "findings, one per line with severity, rule, file:line, why and the matching text. Two ways to "
+        "call it: range, to read commits or a branch already in git; or filepath with new_text, to read "
+        "one edit before writing it. Giving neither is an error. Reads only: nothing is recorded or "
+        "held, whatever mode the guard runs in. For a review of what code does use analyze_code; to "
+        "confirm an edit already written is in the file, verify_change."
     )
     parameters = {
         "filepath": ToolParameter(
             name="filepath", type="string", required=False,
-            description="File the change is for, relative to the checkout root, e.g. 'backend/app.py'.",
+            description="File the edit is for, relative to the checkout root, e.g. 'backend/app.py'; it may not exist yet. Needs new_text.",
         ),
         "new_text": ToolParameter(
             name="new_text", type="string", required=False,
-            description="The replacement text, or the whole new file when old_text is not given.",
+            description="With old_text, the text that replaces it; without old_text, the whole new content of filepath.",
         ),
         "old_text": ToolParameter(
             name="old_text", type="string", required=False,
-            description="Exact text in filepath that new_text replaces.",
+            description="Exact text in filepath that new_text replaces; it must occur exactly once, or the call is an error.",
         ),
         "range": ToolParameter(
             name="range", type="string", required=False,
-            description="A git range of this checkout to read instead, e.g. 'main...feature' or 'HEAD~3..HEAD'.",
+            description="A revision or git range of this checkout, e.g. 'main...feature' (what the branch adds since it left main) or 'HEAD~3..HEAD'. Used instead of filepath when given.",
         ),
     }
 

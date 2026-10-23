@@ -72,6 +72,19 @@ def _get_llm():
     return llm
 
 
+def _scoped_table(project_id=None):
+    """(table, extra WHERE, params) for a project's rows: its own table in
+    per-project mode; the shared table (the one the index writes, through
+    indexing_service._store_scope) filtered to the project in global mode. The
+    raw project id named a per-project table that global mode never creates."""
+    from backend.services.indexing_service import _pg_table_name, _store_scope
+    scope = _store_scope(project_id)
+    table = _pg_table_name(scope)
+    if project_id is not None and scope is None:
+        return table, " AND metadata_->>'project_id' = %s", [str(project_id)]
+    return table, "", []
+
+
 def _fetch_leaf_embeddings(project_id=None) -> Dict[str, Any]:
     """Read node ids, text and embeddings straight from pgvector.
 
@@ -79,12 +92,12 @@ def _fetch_leaf_embeddings(project_id=None) -> Dict[str, Any]:
     exist a few centimetres away in Postgres.
     """
     import numpy as np
-    from backend.services.indexing_service import _pg_connect, _pg_table_name, _vector_backend
+    from backend.services.indexing_service import _pg_connect, _vector_backend
 
     if _vector_backend() != "pgvector":
         return {"error": "RAPTOR build currently requires the pgvector backend"}
 
-    table = _pg_table_name(project_id)
+    table, project_sql, project_params = _scoped_table(project_id)
     if not table:
         return {"error": "embedding dimension unknown"}
 
@@ -93,8 +106,8 @@ def _fetch_leaf_embeddings(project_id=None) -> Dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
                 f'SELECT node_id, text, embedding::text, metadata_ FROM "data_{table}" '
-                f"WHERE metadata_->>'content_type' IS DISTINCT FROM %s",
-                (SUMMARY_CONTENT_TYPE,),
+                f"WHERE metadata_->>'content_type' IS DISTINCT FROM %s{project_sql}",
+                (SUMMARY_CONTENT_TYPE, *project_params),
             )
             rows = cur.fetchall()
     finally:
@@ -293,19 +306,23 @@ def build_raptor_tree(
 
 def clear_raptor_summaries(project_id=None) -> Dict[str, Any]:
     """Delete summary nodes so a tree can be rebuilt from the leaves."""
-    from backend.services.indexing_service import _pg_connect, _pg_table_name, _vector_backend
+    from backend.services.indexing_service import _pg_connect, _store_scope, _vector_backend
     if _vector_backend() != "pgvector":
         return {"ok": False, "error": "requires the pgvector backend"}
-    table = _pg_table_name(project_id)
+    table, project_sql, project_params = _scoped_table(project_id)
     if not table:
         return {"ok": False, "error": "embedding dimension unknown"}
+    if project_id is None and _store_scope(project_id) is None:
+        # Clearing the whole-corpus tree leaves projects' own trees in the
+        # shared table alone.
+        project_sql, project_params = " AND metadata_->>'project_id' IS NULL", []
     try:
         conn = _pg_connect()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    f'DELETE FROM "data_{table}" WHERE metadata_->>\'content_type\' = %s',
-                    (SUMMARY_CONTENT_TYPE,),
+                    f'DELETE FROM "data_{table}" WHERE metadata_->>\'content_type\' = %s{project_sql}',
+                    (SUMMARY_CONTENT_TYPE, *project_params),
                 )
                 removed = cur.rowcount
             conn.commit()

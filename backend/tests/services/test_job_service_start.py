@@ -155,7 +155,12 @@ def comfy(services, monkeypatch):
 def test_image_down_and_start_off_keeps_the_old_error(comfy, services):
     with pytest.raises(RuntimeError) as err:
         comfy._require_up("ComfyUI not reachable at http://127.0.0.1:8188 — cannot edit image")
-    assert str(err.value) == "ComfyUI not reachable at http://127.0.0.1:8188 — cannot edit image"
+    # The old error still leads; the sentence every tool gives for a stopped
+    # service (how to start it, the setting that lets Guaardvark) follows.
+    assert str(err.value) == (
+        "ComfyUI not reachable at http://127.0.0.1:8188 — cannot edit image. "
+        + plugin_bridge.service_down_message("comfyui", context="image"))
+    assert JOB_SERVICE_START_ENV + "=1" in str(err.value)
     assert services.started == []
 
 
@@ -259,6 +264,9 @@ def test_music3_starts_comfyui_through_the_video_path(audio, services, monkeypat
 
 @pytest.fixture
 def upscaler(services, monkeypatch):
+    # The direct proxy path; with the GPU session on, the supervisor's worker
+    # submits the job instead of the route.
+    monkeypatch.setenv("GUAARDVARK_UPSCALE_GPU_SESSION", "0")
     posted = []
 
     def get(url, timeout=None, **kw):
@@ -283,14 +291,20 @@ def upscaler(services, monkeypatch):
     return app.test_client(), posted
 
 
-def test_upscale_down_and_start_off_is_the_old_503(upscaler, services):
+def test_upscale_down_and_start_off_is_the_old_503(upscaler, services, monkeypatch):
+    monkeypatch.setenv(JOB_SERVICE_START_ENV, "0")
     client, posted = upscaler
     r = client.post("/api/upscaling/upscale/video", json={"input_path": "/tmp/in.mp4"})
     assert r.status_code == 503 and services.started == [] and posted == []
 
 
-def test_upscale_job_starts_the_upscaler(upscaler, services, monkeypatch):
-    _on(monkeypatch)
+def test_upscale_starts_by_default_and_image_does_not(services):
+    assert plugin_bridge.job_service_start_enabled("upscale") is True
+    assert plugin_bridge.job_service_start_enabled("image") is False
+    assert plugin_bridge.job_service_start_enabled() is False
+
+
+def test_upscale_job_starts_the_upscaler(upscaler, services):
     client, posted = upscaler
     r = client.post("/api/upscaling/upscale/video", json={"input_path": "/tmp/in.mp4"})
     assert r.status_code == 200 and r.get_json()["data"] == {"job_id": "u1"}

@@ -103,34 +103,33 @@ real fix that lands as a `PendingFix` row for human approve/apply in Settings. T
 frontend Findings panel (beside the constellation) drives this: click to locate a
 module, dispatch to fix, dismiss to acknowledge.
 
+## The LLM tool (built)
+
+`map_codebase` (`MapCodebaseTool` in `backend/tools/workstation_tools.py`) runs the
+mapper for the chat agent, the `/sysmap` slash command and MCP clients. It maps
+Guaardvark's own checkout, or a folder inside it (`root`, absolute or relative to
+the checkout; a path outside it, or inside an always-skipped folder such as `data`,
+`logs` or `node_modules`, is refused), and returns JSON: `file_count`,
+`languages`, per-analyzer `stats`, `finding_count` and the top findings (`limit`,
+default 15, at most 40), most severe first, each with `id`, `kind`, `severity`,
+`summary`, up to six `paths` and whether it is `dispatchable`. Dismissed findings
+are left out.
+
+It never blocks for long. A map under five minutes old (`CACHE_TTL_SECONDS` in
+`backend/api/system_map_api.py`) comes back as is; an older one comes back at
+once with its age while a new one is computed in a background thread, one per
+folder at a time. When no map exists yet, or with `refresh=true`, the call waits
+up to 60 seconds (over MCP, half the MCP call timeout when that is shorter) and
+otherwise answers `status: "computing"`; calling again later returns the result
+without starting a second computation.
+
+`dispatch_map_finding` (same file) hands a dispatchable finding to the
+self-improvement pipeline, the same path as
+`POST /api/system-map/findings/<id>/dispatch`. It needs a person's approval and
+is not offered over MCP. For an uploaded Code Repository folder,
+`get_repository_map` and `get_dependency_graph` are the tools to use.
+
 ## Other integration paths (not built)
-
-### As an LLM tool
-
-```python
-# backend/tools/system_mapper_tool.py  (sketch)
-from backend.services.agent_tools import BaseTool, register_tool
-from backend.services.system_mapper import codebase_map
-
-class SystemMapperTool(BaseTool):
-    name = "analyze_codebase"
-    description = "Map the architecture of a codebase: imports, routes, tools, findings."
-    parameters = { "path": ToolParameter(type="string", required=True, description="Path to the code root") }
-
-    def execute(self, **kwargs):
-        smap = codebase_map(kwargs["path"])
-        return ToolResult(success=True, output={
-            "summary": smap.stats,
-            "high_findings": [f.to_dict() for f in smap.findings if f.severity.value == "high"][:20],
-            "medium_findings": [f.to_dict() for f in smap.findings if f.severity.value == "medium"][:20],
-        })
-
-register_tool(SystemMapperTool())
-```
-
-Add to a relevant `*_TOOLS` list in `unified_chat_engine.py` so the LLM can
-reach it. Then the agent can answer "what's wrong with this codebase?"
-grounded in real data.
 
 ### As a DocumentsPage action
 

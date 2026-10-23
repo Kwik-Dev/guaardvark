@@ -39,6 +39,7 @@ class UnifiedChatService {
    * Send a message via HTTP. Response arrives via Socket.IO events.
    */
   async sendMessage(sessionId, message, options = {}, imageBase64 = null, isVoiceMessage = false) {
+    // imageBase64: one base64 string, or an array of them when several pictures are attached.
     debugLog('[UnifiedChatService] sendMessage START for session', sessionId, 'options=', options);
     // The backend gates Gemma4 direct path and screen tools on this flag.
     // Trigger when EITHER the screen viewer is open (user is watching live)
@@ -72,8 +73,15 @@ class UnifiedChatService {
       project_root: options.project_root || options.projectRoot,
       is_voice_message: isVoiceMessage,
     };
-    if (imageBase64) {
-      body.image = imageBase64;
+    // One picture goes as ``image``; several go as ``images`` (primary
+    // first), each sent once. The server reads ``images`` when present and
+    // falls back to ``image`` (backend/socketio_instance.py, chat_attachments),
+    // so a request never carries the first picture twice.
+    const pictures = Array.isArray(imageBase64) ? imageBase64.filter(Boolean) : (imageBase64 ? [imageBase64] : []);
+    if (pictures.length > 1) {
+      body.images = pictures;
+    } else if (pictures.length === 1) {
+      body.image = pictures[0];
     }
     debugLog('[UnifiedChatService] sendMessage POST /unified (agent_screen_active=', agentScreenActive, ', inAgentMode=', inAgentMode, ')');
     const response = await fetch(`${API_BASE}/api/chat/unified`, {
@@ -169,13 +177,17 @@ class UnifiedChatService {
 
   /**
    * Send tool approval response.
-   * @param {{scope?: "once"|"session"|"task"|"always", tools?: string[]}} [opts]
+   * approvalId / requestId come from the chat:tool_approval_request being
+   * answered; the server ignores an answer that names another card.
+   * @param {{scope?: "once"|"session"|"task"|"always", tools?: string[], approvalId?: string, requestId?: string}} [opts]
    */
   sendToolApproval(sessionId, approved, opts) {
     if (this.socket?.connected) {
       const payload = { session_id: sessionId, approved };
       if (opts?.scope) payload.approval_scope = opts.scope;
       if (opts?.tools?.length) payload.tools = opts.tools;
+      if (opts?.approvalId) payload.approval_id = opts.approvalId;
+      if (opts?.requestId) payload.request_id = opts.requestId;
       this.socket.emit("chat:tool_approval_response", payload);
     }
   }

@@ -39,6 +39,8 @@ const CreateProductionDialog = ({ open, onClose, onCreated }) => {
   const [videoModels, setVideoModels] = useState([]);
   const [videoModel, setVideoModel] = useState('');
   const fileInputRef = useRef(null);
+  // Frame shape for the storyboard stills and clips; empty sends nothing, so the backend default (16:9) applies.
+  const [aspectRatio, setAspectRatio] = useState('');
 
   useEffect(() => {
     if (open) {
@@ -143,11 +145,15 @@ const CreateProductionDialog = ({ open, onClose, onCreated }) => {
     setLoading(true);
     setError(null);
     try {
+      const settings = {
+        ...(videoModel ? { video_model: videoModel } : {}),
+        ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+      };
       const payload = {
         name,
         script_text: scriptText,
         project_id: projectId?.id || null,
-        ...(videoModel ? { settings: { video_model: videoModel } } : {})
+        ...(Object.keys(settings).length ? { settings } : {})
       };
       await onCreated(payload);
       onClose();
@@ -158,6 +164,7 @@ const CreateProductionDialog = ({ open, onClose, onCreated }) => {
       setVideoModel('');
       setSelectedTemplate(null);
       setUploadedFileName(null);
+      setAspectRatio('');
     } catch (err) {
       setError(err.message || 'Failed to create production');
     } finally {
@@ -254,6 +261,19 @@ const CreateProductionDialog = ({ open, onClose, onCreated }) => {
               Upload a .txt, .fountain, or .md script from your computer. This replaces the Script Text field.
             </Typography>
           </Box>
+          <FormControl fullWidth size="small">
+            <InputLabel>Frame</InputLabel>
+            <Select
+              value={aspectRatio}
+              onChange={(e) => setAspectRatio(e.target.value)}
+              label="Frame"
+            >
+              <MenuItem value="">Wide 16:9</MenuItem>
+              <MenuItem value="9:16">Tall 9:16</MenuItem>
+              <MenuItem value="1:1">Square 1:1</MenuItem>
+            </Select>
+          </FormControl>
+
           <TextField
             label="Script Text"
             fullWidth

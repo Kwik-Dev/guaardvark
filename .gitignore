@@ -28,6 +28,7 @@ data/piptmp/
 data/database/
 data/models/
 data/context/
+data/indexes/
 
 # Video editor projects + migrated session (runtime user data, per-machine)
 data/video-editor-projects/
@@ -53,6 +54,9 @@ data/agent_state.json
 data/.screenshot_url_secret
 # Which training base models this install has downloaded
 data/training/base_models.json
+# The GGUF converter installed from Settings > Training libraries, and its staging folders
+data/training/gguf_converter/
+data/training/.gguf_converter-*/
 # Per-machine UI state and MCP server config
 data/folder_state.json
 data/images_windows_state.json
@@ -79,6 +83,8 @@ data/conversations/summaries/
 data/training/screenshots/
 data/training/failures/
 data/training/datasets/*.jsonl
+data/training/scrub_terms.txt
+data/training/build_reports/
 data/training/models/
 # Servo calibration data — runtime-generated, regenerated per calibration run
 data/training/servo_logs/
@@ -185,6 +191,11 @@ coverage.xml
 
 # Plugin dependencies (installed at runtime)
 plugins/comfyui/ComfyUI/
+# Trees the ComfyUI updater keeps beside the live one
+plugins/comfyui/ComfyUI.next/
+plugins/comfyui/ComfyUI.prev-*/
+plugins/comfyui/ComfyUI.next.stale-*/
+plugins/comfyui/.update_job.json
 plugins/*/venv/
 backend/tools/voice/piper-models/*.onnx
 backend/tools/voice/piper-models/*.onnx.json

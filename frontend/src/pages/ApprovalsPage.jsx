@@ -1,11 +1,15 @@
 // frontend/src/pages/ApprovalsPage.jsx
 //
-// Everything waiting on a human. Publishes: anything an agent queues — from
-// chat, MCP or a schedule — is held here until it is approved, and so is
-// everything else when supervised mode is on. Code changes: what the inbound
-// guard holds before it lands in this checkout.
+// Everything waiting on a human. Publishes: every publish is held here until it
+// is approved, except one a person starts from the app to a Discord webhook set
+// to post without approval; anything an agent queues (chat, MCP, a schedule)
+// waits whatever that switch says. A waiting publish can be edited here first;
+// Approve sends the revision on screen. Outreach: drafts to approve, then approved
+// Reddit/YouTube/Facebook drafts to start with "Post now, I'm watching".
+// Code changes: what the inbound guard holds before it lands in this checkout.
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Alert,
   Box,
   Button,
   Chip,
@@ -30,10 +34,13 @@ import {
   Cancel as CancelIcon,
   CheckCircle as CheckCircleIcon,
   DoNotDisturb as DoNotDisturbIcon,
+  Edit as EditIcon,
   Refresh as RefreshIcon,
 } from "@mui/icons-material";
 import PageLayout from "../components/layout/PageLayout";
 import RejectPublishDialog from "../components/connections/RejectPublishDialog";
+import EditPublishDialog from "../components/connections/EditPublishDialog";
+import { draftedBy, editedFieldWords } from "../components/connections/publishEdit";
 import HeldChangesPanel from "../components/approvals/HeldChangesPanel";
 import OutreachDraftsPanel from "../components/approvals/OutreachDraftsPanel";
 import AlwaysApprovedToolsPanel from "../components/approvals/AlwaysApprovedToolsPanel";
@@ -52,21 +59,24 @@ import {
   usePendingApprovals,
 } from "../hooks/usePendingApprovals";
 
-// status → chip colour. Mirrors ConnectionsPage so a publish reads the same
-// wherever it appears.
+// status → chip colour, so a publish reads the same wherever it appears.
 const STATUS_COLOR = {
   awaiting_approval: "warning",
+  scheduled: "info",
   queued: "info",
   processing: "info",
   posted: "success",
   rejected: "error",
   cancelled: "default",
   failed: "error",
+  deleted: "default",
 };
 
-const HISTORY_STATUSES = ["posted", "rejected", "cancelled", "failed"];
+const HISTORY_STATUSES = ["scheduled", "posted", "rejected", "cancelled", "failed", "deleted"];
 
-// Sources the backend always supervises, whatever the global setting says.
+const formatAt = (iso) => (iso ? new Date(iso).toLocaleString() : "");
+
+// Sources the backend always holds for approval, whatever a connection says.
 const AGENT_SOURCES = new Set(["chat", "mcp", "schedule"]);
 
 const formatWhen = (iso) => {
@@ -91,9 +101,12 @@ const ApprovalsPage = () => {
   const [selectedId, setSelectedId] = useState(null);
   const [busyId, setBusyId] = useState(null);
   const [rejecting, setRejecting] = useState(null);
+  const [editing, setEditing] = useState(null);
   const [notifyEnabled, setNotifyEnabled] = useState(desktopNotificationsGranted);
 
-  const { pending, held, outreach, loading, heldLoading, outreachLoading, error, refresh } = usePendingApprovals({
+  const {
+    pending, held, outreach, outreachWaiting, loading, heldLoading, outreachLoading, error, refresh,
+  } = usePendingApprovals({
     notify: notifyEnabled,
   });
 
@@ -111,7 +124,7 @@ const ApprovalsPage = () => {
     try {
       const [conns, queuedRows] = await Promise.all([
         fetchConnections(),
-        fetchPublishes({ status: "queued", limit: 50 }),
+        fetchPublishes({ status: "queued,scheduled", limit: 50 }),
       ]);
       setConnections(conns);
       setQueued(queuedRows);
@@ -161,7 +174,13 @@ const ApprovalsPage = () => {
       if (tab === "history") await loadHistory();
       setSelectedId(null);
     } catch (err) {
-      showMessage(err?.message || `Could not ${verb.replace(/ed$/, "")}`, "error");
+      // Edited or decided elsewhere since this page loaded it: show what it is now.
+      if (err?.status === 409 && err?.data?.code) {
+        showMessage(err.message, "warning");
+        await Promise.all([refresh(), loadSupporting()]);
+      } else {
+        showMessage(err?.message || `Could not ${verb.replace(/ed$/, "")}`, "error");
+      }
     } finally {
       setBusyId(null);
       setRejecting(null);
@@ -224,6 +243,7 @@ const ApprovalsPage = () => {
                   {AGENT_SOURCES.has(record.requested_by) && (
                     <Chip label={record.requested_by} size="small" variant="outlined" />
                   )}
+                  {record.edited_at && <Chip label="edited" size="small" variant="outlined" />}
                 </Stack>
               }
               secondary={
@@ -264,8 +284,15 @@ const ApprovalsPage = () => {
     }
     const isPending = selected.status === "awaiting_approval";
     const busy = busyId === selected.id;
+    const drafted = draftedBy(selected);
     return (
       <Box sx={{ p: 3 }}>
+        {drafted && isPending && (
+          <Alert severity="info" sx={{ mb: 2 }}>
+            {drafted} You are reviewing pre-filled text: read it, and use Edit to change anything
+            before you approve. Nothing is sent until you approve.
+          </Alert>
+        )}
         <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2 }}>
           <Typography variant="h6">{connectionName(selected)}</Typography>
           <Chip
@@ -274,6 +301,13 @@ const ApprovalsPage = () => {
             color={STATUS_COLOR[selected.status] || "default"}
           />
           <Chip label={selected.visibility} size="small" variant="outlined" />
+          {selected.scheduled_at && (
+            <Chip label={`Scheduled ${formatAt(selected.scheduled_at)}`} size="small" variant="outlined" />
+          )}
+          {selected.ai_disclosure && <Chip label="AI label" size="small" variant="outlined" />}
+          {Object.entries(selected.post_options || {}).map(([name, value]) => (
+            <Chip key={name} label={`${name}: ${value}`} size="small" variant="outlined" />
+          ))}
         </Stack>
 
         {selected.title && (
@@ -298,6 +332,13 @@ const ApprovalsPage = () => {
           <Typography variant="caption" color="text.secondary">
             Requested by {selected.requested_by} · {formatWhen(selected.created_at)}
           </Typography>
+          {selected.edited_at && (
+            <Typography variant="caption" color="text.secondary">
+              Edited {formatWhen(selected.edited_at)}
+              {selected.edited_by && selected.edited_by !== "ui" ? ` by ${selected.edited_by}` : ""}
+              {editedFieldWords(selected) ? `: ${editedFieldWords(selected)}` : ""}
+            </Typography>
+          )}
           {!!selected.media_refs?.length && (
             <Typography variant="caption" color="text.secondary">
               {selected.media_refs.length} media item(s)
@@ -326,7 +367,9 @@ const ApprovalsPage = () => {
           <>
             <Divider sx={{ my: 2 }} />
             <Typography variant="caption" color="text.secondary" sx={{ mb: 1, display: "block" }}>
-              Approving sends this to {connectionName(selected)} on the next pass.
+              {selected.scheduled_at && new Date(selected.scheduled_at).getTime() > Date.now()
+                ? `Approving schedules this for ${formatAt(selected.scheduled_at)}; it goes to ${connectionName(selected)} then.`
+                : `Approving sends this to ${connectionName(selected)} on the next pass.`}
             </Typography>
             <Stack direction="row" spacing={1}>
               <Button
@@ -334,10 +377,17 @@ const ApprovalsPage = () => {
                 startIcon={<CheckCircleIcon />}
                 disabled={busy}
                 onClick={() =>
-                  runAction(selected, () => approvePublish(selected.id), "approved")
+                  runAction(
+                    selected,
+                    () => approvePublish(selected.id, selected.revision ?? 0),
+                    "approved",
+                  )
                 }
               >
                 {busy ? "Working…" : "Approve"}
+              </Button>
+              <Button startIcon={<EditIcon />} disabled={busy} onClick={() => setEditing(selected)}>
+                Edit
               </Button>
               <Button
                 color="error"
@@ -404,7 +454,11 @@ const ApprovalsPage = () => {
             {queued.map((record) => (
               <ListItemButton key={record.id} disabled>
                 <ListItemText
-                  primary={connectionName(record)}
+                  primary={
+                    record.status === "scheduled"
+                      ? `${connectionName(record)} · ${formatAt(record.scheduled_at)}`
+                      : connectionName(record)
+                  }
                   secondary={record.title || record.body || "(no text)"}
                   primaryTypographyProps={{ variant: "body2" }}
                   secondaryTypographyProps={{ variant: "caption", noWrap: true }}
@@ -430,7 +484,11 @@ const ApprovalsPage = () => {
           />
           <Tab
             value="outreach"
-            label={outreach.length ? `Outreach (${outreach.length})` : "Outreach"}
+            label={
+              outreach.length + outreachWaiting.length
+                ? `Outreach (${outreach.length + outreachWaiting.length})`
+                : "Outreach"
+            }
           />
           <Tab
             value="code"
@@ -451,6 +509,7 @@ const ApprovalsPage = () => {
         ) : tab === "outreach" ? (
           <OutreachDraftsPanel
             drafts={outreach}
+            waiting={outreachWaiting}
             loading={outreachLoading}
             onChanged={refresh}
             showMessage={showMessage}
@@ -464,6 +523,19 @@ const ApprovalsPage = () => {
           </Box>
         )}
       </Paper>
+
+      <EditPublishDialog
+        open={!!editing}
+        record={editing}
+        connection={editing ? connections.find((c) => c.id === editing.connection_id) || null : null}
+        accountLabel={editing ? connectionName(editing) : ""}
+        onClose={() => setEditing(null)}
+        onSaved={async () => {
+          setEditing(null);
+          showMessage("Saved. It still waits for your approval.");
+          await Promise.all([refresh(), loadSupporting()]);
+        }}
+      />
 
       <RejectPublishDialog
         open={!!rejecting}

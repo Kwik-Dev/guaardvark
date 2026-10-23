@@ -98,6 +98,7 @@ def test_pick_device_respects_process_boundary(monkeypatch, mcp_process, expecte
     monkeypatch.setattr(probe, "has_gpu", has_gpu, raising=False)
     monkeypatch.setattr(probe, "get_available_vram", get_available_vram, raising=False)
     monkeypatch.setitem(sys.modules, probe.__name__, probe)
+    monkeypatch.setattr(reranker, "_cuda_unusable_reason", lambda: None)
     monkeypatch.setenv("GUAARDVARK_RERANK_MIN_VRAM_MB", "3000")
     if mcp_process:
         monkeypatch.setenv("GUAARDVARK_MCP_PROCESS", "1")

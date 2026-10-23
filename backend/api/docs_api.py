@@ -13,6 +13,7 @@ from sqlalchemy.orm import joinedload
 from werkzeug.utils import secure_filename
 from backend.utils.db_utils import ensure_db_session_cleanup
 from backend.utils.response_utils import success_response, error_response
+from backend.utils.path_safety import is_within
 
 try:
     from llama_index.core import VectorStoreIndex
@@ -412,9 +413,19 @@ def get_document_context(doc_id):
             if os.path.exists(full_path):
                 file_size = os.path.getsize(full_path)
 
-        # Estimate chunk count based on file size (rough estimate: 1KB per chunk)
-        chunk_count = max(1, file_size // 1024) if file_size > 0 else 1
-        avg_chunk_size = file_size // chunk_count if chunk_count > 0 else 0
+        # The chunks actually stored for it, counted in the vector table. This
+        # used to be a guess (one chunk per KB of file). None when the table
+        # cannot be read (a file-backed store), rather than a made-up number.
+        chunk_count = None
+        avg_chunk_size = None
+        try:
+            from backend.services.indexing_service import document_vector_stats
+            vstats = document_vector_stats(document.id, getattr(document, "project_id", None))
+            if vstats is not None:
+                chunk_count = vstats["chunks"]
+                avg_chunk_size = vstats["avg_chars"]
+        except Exception as count_err:
+            logger.warning(f"Could not count chunks for document {doc_id}: {count_err}")
 
         # Determine content types based on file extension
         content_types = []
@@ -703,14 +714,34 @@ def manage_document(doc_id):
                 content = data["content"]
                 if not isinstance(content, str):
                     return jsonify({"error": "content must be a string"}), 400
+                # A stored path can be absolute (production and interconnector
+                # rows), and os.path.join then ignores the uploads folder. The
+                # file copy is written only when it resolves inside uploads or
+                # outputs; otherwise nothing changes, in the row or on disk.
+                full_path = None
+                upload_root = current_app.config.get("UPLOAD_FOLDER")
+                if document.path and upload_root:
+                    full_path = os.path.join(upload_root, document.path)
+                    storage_roots = [upload_root, current_app.config.get("OUTPUT_DIR")]
+                    if not is_within(full_path, storage_roots):
+                        logger.warning(
+                            f"Refusing to write document {doc_id}: its path resolves outside uploads and outputs"
+                        )
+                        return (
+                            jsonify(
+                                {
+                                    "error": "This document's file lives outside the uploads and outputs folders; refusing to write it.",
+                                    "code": "PATH_OUTSIDE_STORAGE",
+                                }
+                            ),
+                            400,
+                        )
                 document.content = content
                 document.is_code_file = _is_code_file(document.filename)
                 document.size = len(content.encode("utf-8"))
-                if document.path and current_app.config.get("UPLOAD_FOLDER"):
-                    full_path = os.path.join(current_app.config["UPLOAD_FOLDER"], document.path)
-                    if os.path.exists(full_path):
-                        with open(full_path, "w", encoding="utf-8") as f:
-                            f.write(content)
+                if full_path and os.path.exists(full_path):
+                    with open(full_path, "w", encoding="utf-8") as f:
+                        f.write(content)
 
             document.updated_at = datetime.datetime.now(datetime.UTC)
             db.session.commit()
@@ -763,8 +794,22 @@ def manage_document(doc_id):
                 logger.warning(f"Failed to cancel indexing job {document.indexing_job_id}: {cancel_error}")
                 # Continue with deletion even if job cancellation fails
         
-        # Only try to remove from index if it was actually indexed
-        if not is_code_file and index_status in ["INDEXED", "INDEXING"]:
+        # Remove its vectors whatever its kind and status: code files are chunked
+        # into the vector table too, and a document whose last re-index failed
+        # (ERROR) keeps the vectors of its previous successful one.
+        try:
+            from backend.services.indexing_service import purge_document_vectors
+            # Node ids are `doc_<id>_<hash>` per source fragment, so `delete_ref_doc`
+            # matched on a bare document id never found anything -- it removed nothing
+            # and logged success, leaving deleted documents answering questions.
+            # purge_document_vectors does the prefix match the ids actually need.
+            _removed = purge_document_vectors(document.id, getattr(document, "project_id", None))
+            logger.info(f"Removed document {doc_id} from vector index ({_removed} chunk(s), "
+                        f"{'not run: ' + _removed.reason if _removed.reason else 'purged'})")
+        except Exception as index_err:
+            logger.warning(f"Failed to remove from index (continuing with deletion): {index_err}")
+
+        if index_status in ["INDEXED", "INDEXING", "ERROR"]:
             index_instance: Optional[VectorStoreIndex] = current_app.config.get("LLAMA_INDEX_INDEX")
             storage_dir: Optional[str] = current_app.config.get("STORAGE_DIR")
             
@@ -773,27 +818,14 @@ def manage_document(doc_id):
                 hasattr(index_instance, "delete_ref_doc")):
                 
                 try:
-                    from backend.services.indexing_service import purge_document_vectors
-                    # Node ids are `doc_<id>_<hash>` per source fragment, so `delete_ref_doc`
-                    # matched on a bare document id never found anything -- it removed nothing
-                    # and logged success, leaving deleted documents answering questions.
-                    # purge_document_vectors does the prefix match the ids actually need.
-                    _removed = purge_document_vectors(
-                        document.id, getattr(document, "project_id", None))
-                    logger.info(f"Removed document {doc_id} from vector index ({_removed} chunk(s))")
-                    
-                    try:
-                        index_instance.storage_context.persist(persist_dir=storage_dir)
-                        logger.info(f"Persisted index changes after deleting doc {doc_id}")
-                    except Exception as persist_err:
-                        logger.warning(f"Failed to persist index after deletion: {persist_err}")
-                        
-                except Exception as index_err:
-                    logger.warning(f"Failed to remove from index (continuing with deletion): {index_err}")
+                    index_instance.storage_context.persist(persist_dir=storage_dir)
+                    logger.info(f"Persisted index changes after deleting doc {doc_id}")
+                except Exception as persist_err:
+                    logger.warning(f"Failed to persist index after deletion: {persist_err}")
             else:
-                logger.info(f"Index not available for document {doc_id} - skipping index removal")
+                logger.info(f"Index not available for document {doc_id} - nothing to persist")
         else:
-            logger.info(f"Document {doc_id} is a code file (stored={index_status}) - skipping index removal")
+            logger.info(f"Document {doc_id} was not indexed (status={index_status}) - nothing to persist")
 
         try:
             doc_filename = document.filename
@@ -893,12 +925,19 @@ def upload_document():
             auto_index=True      # Automatically trigger indexing (now uses direct Celery, no HTTP delay)
         )
 
-        return jsonify({
+        # The service records a failed queue attempt on the row (ERROR with
+        # the reason) rather than failing the upload; say so in the reply.
+        indexing_queued = document.index_status != "ERROR"
+        payload = {
             "message": "Document uploaded successfully",
             "document_id": document.id,
             "filename": document.filename,
-            "job_id": job_id
-        }), 201
+            "job_id": job_id,
+            "indexing_queued": indexing_queued,
+        }
+        if not indexing_queued:
+            payload["indexing_error"] = document.error_message
+        return jsonify(payload), 201
 
     except ValueError as e:
         logger.warning(f"Validation error during upload: {e}")

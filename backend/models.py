@@ -839,7 +839,11 @@ class Document(db.Model):
     filename = db.Column(db.String(255), nullable=False)
     path = db.Column(db.String(1024), nullable=False, unique=True)
     type = db.Column(db.String(50), nullable=True)
-    index_status = db.Column(db.String(50), default="INDEXING", index=True)
+    # A row that nothing has queued is NOT_INDEXED (the status the Files page
+    # shows with no dot). Paths that queue a Celery task set INDEXING or
+    # PENDING themselves. Python-side default only; the column has no server
+    # default, so this is not a schema change.
+    index_status = db.Column(db.String(50), default="NOT_INDEXED", index=True)
     indexed_at = db.Column(db.DateTime, nullable=True)
     error_message = db.Column(db.Text, nullable=True)
 
@@ -1737,6 +1741,40 @@ class InterconnectorPendingApproval(db.Model):
         }
 
 
+class InterconnectorNodeIdentity(db.Model):
+    """A machine's public key, as enrolled on the master (backend/utils/node_auth.py).
+
+    pending until the operator approves it; only an approved machine gets
+    certificates. revoked stops its certificates at once. The node row in
+    interconnector_nodes is created on the first enrolment after approval.
+    """
+    __tablename__ = "interconnector_node_identities"
+
+    node_id = db.Column(db.String(36), primary_key=True)
+    public_key = db.Column(db.String(64), nullable=False)  # raw Ed25519, base64url
+    status = db.Column(db.String(20), nullable=False, default="pending")  # pending/approved/revoked
+    node_name = db.Column(db.String(255), nullable=True)
+    hostname = db.Column(db.String(255), nullable=True)
+    host = db.Column(db.String(255), nullable=True)  # address the request came from
+    requested_at = db.Column(db.DateTime(), default=lambda: datetime.now())
+    decided_at = db.Column(db.DateTime(), nullable=True)
+    cert_expires_at = db.Column(db.DateTime(), nullable=True)
+
+    def to_dict(self):
+        from backend.utils.node_auth import fingerprint
+        return {
+            "node_id": self.node_id,
+            "fingerprint": fingerprint(self.public_key),
+            "status": self.status,
+            "node_name": self.node_name,
+            "hostname": self.hostname,
+            "host": self.host,
+            "requested_at": self.requested_at.isoformat() if self.requested_at else None,
+            "decided_at": self.decided_at.isoformat() if self.decided_at else None,
+            "cert_expires_at": self.cert_expires_at.isoformat() if self.cert_expires_at else None,
+        }
+
+
 # --- Uncle Claude Family Architecture Models ---
 class InterconnectorLearning(db.Model):
     __tablename__ = "interconnector_learnings"
@@ -1875,7 +1913,10 @@ class WordPressSite(db.Model):
     url = db.Column(db.String(2048), nullable=False, unique=True)
     site_name = db.Column(db.String(255), nullable=True)
     username = db.Column(db.String(255), nullable=True)  # Optional, only for direct WordPress REST API
-    api_key = db.Column(db.Text, nullable=False)  # LLAMANATOR2 API key or WordPress Application Password
+    # Kept empty. The LLAMANATOR2 API key or WordPress Application Password
+    # lives in the credential store (backend.services.wordpress_credentials);
+    # rows from older installs are moved there at startup.
+    api_key = db.Column(db.Text, nullable=False, default="")
     connection_type = db.Column(db.String(50), default="llamanator", nullable=False)  # "llamanator" or "wordpress"
     client_id = db.Column(
         db.Integer,
@@ -1931,13 +1972,19 @@ class WordPressSite(db.Model):
                 push_settings = json.loads(self.push_settings)
             except (json.JSONDecodeError, TypeError):
                 push_settings = {}
-        
+
+        from backend.services.wordpress_credentials import key_status
+
+        key = key_status(self)
         return {
             "id": self.id,
             "url": self.url,
             "site_name": self.site_name,
             "username": self.username if self.username else None,  # Convert empty string to None for API
-            "has_api_key": bool(self.api_key),  # Don't expose actual key
+            # Never the key itself: whether one is stored, and its last four characters.
+            "has_api_key": key["configured"],
+            "api_key_hint": key["hint"],
+            "api_key_encrypted": key["encrypted"],
             "connection_type": self.connection_type,
             "client_id": self.client_id,
             "client": {"id": self.client_ref.id, "name": self.client_ref.name} if self.client_ref else None,
@@ -2015,6 +2062,18 @@ class Connection(db.Model):
         except (ValueError, TypeError):
             return fallback
 
+    def _public_opt_in(self):
+        """Whether this connection may use the visibilities its provider holds
+        back, and why: the effective state, with the provider's legacy
+        install-wide setting applied (``gates.public_opt_in_state``). None
+        when the provider holds none back, or the state cannot be read."""
+        try:
+            from backend.services.connections.gates import public_opt_in_state
+
+            return public_opt_in_state(self.provider, self.config)
+        except Exception:  # noqa: BLE001 - must not 500 the list; the publish path re-checks
+            return None
+
     def to_dict(self, *, env_keys=()):
         """Serialise for the API. Never emits a secret value."""
         status = {
@@ -2048,6 +2107,7 @@ class Connection(db.Model):
             "scopes": self._json_field(self.scopes, []),
             "config": self._json_field(self.config, {}),
             "capabilities": self._json_field(self.capabilities_cache, {}),
+            "public_opt_in": self._public_opt_in(),
             "status": self.status,
             "enabled": self.enabled,
             "token_expires_at": self.token_expires_at.isoformat() if self.token_expires_at else None,
@@ -2108,6 +2168,27 @@ class PublishRecord(db.Model):
         onupdate=lambda: datetime.now(),
     )
     posted_at = db.Column(db.DateTime, nullable=True)
+    # When it should go public; None means as soon as it is approved.
+    scheduled_at = db.Column(db.DateTime, nullable=True, index=True)
+    # The platform holds it for scheduled_at (remote_id names the held post).
+    scheduled_natively = db.Column(db.Boolean, nullable=False, default=False)
+    # When a person approved it on the Approvals page. A scheduled record goes
+    # out only with it, or when gates.requires_approval says it needs none.
+    approved_at = db.Column(db.DateTime, nullable=True)
+    # The post discloses AI use, by the platform's mechanism (see AIDisclosure).
+    ai_disclosure = db.Column(db.Boolean, nullable=False, default=False)
+    # When Delete on platform removed it.
+    deleted_at = db.Column(db.DateTime, nullable=True)
+    # JSON {name: value} for the provider's per-post fields (ProviderSpec.post_fields).
+    post_options = db.Column(db.Text, nullable=True)
+    # Raised by each saved edit while it waits for approval; an approval names
+    # the revision the person was shown (publish_service.approve).
+    revision = db.Column(db.Integer, nullable=False, default=0)
+    # The last edit: when, from which source (gates.KNOWN_SOURCES), and a JSON
+    # list of every field changed since it was queued.
+    edited_at = db.Column(db.DateTime, nullable=True)
+    edited_by = db.Column(db.String(64), nullable=True)
+    edited_fields = db.Column(db.Text, nullable=True)
 
     connection = db.relationship("Connection", backref=db.backref("publishes", lazy="dynamic"))
 
@@ -2144,6 +2225,18 @@ class PublishRecord(db.Model):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "posted_at": self.posted_at.isoformat() if self.posted_at else None,
+            # Scheduling times carry the server's offset, so a browser in another
+            # zone reads the same moment.
+            "scheduled_at": self.scheduled_at.astimezone().isoformat() if self.scheduled_at else None,
+            "scheduled_natively": bool(self.scheduled_natively),
+            "approved_at": self.approved_at.astimezone().isoformat() if self.approved_at else None,
+            "ai_disclosure": bool(self.ai_disclosure),
+            "deleted_at": self.deleted_at.astimezone().isoformat() if self.deleted_at else None,
+            "post_options": _json(self.post_options, {}),
+            "revision": self.revision or 0,
+            "edited_at": self.edited_at.astimezone().isoformat() if self.edited_at else None,
+            "edited_by": self.edited_by,
+            "edited_fields": _json(self.edited_fields, []),
         }
 
 
@@ -2810,6 +2903,12 @@ class AgentMemory(db.Model):
     created_at = db.Column(db.DateTime, default=lambda: datetime.now())
     updated_at = db.Column(db.DateTime, default=lambda: datetime.now(), onupdate=lambda: datetime.now())
 
+    # Not a column. True on the row memory_api.add_memory returns in place of
+    # a copy it did not write, because the same text was already saved there.
+    # Read it straight after that call: the session hands the same instance
+    # to later queries, flag included.
+    already_saved = False
+
     def to_dict(self):
         tags = []
         if self.tags:
@@ -3289,6 +3388,49 @@ class MusicVideo(VideoProjectLifecycleMixin, db.Model):
     )
 
     project = db.relationship("Project", backref="music_videos")
+
+
+class MusicVideoRevision(db.Model):
+    """A saved version of a music video's creative state (plan, prompts, settings).
+
+    Written on approve / reassemble / revise and on an explicit "Save version";
+    restore brings the plan back and keeps any clip file whose inputs still match.
+    A NEW table (create_all adds it on boot; no ALTER of music_videos).
+    """
+    __tablename__ = "music_video_revisions"
+
+    id = db.Column(db.Integer, primary_key=True)
+    music_video_id = db.Column(
+        db.Integer,
+        db.ForeignKey("music_videos.id", name="fk_mv_revision_music_video_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    label = db.Column(db.String(255), nullable=True)
+    # approve | reassemble | revise | manual | restore
+    reason = db.Column(db.String(32), nullable=False, default="manual")
+    snapshot = db.Column(db.JSON, nullable=False, default=dict)
+    created_at = db.Column(db.DateTime, nullable=False, default=db.func.now())
+
+    music_video = db.relationship(
+        "MusicVideo",
+        backref=db.backref("revisions", cascade="all, delete-orphan", lazy="dynamic"),
+    )
+
+    def to_dict(self, *, include_snapshot: bool = False) -> dict:
+        snap = self.snapshot or {}
+        out = {
+            "id": self.id,
+            "music_video_id": self.music_video_id,
+            "label": self.label,
+            "reason": self.reason,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "cut_count": len(snap.get("cut_plan") or []),
+            "clips_done": sum(1 for c in (snap.get("clips") or []) if c.get("status") == "done"),
+            "stage": snap.get("stage"),
+        }
+        if include_snapshot:
+            out["snapshot"] = snap
+        return out
 
 
 class Subject(db.Model):

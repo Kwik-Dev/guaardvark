@@ -106,6 +106,10 @@ const PageLayout = ({
               justifyContent: "space-between",
               alignItems: "center",
               minHeight: spacing.headerHeight,
+              // On a phone the title, actions and model chip do not fit one
+              // line; wrapping keeps the actions on screen.
+              flexWrap: "wrap",
+              columnGap: 1,
             }}
           >
             <Box sx={{ display: "flex", alignItems: "center", gap: 0.25 }}>
@@ -139,7 +143,7 @@ const PageLayout = ({
               </Typography>
             </Box>
 
-            <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
               {viewToggle && (
                 <ToggleButtonGroup
                   value={viewToggle.mode}

@@ -54,7 +54,10 @@ app = typer.Typer(
 def _run_analyze(
     project: str = typer.Argument(None, help="Folder to analyze (default: the current one)"),
 ):
-    """Analyze a project folder: languages, structure, entry points."""
+    """Analyze a project folder: languages, structure, entry points.
+
+    Writes GUAARDVARK.md into the folder when it has none; an existing one is
+    never overwritten (guaardvark init --force rewrites it)."""
     from llx.slash import SlashRouter
     from llx.working_memory import empty_working_memory
     state = {"server": None, "session_id": "headless", "cwd": None, "working_memory": empty_working_memory()}

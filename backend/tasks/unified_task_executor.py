@@ -189,25 +189,17 @@ def execute_generic_llm_task(task: Dict[str, Any], progress_callback) -> str:
     logger.info(f"Executing generic LLM task {task['id']}: {task['name']}")
 
     try:
-        # Get model name - use task model or fall back to default
-        model_name = task.get('model_name')
+        # The same choice the in-process scheduler makes: the task's model, else
+        # the default task model, else the active model, checked against what
+        # Ollama has installed (first-listed /api/tags is whichever model Ollama
+        # touched last, an embedding model included).
+        from types import SimpleNamespace
+        from backend.services.task_scheduler import _resolve_task_model
+        model_name, model_note = _resolve_task_model(SimpleNamespace(model_name=task.get('model_name')))
+        if model_note:
+            logger.warning(f"Task {task['id']}: {model_note}")
         if not model_name:
-            model_name = os.environ.get('DEFAULT_LLM_MODEL', '')
-        if not model_name:
-            # Query Ollama for available models
-            try:
-                import requests as _requests
-                ollama_base_url = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434')
-                resp = _requests.get(f"{ollama_base_url}/api/tags", timeout=5)
-                if resp.ok:
-                    models = resp.json().get('models', [])
-                    if models:
-                        model_name = models[0]['name']
-                        logger.info(f"Using first available Ollama model: {model_name}")
-            except Exception as e:
-                logger.warning(f"Could not query Ollama for models: {e}")
-        if not model_name:
-            raise ValueError("No LLM model available. Pull a model with 'ollama pull <model>' or set DEFAULT_LLM_MODEL env var.")
+            raise ValueError("No LLM model available. Pull a model with 'ollama pull <model>' or choose a default model in Settings.")
 
         prompt = task.get('prompt_text') or task.get('name') or ''
         if not prompt:
@@ -559,6 +551,7 @@ def execute_unified_task(self, task_id: int):
                 elif task_type == 'social_outreach_share':
                     subreddit = (wf.get('subreddit') or '').strip()
                     link_url = (wf.get('link_url') or '').strip()
+                    from backend.services.social_outreach import profile
                     if not subreddit or not link_url:
                         from backend.tasks.social_outreach_tasks import _load_targets, _next_target
                         targets = _load_targets()
@@ -567,10 +560,11 @@ def execute_unified_task(self, task_id: int):
                             subs = reddit_targets.get("share_subs") or []
                             subreddit = _next_target("reddit_share", subs) or ''
                         if not link_url:
-                            from backend.services.social_outreach.persona import SITE_URL
-                            link_url = reddit_targets.get("default_share_url") or SITE_URL
+                            link_url = reddit_targets.get("default_share_url") or profile.site_url()
                     if not subreddit:
                         output = {"skipped": True, "reason": "no_targets"}
+                    elif not link_url:
+                        output = {"skipped": True, "reason": profile.no_link_reason()}
                     else:
                         update_progress(35, f"Running Outreach self-share for r/{subreddit}")
                         from backend.services.social_outreach.self_share import SelfShareLoop
@@ -744,7 +738,7 @@ def execute_unified_task(self, task_id: int):
                 else:
                     update_progress(30, f"Launching swarm on {local_path} (git={wf.get('is_git')})")
                     import requests as _rq
-                    port = os.environ.get("FLASK_PORT", "5002")
+                    from backend.utils.backend_http import backend_base_url
                     body = {
                         "repo_path": local_path,
                         "self_code": False,  # external website folder, never the Guaardvark repo
@@ -752,7 +746,7 @@ def execute_unified_task(self, task_id: int):
                         "acknowledge_dirty_tree": True,
                     }
                     try:
-                        resp = _rq.post(f"http://localhost:{port}/api/swarm/launch", json=body, timeout=45)
+                        resp = _rq.post(f"{backend_base_url()}/api/swarm/launch", json=body, timeout=45)
                         data = resp.json() if resp.content else {}
                         if resp.status_code >= 400:
                             output = {"error": f"swarm launch failed ({resp.status_code}): {data.get('error') or data}"}

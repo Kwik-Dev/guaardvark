@@ -19,7 +19,20 @@ import argparse
 import threading
 import requests
 
-API = os.environ.get("GUAARDVARK_API", "http://localhost:5002")
+
+def _backend_base_url() -> str:
+    """backend/utils/backend_http.py's resolver (FLASK_PORT, then .env, then
+    5000), loaded by path so this script runs without the backend's packages."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "backend", "utils", "backend_http.py")
+    spec = importlib.util.spec_from_file_location("_guaardvark_backend_http", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.backend_base_url()
+
+API = os.environ.get("GUAARDVARK_API") or _backend_base_url()
 _LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
 # Tail whichever log file was modified most recently
 _LOG_CANDIDATES = [os.path.join(_LOG_DIR, f) for f in ("backend.log", "backend_startup.log")]

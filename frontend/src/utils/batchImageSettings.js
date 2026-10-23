@@ -14,6 +14,10 @@
 export function modelFamily(model) {
   const m = String(model || 'auto').toLowerCase();
   if (m === 'auto') return 'auto';
+  // Shipped `qwen-image-21` and user `user-qwen-image-21-<slug>`. Tested before
+  // the substring families so a slug cannot pull the id elsewhere; the editing
+  // model `qwen-image-edit` does not contain this token and is unaffected.
+  if (m.includes('qwen-image-21')) return 'qwen-image-21';
   if (m.includes('flux')) return 'flux';
   if (m.includes('zimage') || m.includes('z-image')) return 'zimage';
   if (m.includes('krea')) return m.includes('raw') ? 'krea-raw' : 'krea-turbo';
@@ -27,14 +31,40 @@ export const isZimageModel = (model) => modelFamily(model) === 'zimage';
 
 /**
  * Stills paths with no negative prompt: Z-Image and Krea 2 Turbo (CFG-free)
- * and Sana Sprint (its pipeline takes none). The backend ignores negative
- * prompt and enhance-anatomy on these. Krea Raw still uses both; `auto` may
- * route to SDXL so it stays editable.
+ * and Sana Sprint (its pipeline takes none). Krea Raw still uses one; `auto`
+ * may route to SDXL so it stays editable. Whether anatomy phrasing applies is
+ * a different question, answered by promptStyleFor: the backend skips it for
+ * prose models only, and Krea Turbo and Sana still take it.
  */
 export function ignoresNegativeAndAnatomy(model) {
   const fam = modelFamily(model);
   return fam === 'zimage' || fam === 'krea-turbo' || fam === 'sana';
 }
+
+/**
+ * How the model reads a prompt: 'natural' (an LLM text encoder trained on
+ * prose; Z-Image) or 'tags' (CLIP-era models that take comma tags). The backend
+ * skips the content-type and anatomy tag stuffing for natural models, so the
+ * page hides those controls for them. The answer comes from /batch-image/models
+ * (`prompt_style` per row, `auto_prompt_style` for Auto); the family table is
+ * the fallback for the first paint, before the list has arrived.
+ */
+export function promptStyleFor(model, modelOptions = [], autoPromptStyle = null) {
+  const m = String(model || 'auto');
+  if (m === 'auto') return autoPromptStyle || 'natural';
+  const opt = (modelOptions || []).find((o) => o.value === m);
+  if (opt?.promptStyle) return opt.promptStyle;
+  const fam = modelFamily(m);
+  return fam === 'zimage' || fam === 'qwen-image-21' ? 'natural' : 'tags';
+}
+
+// Qwen-Image 2.1 guidance range. The official ComfyUI template
+// (image_qwen_image_2_1_t2i.json) runs cfg 1.0 and says to raise it only with a
+// negative prompt. The slider stops at 5, the upper end of the registry's
+// cfg_range for qwen-image-21 (media_model_registry.IMAGE_MODEL_LIMITS):
+// compared at 1024x1024 with a negative prompt, cfg 3 and 5 render clean and
+// cfg 9 crushes the shadows to black.
+export const QWEN_IMAGE_21_GUIDANCE_MAX = 5;
 
 export const ZIMAGE_STEPS = 9;
 export const ZIMAGE_GUIDANCE = 0;
@@ -84,6 +114,14 @@ const PRESETS_BY_FAMILY = {
     { value: 'fast', label: 'Fast', steps: 1, guidance: 4.5, description: 'Single-step preview' },
     { value: 'standard', label: 'Standard', steps: 2, guidance: 4.5, description: 'Sana Sprint recipe (2 steps)' },
   ],
+  // Qwen-Image 2.1 numbers come from the official ComfyUI template
+  // (image_qwen_image_2_1_t2i.json): 25 steps, cfg 1.0, euler/simple, with the
+  // note that the official pipeline uses 40-50 steps. Nothing below 25 is offered
+  // because no faster count has been measured on a card.
+  'qwen-image-21': [
+    { value: 'standard', label: 'Standard', steps: 25, guidance: 1.0, description: 'Official ComfyUI template (25 steps, cfg 1)' },
+    { value: 'high', label: 'High Quality', steps: 40, guidance: 1.0, description: 'Official pipeline range (40-50 steps), slower' },
+  ],
   sdxl: [
     { value: 'fast', label: 'Fast', steps: 20, guidance: 6.0, description: 'Quick SDXL' },
     { value: 'standard', label: 'Standard', steps: 25, guidance: 7.0, description: 'Balanced SDXL' },
@@ -110,6 +148,7 @@ const DEFAULT_PRESET_BY_FAMILY = {
   'krea-raw': 'high',
   'sdxl-turbo': 'standard',
   sana: 'standard',
+  'qwen-image-21': 'standard',
   sdxl: 'standard',
   sd: 'standard',
 };
@@ -134,6 +173,17 @@ export const stripCopyCounter = (p) =>
 
 /** Highest quantity the page accepts; the backend caps the prompt list to match. */
 export const MAX_QUANTITY = 100;
+
+/** Largest image seed: the 2**32 space the backend draws image seeds from. */
+export const IMAGE_MAX_SEED = 2 ** 32 - 1;
+
+/** The Seed box's text as a seed, or null for a new seed per image. */
+export const parseImageSeed = (text) => {
+  const t = String(text ?? '').trim();
+  if (!/^\d+$/.test(t)) return null;
+  const n = Number(t);
+  return n <= IMAGE_MAX_SEED ? n : null;
+};
 
 export function clampQuantity(value) {
   const n = parseInt(value, 10);
@@ -191,6 +241,7 @@ export function imageModelOption(m) {
     recommended: !!m.recommended,
     name: m.name || m.label || m.id,
     sizeGb: m.size_gb || 0,
+    promptStyle: m.prompt_style || null,
   };
 }
 

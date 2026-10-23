@@ -1,6 +1,128 @@
 # Changelog
 
-## Unreleased
+## 3.3.0 — Reusable seeds, music videos paced to the song, and a Film Crew that finishes the film
+
+- **Seeds you can reuse.** Image Gen and Video Gen have a Seed box; every picture shows its seed,
+  and one click reuses it to get the same picture again (with prompt enhancement off).
+- **Wan 2.2 14B image-to-video can end on a chosen frame.** Give it a first and a last picture and
+  the clip travels from one to the other.
+- **Music videos follow the song.** Cuts land on its bars and follow its loudness, with real
+  sections, by default (`GUAARDVARK_MV_MUSIC_PACING=0` restores the old planner). Your story stays
+  in order, clips whose frames flash are held back, and each run shows its progress, keeps its
+  versions and files into a Project.
+- **The Film Crew takes a script to a finished film.** A character can be cast as described
+  (an off-screen voice, a crowd) without training; storyboards render shots that show props and
+  places; a production can be wide, tall or square; every clip renders before the spoken lines, so
+  a 16 GB card no longer runs out of memory mid-film; one score runs under the whole film; and
+  the film is kept in the data folder.
+- **Chat reads your documents before it says they don't cover something.** It gets whole
+  passages, says when a search failed, re-indexes after an embedding model change, and keeps
+  hybrid search while the embedder is loaded. gpt-oss works as a chat model.
+- **Swarms launch from chat and over MCP;** unnamed tasks run locally and agents stop after two
+  hours.
+- **Social Accounts.** Posts wait for a person, can be edited before approval and scheduled, and
+  can go to your own LinkedIn through its official API.
+- **Training:** Build from folder, and Export to Ollama through GGUF with the converter installed
+  on a click.
+- **Works offline more of the time.** The browser tools, outreach drafting and the self-test
+  follow the web-access switch; start-up makes fewer downloads; face restore loads only installed
+  weights.
+- Bulk Import around a drop zone, a device profile from this machine, upscales that start their
+  own service and take their turn on the GPU, and fixes from crawling every page and sweeping the
+  logs.
+- **Each Interconnector machine joins with its own key.** A client enrols with the fleet key and
+  waits on the master until you approve its key fingerprint in Settings → Interconnector; every
+  request between machines is then signed, and directives are taken only from the master. After
+  you update a master, click "Allow for 48 hours" in Settings → Interconnector so its existing
+  clients can still sync the old way and fetch the update; update and restart each one, then
+  approve it on the master.
+- **The Interconnector's settings and fleet controls need this machine or the API key**, also
+  while Network access is on. A new fleet key is shown only on the master itself.
+- Approving held files or entity changes applies them as chosen, or leaves them pending and says
+  why; a partial approval with nothing ticked applies nothing.
+- An outreach draft graded by another build of the drafter's model family (gemma4:12b grading
+  gemma4:e2b drafts) is marked not independent, as one graded by the drafter's own build already
+  was.
+
+## 3.2.2 — Ready for the official MCP Registry
+
+- **Guaardvark's MCP server can be listed in the official MCP Registry** as
+  `io.github.guaardvark/guaardvark`. The PyPI page carries the ownership line the registry checks,
+  and `server.json` describes the server: `uvx guaardvark mcp serve` over stdio, which needs
+  Guaardvark installed on the same machine. No other changes from 3.2.1.
+
+## 3.2.1 — Code Editor works offline and saves safely; Audio Studio fits on the card
+
+- **The Code Editor loads offline.** Its editor came from a public CDN on every visit; it now
+  ships with Guaardvark, so the page works with no internet and makes no outside request.
+- **Code Editor saves never overwrite a document with the wrong text.** A file that has not
+  finished loading, or failed to, cannot be saved; library documents save by id; each tab keeps
+  its own undo history; a save marks only the text it sent as saved. Run, Format and Debug reach
+  the backend, the card's play button runs the code, questions to the assistant show once, and a
+  new tab renamed before its first save keeps its name.
+- **Audio Studio fits on the card.** With an API key set, Audio Studio and the swarm now send it
+  when they ask for graphics memory, so the chat model steps aside for music instead of the
+  render running out of memory. Audio Studio also unloads its own idle models before a load
+  that would not fit.
+- **FX Lab works after Install.** Stable Audio Open loads the files Install wrote, instead of
+  asking to be installed again.
+- FX Lab keeps its own length setting, Download saves the clip, a finished job keeps the type it
+  started with in the progress footer, and the Code Editor's name fields take typing when they
+  open.
+
+## 3.2.0 — Qwen-Image 2.1, ComfyUI updates from the Plugins page, and Rules that reach chat
+
+- **Qwen-Image 2.1** text-to-image through ComfyUI 0.37 or newer. Add Model accepts Qwen-Image 2.1
+  repos (`.safetensors`); installing a user ComfyUI model also fetches the text encoder and VAE
+  its graph needs. Qwen Research License: non-commercial research and evaluation only.
+- **Update ComfyUI from the Plugins page.** The ComfyUI card shows the installed version and
+  offers an update to a pinned release (0.39.0): it downloads only when clicked, keeps models,
+  custom nodes and settings, checks the new version answers, and switches back on its own if any
+  step fails. Restore and Repair are on the same card. Fresh installs keep their current pin.
+- **Rules reach chat.** With Settings → Rules on, the persona and the active rules from the Rules
+  page go into every chat turn and a change applies to the next message; with it off (the
+  default) chat uses the built-in prompt, and loading a rule bundle says so. The Rules page shows
+  the real count, loads past the first page and keeps a rule's level and type when edited.
+- **Bulk Import is safe by default.** It copies unless moving is ticked, and never takes hidden
+  folders or files, credential files (keys, `.pem`, `credentials`), Guaardvark's own data folder
+  or its backups. Folder pickers stay inside the home folder, uploads, mounted drives and
+  `GUAARDVARK_ALLOWED_PATHS`, and show the home folder as `~`.
+- **Pages say what they do.** Image Gen (Auto follows the Stills model chosen in Settings), Video
+  Gen, Files, Media Library, Plugins, Agent Tools and Agent Memory, uploads and voice replies
+  report what really runs, and their buttons do what they are labelled.
+- **Code Editor asks the model only when told to.** AI hover and real-time analysis are opt-in;
+  Validate is a real syntax check.
+- **Chat keeps every picture.** All attached pictures reach the model and survive a reload, and
+  Stop halts descriptions.
+- Audio Studio shows a result's file name instead of its server path; user-added image models
+  follow their family's settings rules; Manage Image Models shows real download sizes for
+  ComfyUI models; the image editor's Save dialog opens above the editor.
+
+## 3.1.0 — References for MiniMax H3, Sana Sprint, and an interface you can find your way around
+
+- **Video Gen takes References.** A third input next to Text and Image builds a board of
+  pictures, clips and voice for MiniMax H3 Reference, and start/end frames get an end-frame tile
+  with the Files picker. Boards are checked against the card's measured budget before they queue;
+  one that does not fit is refused with the reason.
+- **Sana Sprint** joins the offline image models: fast stills, priced by each model's measured
+  peak.
+- **Getting around.** First-run "Did you know" tips and a guide to the interface
+  (`docs/interface.md`). Drag files into Files, chat or the Video Editor bin; right-click menus
+  on Files and Notes; resize handles and one drop placeholder on every card page; Always approve
+  on chat tool cards.
+- **Keep ready** holds the chat model in memory and steps it aside for GPU work. Off by default.
+- **Settings → Access** has a Network access switch (off by default) and the chat model list
+  offers Start Ollama when Ollama is off.
+- **Speech to text** uses the Whisper model chosen in Settings, works with PyAV 19, and runs on
+  the CPU when CTranslate2 cannot use the card.
+- **Image, upscaling, reranker and Studio models download only behind an Install button**, never
+  on first use.
+- **Smaller cards:** SD and SDXL render on 8 GB cards, and LoRA training is offered only for
+  installed base models.
+- **Outreach posts only what it can confirm on the page.** Connections answer this machine only
+  without a key and hold publishes for approval; the proxy's own X-Forwarded-For entry is the one
+  trusted.
+- **Discord voice** hears end-to-end encrypted calls and replies in an installed voice.
 
 ## 3.0.1 — Video renders run to the end
 

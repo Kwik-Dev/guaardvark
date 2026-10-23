@@ -447,6 +447,7 @@ def _show_swarm_status(swarm_dir: Path) -> None:
             color = {
                 "done": C.GREEN, "merged": C.GREEN,
                 "failed": C.RED, "needs_review": C.YELLOW,
+                "timed_out": C.RED, "no_changes": C.YELLOW,
                 "running": C.CYAN, "pending": C.DIM,
             }.get(status, C.RESET)
 

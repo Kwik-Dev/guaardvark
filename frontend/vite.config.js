@@ -111,7 +111,7 @@ viteLogger.error = (msg, options) => {
 
 function resolvePorts(mode) {
   // Repo .env lives at the repo root (not frontend/.env). start.sh exports these,
-  // but `npm run dev` from frontend/ must still pick up FLASK_PORT=5002 / VITE_PORT=5175.
+  // but `npm run dev` from frontend/ must still pick up FLASK_PORT / VITE_PORT from it.
   const rootEnv = loadEnv(mode, REPO_ROOT, "");
   const flaskPort =
     process.env.FLASK_PORT ||
@@ -265,6 +265,9 @@ export default defineConfig(({ mode }) => {
     chunkSizeWarningLimit: 1000,
     rollupOptions: {
       plugins: [rollupNodePolyFill()],
+      // Rolldown's timing report names the terser pass on every build. That
+      // cost is expected for this bundle, so the report is only noise.
+      checks: { bundlerTimings: false },
       output: {
         // Function form: Vite 8 bundles with Rolldown, which does not accept
         // the object form ("manualChunks is not a function"). Same groups.
@@ -283,6 +286,12 @@ export default defineConfig(({ mode }) => {
         drop_debugger: true,
         pure_funcs: ['console.debug'],  // Only strip debug, keep error/warn/log
       },
+    },
+  },
+  // Web workers are bundled separately and do not inherit build.rollupOptions.
+  worker: {
+    rolldownOptions: {
+      checks: { bundlerTimings: false },
     },
   },
   server: {

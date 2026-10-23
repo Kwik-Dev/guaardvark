@@ -228,6 +228,30 @@ class TestNudges:
         _, events = _run(e, "what is the weather today in Akron", {"skip_nudges": True})
         assert _complete(events)["response"] == "Sunny."
 
+    # The chat UI sends an upload acknowledgement as the user turn and the model
+    # tends to answer it with "I'm going through your document". With no tool
+    # run, the engine re-asks once and then appends the no-search note; on the
+    # notice turn the UI sends skip_nudges so neither happens.
+    _UPLOAD_NOTICE = (
+        "**Document Uploaded Successfully**\n\n**File Details:**\n- **Name:** report.pdf\n"
+        "- **Type:** PDF\n- **Size:** 1.2 KB\n- **Document ID:** 42\n\n"
+        "**Status:** Uploaded and indexed\nIt is searchable now."
+    )
+    _CLAIM = "I'm going through your document now and will summarize it."
+
+    def test_unrun_search_claim_is_reasked_and_noted_by_default(self, monkeypatch):
+        e = _engine(monkeypatch, reply=self._CLAIM)
+        _, events = _run(e, self._UPLOAD_NOTICE, {})
+        assert _complete(events)["response"].endswith(uce._CLAIMED_SEARCH_NOTE)
+        assert len(e.calls["llm_messages"]) == 2
+        assert e.calls["llm_messages"][1][-1]["content"] == uce._CLAIMED_SEARCH_NUDGE
+
+    def test_upload_notice_turn_gets_no_reask_and_no_note(self, monkeypatch):
+        e = _engine(monkeypatch, reply=self._CLAIM)
+        _, events = _run(e, self._UPLOAD_NOTICE, {"skip_nudges": True})
+        assert _complete(events)["response"] == self._CLAIM
+        assert len(e.calls["llm_messages"]) == 1
+
 
 class TestPersistence:
     def test_persist_false_saves_nothing(self, monkeypatch):

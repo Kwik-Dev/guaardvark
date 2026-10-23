@@ -88,7 +88,9 @@ def lessons_list(
     server: str = typer.Option(None, "--server", "-s"),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ):
-    """Show the active lesson, if any."""
+    """Show the active lesson of a chat session: your latest chat in this CLI, or --session.
+
+    Needs a chat session; without one it says so and exits 1."""
     json_out = json_out or get_global_json()
     output.set_json_mode(json_out)
     try:

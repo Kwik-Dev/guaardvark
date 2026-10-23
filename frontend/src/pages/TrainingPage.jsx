@@ -53,27 +53,31 @@ import {
   createDeviceProfile,
   updateDeviceProfile,
   deleteDeviceProfile,
+  getHardwareCapabilities,
   getBaseModels,
   exportToOllama,
   exportTrainingJobAnyway,
 } from "../api";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import RefreshIcon from "@mui/icons-material/Refresh";
-import Editor from "@monaco-editor/react";
+import Editor from "../utils/monaco";
 import { useSearchParams, Link as RouterLink } from "react-router-dom";
 import { useTheme } from "@mui/material/styles";
 import axios from "axios";
 import TrainingDatasetModal from "../components/modals/TrainingDatasetModal";
 import NewTrainingJobModal from "../components/modals/NewTrainingJobModal";
-import DeviceProfileModal from "../components/modals/DeviceProfileModal";
+import DeviceProfileModal, { hardwareNote, profileFromHardware } from "../components/modals/DeviceProfileModal";
 import ParseJobModal from "../components/modals/ParseJobModal";
+import BuildFromFolderModal from "../components/modals/BuildFromFolderModal";
 import ExportQuantizationModal from "../components/modals/ExportQuantizationModal";
+import TrainingLibrariesModal from "../components/modals/TrainingLibrariesModal";
 import { useSnackbar } from "../components/common/SnackbarProvider";
 import EntityContextMenu from "../components/common/EntityContextMenu";
 import useContextMenu from "../hooks/useContextMenu";
 import { useUnifiedProgress } from "../contexts/UnifiedProgressContext";
 import { useStatus } from "../contexts/StatusContext";
 import PageLayout from "../components/layout/PageLayout";
+import { useAppStore } from "../stores/useAppStore";
 import {
   createFormSync,
   dirtyFields,
@@ -232,6 +236,8 @@ const TrainingPage = () => {
   const { activeProcesses } = useUnifiedProgress();
   const { activeModel, isLoadingModel, modelError } = useStatus();
   const theme = useTheme();
+  // The Interactive Trainer is the app-wide floating window that records demonstrations.
+  const setTrainerOpen = useAppStore((state) => state.setTrainerOpen);
   const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState(() => TAB_INDEX[searchParams.get("tab")] ?? 0);
 
@@ -292,7 +298,11 @@ const TrainingPage = () => {
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [jobModalOpen, setJobModalOpen] = useState(false);
   const [deviceModalOpen, setDeviceModalOpen] = useState(false);
+  // A new profile filled from this machine's detected hardware: {values, note}.
+  const [devicePrefill, setDevicePrefill] = useState(null);
+  const [detectingHardware, setDetectingHardware] = useState(false);
   const [parseModalOpen, setParseModalOpen] = useState(false);
+  const [buildModalOpen, setBuildModalOpen] = useState(false);
   const [currentItem, setCurrentItem] = useState(null);
   // Starting values for a new dataset (a finished parse's output); kept in
   // state so the jobs list refreshing does not reset the open form.
@@ -437,9 +447,13 @@ const TrainingPage = () => {
     setEditModalOpen(false);
   };
 
+  // Parse and folder-build jobs both end in a .jsonl in the datasets folder.
+  const isDatasetJob = (job) => job.pipeline_stage === "parsing" || job.pipeline_stage === "building";
+
   const handleAddParsedDataset = (job) => {
     handleOpenEditModal(null, {
-      name: (job.name || "").replace(/^Parse:\s*/, "") || "Parsed transcripts",
+      name: (job.name || "").replace(/^(Parse|Build):\s*/, "") ||
+        (job.pipeline_stage === "building" ? "Notes" : "Parsed transcripts"),
       path: job.config?.output_path || "",
     });
   };
@@ -529,8 +543,21 @@ const TrainingPage = () => {
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [selectedJobForExport, setSelectedJobForExport] = useState(null);
   const [isReQuantize, setIsReQuantize] = useState(false);
+  const [converterOpen, setConverterOpen] = useState(false);
+
+  // Export cannot run now: say why before the form opens, and when the GGUF
+  // converter is what it waits for, open the Install for it.
+  const exportBlocked = (job) => {
+    if (!job.export_blocked) return false;
+    showMessage(job.export_blocked, "warning");
+    if (["GGUF_CONVERTER_MISSING", "GGUF_CONVERTER_NOT_READY"].includes(job.export_blocked_code)) {
+      setConverterOpen(true);
+    }
+    return true;
+  };
 
   const handleExportToOllama = (job, reQuantize = false) => {
+    if (exportBlocked(job)) return;
     setSelectedJobForExport(job);
     setIsReQuantize(reQuantize);
     setExportModalOpen(true);
@@ -539,6 +566,7 @@ const TrainingPage = () => {
   // A run held as worse than its base model is exported only on the person's
   // explicit choice; the backend records it, then the usual export dialog opens.
   const handleExportAnyway = async (job) => {
+    if (exportBlocked(job)) return;
     const ok = window.confirm(
       `This run was held because it measured worse than its base model:\n\n${job.error_message || ""}\n\n` +
         "Export it anyway? Your choice is recorded on the job.",
@@ -595,12 +623,33 @@ const TrainingPage = () => {
 
   const handleOpenDeviceModal = (profile = null) => {
     setCurrentItem(profile);
+    setDevicePrefill(null);
     setDeviceModalOpen(true);
+  };
+
+  // Opens the Add form filled from /api/training/hardware; the person reviews
+  // it and saves, nothing is created here.
+  const handleCreateFromThisMachine = async () => {
+    setDetectingHardware(true);
+    try {
+      const hw = await getHardwareCapabilities();
+      setCurrentItem(null);
+      setDevicePrefill({
+        values: profileFromHardware(hw, deviceProfiles.map((p) => p.name)),
+        note: hardwareNote(hw),
+      });
+      setDeviceModalOpen(true);
+    } catch (err) {
+      showMessage(`Could not read this machine's hardware: ${err.message}`, "error");
+    } finally {
+      setDetectingHardware(false);
+    }
   };
 
   const handleCloseDeviceModal = () => {
     if (isSaving) return;
     setCurrentItem(null);
+    setDevicePrefill(null);
     setDeviceModalOpen(false);
   };
 
@@ -673,7 +722,7 @@ const TrainingPage = () => {
         job.export_verified && job.status === "failed: worse than base" && job.lora_path && {
           label: "Export anyway", icon: <CloudUploadIcon fontSize="small" />, onClick: () => handleExportAnyway(job), disabled: exporting,
         },
-        job.pipeline_stage === "parsing" && job.status === "completed" && job.config?.pairs_count > 0 && {
+        isDatasetJob(job) && job.status === "completed" && job.config?.pairs_count > 0 && {
           label: "Add as dataset", icon: <AddIcon fontSize="small" />, onClick: () => handleAddParsedDataset(job),
         },
         { label: "Delete", icon: <CloseIcon fontSize="small" />, onClick: () => handleDeleteJob(job.id), color: "error.main", dividerBefore: true },
@@ -720,7 +769,7 @@ const TrainingPage = () => {
       </CollapsibleAlert>
       <Paper elevation={2}>
         <Box sx={{ borderBottom: 1, borderColor: "divider" }}>
-          <Tabs value={activeTab} onChange={(e, v) => setActiveTab(v)}>
+          <Tabs value={activeTab} onChange={(e, v) => setActiveTab(v)} variant="scrollable" scrollButtons="auto" allowScrollButtonsMobile>
             <Tab icon={<SchoolIcon />} iconPosition="start" label="Demonstrations" />
             <Tab icon={<StorageIcon />} iconPosition="start" label="Datasets" />
             <Tab icon={<WorkIcon />} iconPosition="start" label="Jobs" />
@@ -739,9 +788,11 @@ const TrainingPage = () => {
                 )}
               </Typography>
               <Tooltip title="Refresh">
-                <IconButton onClick={fetchDemonstrations} disabled={demosLoading}>
-                  <RefreshIcon />
-                </IconButton>
+                <span>
+                  <IconButton onClick={fetchDemonstrations} disabled={demosLoading}>
+                    <RefreshIcon />
+                  </IconButton>
+                </span>
               </Tooltip>
             </Box>
             {demosLoading ? (
@@ -766,9 +817,18 @@ const TrainingPage = () => {
                     {demonstrations.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={7} align="center" sx={{ py: 4 }}>
-                          <Typography variant="body2" color="text.secondary">
-                            No demonstrations yet. Use the Interactive Trainer on the Settings page to record one.
+                          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+                            No demonstrations yet. Record one with the Interactive Trainer: show the agent a task on
+                            its screen and the steps are saved here.
                           </Typography>
+                          <Button
+                            variant="contained"
+                            size="small"
+                            startIcon={<SchoolIcon />}
+                            onClick={() => setTrainerOpen(true)}
+                          >
+                            Open Interactive Trainer
+                          </Button>
                         </TableCell>
                       </TableRow>
                     ) : (
@@ -812,6 +872,13 @@ const TrainingPage = () => {
                   onClick={() => setParseModalOpen(true)}
                 >
                   Parse Transcripts
+                </Button>
+                <Button
+                  variant="outlined"
+                  startIcon={<PlayArrowIcon />}
+                  onClick={() => setBuildModalOpen(true)}
+                >
+                  Build from folder
                 </Button>
                 <Button
                   variant="contained"
@@ -927,8 +994,8 @@ const TrainingPage = () => {
                   return (
                     <Card key={job.id} sx={{ mb: 2 }} onContextMenu={(e) => rowMenu.open(e, { kind: "job", item: job })}>
                       <CardContent>
-                        <Box display="flex" justifyContent="space-between" alignItems="start" mb={1}>
-                          <Box>
+                        <Box display="flex" justifyContent="space-between" alignItems="start" mb={1} flexWrap="wrap" gap={1}>
+                          <Box sx={{ minWidth: 0, flex: "1 1 220px" }}>
                             <Typography variant="h6">{job.name || job.job_id}</Typography>
                             <Typography variant="caption" color="text.secondary">
                               {job.base_model
@@ -936,7 +1003,7 @@ const TrainingPage = () => {
                                 : job.config?.input_path || ""}
                             </Typography>
                           </Box>
-                          <Box display="flex" gap={1} alignItems="center">
+                          <Box display="flex" gap={1} alignItems="center" flexWrap="wrap">
                             <Chip
                               label={job.status}
                               color={getStatusColor(job.status)}
@@ -952,47 +1019,53 @@ const TrainingPage = () => {
                             {/* Export is offered only once it has been verified for the job's base model. */}
                             {job.export_verified && job.status === "completed" && job.lora_path && !job.ollama_model_name && (
                               <Tooltip title="Export to Ollama">
-                                <IconButton
-                                  size="small"
-                                  color="primary"
-                                  onClick={() => handleExportToOllama(job, false)}
-                                  disabled={exportingJobs.has(job.id)}
-                                >
-                                  {exportingJobs.has(job.id) ? (
-                                    <CircularProgress size={18} />
-                                  ) : (
-                                    <CloudUploadIcon fontSize="small" />
-                                  )}
-                                </IconButton>
+                                <span>
+                                  <IconButton
+                                    size="small"
+                                    color="primary"
+                                    onClick={() => handleExportToOllama(job, false)}
+                                    disabled={exportingJobs.has(job.id)}
+                                  >
+                                    {exportingJobs.has(job.id) ? (
+                                      <CircularProgress size={18} />
+                                    ) : (
+                                      <CloudUploadIcon fontSize="small" />
+                                    )}
+                                  </IconButton>
+                                </span>
                               </Tooltip>
                             )}
                             {/* Re-quantize button - show for completed exports */}
                             {job.export_verified && job.status === "completed" && job.lora_path && job.ollama_model_name && (
                               <Tooltip title="Re-quantize (change quantization level)">
-                                <IconButton
-                                  size="small"
-                                  color="secondary"
-                                  onClick={() => handleExportToOllama(job, true)}
-                                  disabled={exportingJobs.has(job.id)}
-                                >
-                                  {exportingJobs.has(job.id) ? (
-                                    <CircularProgress size={18} />
-                                  ) : (
-                                    <RefreshIcon fontSize="small" />
-                                  )}
-                                </IconButton>
+                                <span>
+                                  <IconButton
+                                    size="small"
+                                    color="secondary"
+                                    onClick={() => handleExportToOllama(job, true)}
+                                    disabled={exportingJobs.has(job.id)}
+                                  >
+                                    {exportingJobs.has(job.id) ? (
+                                      <CircularProgress size={18} />
+                                    ) : (
+                                      <RefreshIcon fontSize="small" />
+                                    )}
+                                  </IconButton>
+                                </span>
                               </Tooltip>
                             )}
                             {job.export_verified && job.status === "failed: worse than base" && job.lora_path && (
                               <Tooltip title="Export anyway (the run measured worse than its base model)">
-                                <IconButton
-                                  size="small"
-                                  color="warning"
-                                  onClick={() => handleExportAnyway(job)}
-                                  disabled={exportingJobs.has(job.id)}
-                                >
-                                  <CloudUploadIcon fontSize="small" />
-                                </IconButton>
+                                <span>
+                                  <IconButton
+                                    size="small"
+                                    color="warning"
+                                    onClick={() => handleExportAnyway(job)}
+                                    disabled={exportingJobs.has(job.id)}
+                                  >
+                                    <CloudUploadIcon fontSize="small" />
+                                  </IconButton>
+                                </span>
                               </Tooltip>
                             )}
                             {canStart(job) && (
@@ -1031,10 +1104,12 @@ const TrainingPage = () => {
                             </Typography>
                           </Box>
                         )}
-                        {job.pipeline_stage === "parsing" && job.status === "completed" && job.config?.output_path && (
+                        {isDatasetJob(job) && job.status === "completed" && job.config?.output_path && (
                           <Box sx={{ mt: 1, display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
                             <Typography variant="body2">
-                              Parsed {job.config.pairs_count ?? 0} pair{job.config.pairs_count === 1 ? "" : "s"}
+                              {job.pipeline_stage === "building" ? "Built" : "Parsed"} {job.config.pairs_count ?? 0} pair{job.config.pairs_count === 1 ? "" : "s"}
+                              {job.pipeline_stage === "building" && job.config.files != null &&
+                                ` from ${job.config.files} file${job.config.files === 1 ? "" : "s"}, ${job.config.scrubbed ?? 0} item${job.config.scrubbed === 1 ? "" : "s"} scrubbed`}
                             </Typography>
                             {job.config.pairs_count > 0 && (
                               <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={() => handleAddParsedDataset(job)}>
@@ -1098,14 +1173,29 @@ const TrainingPage = () => {
               mb={2}
             >
               <Typography variant="h6">Device Profiles</Typography>
-              <Button
-                variant="contained"
-                startIcon={<AddIcon />}
-                onClick={() => handleOpenDeviceModal(null)}
-              >
-                Add Profile
-              </Button>
+              <Box display="flex" gap={1}>
+                <Button
+                  variant="outlined"
+                  startIcon={detectingHardware ? <CircularProgress size={16} /> : <ComputerIcon />}
+                  onClick={handleCreateFromThisMachine}
+                  disabled={detectingHardware}
+                >
+                  Create from this machine
+                </Button>
+                <Button
+                  variant="contained"
+                  startIcon={<AddIcon />}
+                  onClick={() => handleOpenDeviceModal(null)}
+                >
+                  Add Profile
+                </Button>
+              </Box>
             </Box>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              A profile is optional on a training job. A job that uses one is refused at start if its batch size or
+              sequence length is above the profile&apos;s, or its base model needs more GPU memory than the profile has;
+              a job that does not set batch size or sequence length trains with the profile&apos;s.
+            </Typography>
             {profilesLoading ? (
               <Box display="flex" justifyContent="center" my={3}>
                 <CircularProgress />
@@ -1125,11 +1215,30 @@ const TrainingPage = () => {
                     </TableRow>
                   </TableHead>
                   <TableBody>
+                    {deviceProfiles.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={7} align="center" sx={{ py: 4 }}>
+                          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+                            No device profiles yet. Start from this machine&apos;s detected GPU and memory, then review
+                            the numbers before saving.
+                          </Typography>
+                          <Button
+                            variant="contained"
+                            size="small"
+                            startIcon={detectingHardware ? <CircularProgress size={14} color="inherit" /> : <ComputerIcon />}
+                            onClick={handleCreateFromThisMachine}
+                            disabled={detectingHardware}
+                          >
+                            Create from this machine
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    )}
                     {deviceProfiles.map((profile) => (
                       <TableRow key={profile.id} hover onContextMenu={(e) => rowMenu.open(e, { kind: "profile", item: profile })}>
                         <TableCell>{profile.name}</TableCell>
                         <TableCell>{profile.device_type || "-"}</TableCell>
-                        <TableCell>{profile.gpu_vram_mb ? `${profile.gpu_vram_mb / 1024}GB` : "N/A"}</TableCell>
+                        <TableCell>{profile.gpu_vram_mb ? `${(profile.gpu_vram_mb / 1024).toFixed(1)} GB` : "N/A"}</TableCell>
                         <TableCell>{profile.max_batch_size}</TableCell>
                         <TableCell>{profile.max_seq_length}</TableCell>
                         <TableCell>{profile.is_default ? <Chip label="Default" size="small" color="primary" /> : "-"}</TableCell>
@@ -1191,6 +1300,8 @@ const TrainingPage = () => {
           open={deviceModalOpen}
           onClose={handleCloseDeviceModal}
           profileData={currentItem}
+          prefill={devicePrefill?.values}
+          prefillNote={devicePrefill?.note}
           onSave={handleSaveDeviceProfile}
           isSaving={isSaving}
         />
@@ -1207,6 +1318,17 @@ const TrainingPage = () => {
         />
       )}
 
+      {buildModalOpen && (
+        <BuildFromFolderModal
+          open={buildModalOpen}
+          onClose={() => setBuildModalOpen(false)}
+          onStarted={(_job, indexNote) => {
+            showMessage(`Building the dataset; follow it in Jobs.${indexNote || ""}`, "success");
+            fetchJobs();
+          }}
+        />
+      )}
+
       {exportModalOpen && (
         <ExportQuantizationModal
           open={exportModalOpen}
@@ -1216,8 +1338,17 @@ const TrainingPage = () => {
           isExporting={exportingJobs.has(selectedJobForExport?.id)}
           isReQuantize={isReQuantize}
           currentQuantization={selectedJobForExport?.quantization_level}
+          levels={selectedJobForExport?.export_levels}
         />
       )}
+
+      <TrainingLibrariesModal
+        open={converterOpen}
+        onClose={() => setConverterOpen(false)}
+        showMessage={showMessage}
+        onConverterChanged={() => fetchJobs()}
+        focus="gguf-converter"
+      />
 
       <EntityContextMenu
         anchorPosition={rowMenu.anchorPosition}

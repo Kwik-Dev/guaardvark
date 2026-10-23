@@ -1,14 +1,83 @@
 """Contracts shared by every connection provider.
 
-A provider is a module exposing ``SPEC`` plus ``test()`` and — for the social
-family — ``publish()``. Declaring capabilities as data rather than branching on
-provider names in the UI is what keeps the Publish modal generic: it disables
-incompatible targets and computes character limits straight from ``SPEC``.
+Declaring capabilities as data rather than branching on provider names is what
+keeps the Publish modal, the Social Accounts page and the publish path generic:
+they read limits, rules and schedules straight from ``SPEC``.
+
+The provider contract
+=====================
+
+A provider is one module under ``providers/``, listed in
+``registry.PROVIDER_MODULES``. ``registry.contract_problems()`` checks the
+pairing of declarations and functions below, and the registry tests run it for
+every provider.
+
+It declares, in ``SPEC = ProviderSpec(...)``:
+
+- auth kinds, credential fields (secrets) and config fields (non-secret);
+- ``capabilities`` (``Capabilities``): text and media limits, visibilities, and
+  for the social family the account rules the publish path enforces:
+
+  ``rate_limits``      our ceiling on posts per account per window, kept below
+                       the platform's published limit; each entry names that
+                       limit and its source. Enforced by ``rate_limits.check``
+                       before every publish, failing closed.
+  ``ai_disclosure``    when the platform's terms require a post to disclose AI
+                       use, and how: a line in the body or a platform flag the
+                       provider sets from ``PublishRequest.ai_disclosure``.
+  ``bot_label``        how an account declares automation on that platform,
+                       shown as guidance; ``readable`` providers report its
+                       state from ``test()`` as ``config["bot_label_set"]``.
+  ``native_scheduling`` the platform's own scheduling field and its limits.
+                       Without it, Guaardvark's timer publishes at the time.
+  ``schedule_refusal`` why the platform's terms rule out a scheduled post at
+                       all; a scheduled post to it is refused with this text.
+  ``deletable`` and ``delete_window_seconds``  whether Delete on platform
+                       is offered, and for how long after posting.
+  ``public_opt_in``    visibilities a connection posts with only once its
+                       person turns them on, with a switch on its card on the
+                       Connections page. Until then a post with one of them is
+                       refused, with the declared reason, wherever a publish
+                       is checked (``gates.visibility_refusal``).
+
+- ``post_fields`` (``PostField``): inputs a post to this platform needs beyond
+  title, body and link, such as the subreddit a Reddit post goes to. The
+  composer shows them for a selected connection of the provider, the publish
+  path validates them, and the provider reads them from
+  ``PublishRequest.options``.
+- ``setup_steps`` and ``notice``: what the connection dialog tells a person
+  before they connect (numbered steps, and terms worth knowing).
+
+It implements:
+
+- ``test(ctx) -> (ok, message, discovered)``: probe the account; never posts.
+- ``publish(ctx, request, on_progress) -> PublishResult``: post now. Social
+  family only. Apply ``request.ai_disclosure`` when the disclosure mechanism is
+  a platform flag (a text line is already in ``request.body``).
+- ``schedule(ctx, request, on_progress) -> PublishResult`` and
+  ``scheduled_state(ctx, remote_id) -> ScheduleCheck``: required together when
+  ``native_scheduling`` is declared. ``schedule`` hands the post to the
+  platform for ``request.publish_at``; ``scheduled_state`` says whether the
+  platform has published it since.
+- ``delete(ctx, request: DeleteRequest) -> DeleteResult``: required when
+  ``deletable`` is declared. Removes the post (or a pending native schedule)
+  from the platform.
+- OAuth providers add ``authorize_url`` and ``exchange_code``. Their
+  ``test()`` may report ``token_expires_at`` (a datetime) among what it
+  discovered, and ``expired: True`` with a failure that only a new
+  authorization fixes; a publish that meets one calls
+  ``ctx.set_status(STATUS_EXPIRED, message)``.
+
+Providers call only their platform's official API, never a browser session,
+and raise nothing for an expected failure: they return a result with
+``ok=False`` and a message a person can act on.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Connection families.
@@ -32,6 +101,168 @@ STATUS_ERROR = "error"
 STATUS_DISABLED = "disabled"
 
 
+# When a platform's terms require a post to disclose AI use.
+DISCLOSE_NEVER = "never"
+# Required when the post carries media Guaardvark generated.
+DISCLOSE_GENERATED_MEDIA = "generated_media"
+# Required for generated media, and for text an agent (chat, MCP) drafted.
+DISCLOSE_AI_ASSISTED = "ai_assisted"
+
+# How a disclosure reaches the platform.
+DISCLOSURE_TEXT = "text"  # a line appended to the post body
+DISCLOSURE_FLAG = "platform_flag"  # a field of the platform's API, set by the provider
+
+DEFAULT_DISCLOSURE_TEXT = "Made with AI."
+
+# Requested-by sources whose text an agent wrote.
+AGENT_SOURCES = ("chat", "mcp")
+
+
+@dataclass(frozen=True)
+class AIDisclosure:
+    """A platform's AI disclosure rule and the mechanism that satisfies it.
+
+    Where the rule applies the composer shows the switch forced on, with
+    ``rule`` as the reason; elsewhere the person decides per post.
+    """
+
+    required_when: str = DISCLOSE_NEVER
+    mechanism: str = DISCLOSURE_TEXT
+    flag: str = ""
+    text: str = DEFAULT_DISCLOSURE_TEXT
+    rule: str = ""
+    source: str = ""
+
+    def required_for(self, generated_media: bool, requested_by: str) -> bool:
+        if self.required_when == DISCLOSE_GENERATED_MEDIA:
+            return generated_media
+        if self.required_when == DISCLOSE_AI_ASSISTED:
+            return generated_media or (requested_by or "") in AGENT_SOURCES
+        return False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "required_when": self.required_when,
+            "mechanism": self.mechanism,
+            "flag": self.flag,
+            "text": self.text,
+            "rule": self.rule,
+            "source": self.source,
+        }
+
+
+# How an account tells others it is automated.
+BOT_LABEL_NONE = "none"  # the platform defines no account label
+BOT_LABEL_AUTOMATIC = "automatic"  # the platform labels it (bot accounts, webhooks)
+BOT_LABEL_ACCOUNT_SETTING = "account_setting"  # the account holder sets it
+
+
+@dataclass(frozen=True)
+class BotLabel:
+    """How an account declares automation on a platform, shown as guidance.
+
+    ``readable`` means ``test()`` reads the label's state from the platform's
+    API and records it as ``config["bot_label_set"]``. ``block_when_unset``
+    refuses to publish from an account whose label reads as unset; set it only
+    for a platform that requires the label of every account posting through its
+    API and exposes it reliably.
+    """
+
+    kind: str = BOT_LABEL_NONE
+    how: str = ""
+    readable: bool = False
+    api_field: str = ""
+    block_when_unset: bool = False
+    source: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "how": self.how,
+            "readable": self.readable,
+            "api_field": self.api_field,
+            "block_when_unset": self.block_when_unset,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
+class RateLimit:
+    """At most ``posts`` posts per account in any ``window_seconds``.
+
+    Kept below ``platform_limit``, the platform's own published figure, which is
+    stated with its ``source`` so the margin stays visible.
+    """
+
+    posts: int
+    window_seconds: int
+    platform_limit: str = ""
+    source: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "posts": self.posts,
+            "window_seconds": self.window_seconds,
+            "platform_limit": self.platform_limit,
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
+class NativeScheduling:
+    """The platform's own scheduling: it holds the post and publishes it.
+
+    ``min_lead_seconds`` is the platform's shortest accepted lead time;
+    ``visibilities`` limits native scheduling to those visibilities (empty
+    means any). Outside those limits Guaardvark's timer publishes instead.
+    """
+
+    field: str
+    min_lead_seconds: int = 0
+    visibilities: Tuple[str, ...] = ()
+    source: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "field": self.field,
+            "min_lead_seconds": self.min_lead_seconds,
+            "visibilities": list(self.visibilities),
+            "source": self.source,
+        }
+
+
+@dataclass(frozen=True)
+class PublicOptIn:
+    """Visibilities a connection posts with only once its person turns them on.
+
+    Off by default, and stored per connection (``Connection.config``, key
+    ``gates.ALLOW_PUBLIC_KEY``). While off, a post with one of
+    ``visibilities`` is refused with ``refusal``, which also says where the
+    switch is; the composer shows those choices unavailable with the same
+    text. ``explanation`` is shown beside the switch: what turning it on
+    allows and what stays the same, citing ``sources`` ((title, url) pairs).
+    ``legacy_setting`` names an install-wide setting that decided this before
+    the switch existed; it is still read for a connection with no choice stored.
+    """
+
+    visibilities: Tuple[str, ...]
+    label: str
+    explanation: str
+    refusal: str
+    sources: Tuple[Tuple[str, str], ...] = ()
+    legacy_setting: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "visibilities": list(self.visibilities),
+            "label": self.label,
+            "explanation": self.explanation,
+            "refusal": self.refusal,
+            "sources": [{"title": title, "url": url} for title, url in self.sources],
+            "legacy_setting": self.legacy_setting,
+        }
+
+
 @dataclass(frozen=True)
 class Capabilities:
     """What a platform accepts. Drives client-side validation and the UI."""
@@ -50,10 +281,25 @@ class Capabilities:
     requires_public_url: bool = False
     supports_link: bool = True
     supports_title: bool = False
+    # The platform refuses a post without a title.
+    requires_title: bool = False
+    max_title_chars: Optional[int] = None
     supports_tags: bool = False
     visibilities: Tuple[str, ...] = ()
+    # Sent when a post names no visibility, and shown selected in the composer.
     default_visibility: str = "private"
     accepted_mime: Tuple[str, ...] = ()
+    rate_limits: Tuple[RateLimit, ...] = ()
+    ai_disclosure: AIDisclosure = AIDisclosure()
+    bot_label: BotLabel = BotLabel()
+    native_scheduling: Optional[NativeScheduling] = None
+    # Why the platform's terms rule out a post at a later time; empty when a
+    # scheduled post is fine. A scheduled post to this target is refused with it.
+    schedule_refusal: str = ""
+    deletable: bool = False
+    # How long after posting the platform still allows a delete; None = no limit.
+    delete_window_seconds: Optional[int] = None
+    public_opt_in: Optional[PublicOptIn] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -70,10 +316,22 @@ class Capabilities:
             "requires_public_url": self.requires_public_url,
             "supports_link": self.supports_link,
             "supports_title": self.supports_title,
+            "requires_title": self.requires_title,
+            "max_title_chars": self.max_title_chars,
             "supports_tags": self.supports_tags,
             "visibilities": list(self.visibilities),
             "default_visibility": self.default_visibility,
             "accepted_mime": list(self.accepted_mime),
+            "rate_limits": [r.to_dict() for r in self.rate_limits],
+            "ai_disclosure": self.ai_disclosure.to_dict(),
+            "bot_label": self.bot_label.to_dict(),
+            "native_scheduling": (
+                self.native_scheduling.to_dict() if self.native_scheduling else None
+            ),
+            "schedule_refusal": self.schedule_refusal,
+            "deletable": self.deletable,
+            "delete_window_seconds": self.delete_window_seconds,
+            "public_opt_in": self.public_opt_in.to_dict() if self.public_opt_in else None,
         }
 
 
@@ -122,6 +380,47 @@ class ConfigField:
 
 
 @dataclass(frozen=True)
+class PostField:
+    """A per-post input a platform needs, e.g. the subreddit a post goes to.
+
+    ``pattern`` is a regular expression the whole trimmed value must match,
+    with ``pattern_message`` shown when it does not.
+    """
+
+    name: str
+    label: str
+    required: bool = False
+    help: str = ""
+    placeholder: str = ""
+    pattern: str = ""
+    pattern_message: str = ""
+    max_chars: Optional[int] = None
+
+    def problems(self, value: str) -> List[str]:
+        """Why ``value`` will not do; empty when it will."""
+        value = (value or "").strip()
+        if not value:
+            return [f"{self.label} is required."] if self.required else []
+        if self.max_chars is not None and len(value) > self.max_chars:
+            return [f"{self.label} is {len(value)} characters; the limit is {self.max_chars}."]
+        if self.pattern and not re.fullmatch(self.pattern, value):
+            return [self.pattern_message or f"{self.label} is not valid."]
+        return []
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "label": self.label,
+            "required": self.required,
+            "help": self.help,
+            "placeholder": self.placeholder,
+            "pattern": self.pattern,
+            "pattern_message": self.pattern_message,
+            "max_chars": self.max_chars,
+        }
+
+
+@dataclass(frozen=True)
 class ProviderSpec:
     """Everything the API and UI need to render and validate a provider."""
 
@@ -136,8 +435,18 @@ class ProviderSpec:
     hint_field: Optional[str] = None
     docs_url: str = ""
     setup_help: str = ""
+    # Numbered steps for the connection dialog. "{redirect_uri}" stands for the
+    # OAuth redirect URL this install uses, which the dialog fills in.
+    setup_steps: Tuple[str, ...] = ()
+    # Terms a person should know before connecting, shown as a notice.
+    notice: str = ""
+    post_fields: Tuple[PostField, ...] = ()
     review_required: bool = False
     beta: bool = False
+    # True when the credential can post only into a channel its holder
+    # manages (a Discord webhook). Only such a connection may be switched to
+    # post without a per-post approval (gates.requires_approval).
+    posts_to_owned_channel: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -151,8 +460,12 @@ class ProviderSpec:
             "env_keys": list(self.env_keys),
             "docs_url": self.docs_url,
             "setup_help": self.setup_help,
+            "setup_steps": list(self.setup_steps),
+            "notice": self.notice,
+            "post_fields": [f.to_dict() for f in self.post_fields],
             "review_required": self.review_required,
             "beta": self.beta,
+            "posts_to_owned_channel": self.posts_to_owned_channel,
         }
 
 
@@ -173,6 +486,8 @@ class MediaItem:
     # (MiniMax H3) and whether the clip carries a generated soundtrack.
     attribution: Optional[str] = None
     has_audio: bool = False
+    # Made by Guaardvark's generators, as its Document metadata records.
+    generated: bool = False
 
     @property
     def kind(self) -> str:
@@ -192,6 +507,7 @@ class MediaItem:
             "bytes": self.bytes,
             "role": self.role,
             "alt_text": self.alt_text,
+            "generated": self.generated,
         }
 
 
@@ -208,6 +524,12 @@ class PublishRequest:
     visibility: str = "private"
     media: List[MediaItem] = field(default_factory=list)
     config: Dict[str, Any] = field(default_factory=dict)
+    # Set the platform's AI flag when the disclosure mechanism is a flag.
+    ai_disclosure: bool = False
+    # Values of the provider's post_fields, validated, keyed by field name.
+    options: Dict[str, str] = field(default_factory=dict)
+    # For ``schedule()``: when the platform should publish it (naive local time).
+    publish_at: Optional[datetime] = None
 
 
 @dataclass
@@ -215,6 +537,41 @@ class PublishResult:
     ok: bool
     remote_id: Optional[str] = None
     remote_url: Optional[str] = None
+    message: str = ""
+
+
+# ScheduleCheck.state values.
+SCHEDULE_PENDING = "pending"  # the platform still holds it for later
+SCHEDULE_PUBLISHED = "published"  # the platform has published it
+SCHEDULE_GONE = "gone"  # the platform no longer has it, and did not publish it
+
+
+@dataclass
+class ScheduleCheck:
+    """What ``scheduled_state()`` learned about a natively scheduled post."""
+
+    state: str
+    remote_url: Optional[str] = None
+    message: str = ""
+
+
+@dataclass
+class DeleteRequest:
+    """Remove one post from the platform.
+
+    ``pending_schedule`` is true when the platform still holds the post for a
+    future time, which some APIs delete through a different endpoint.
+    """
+
+    record_id: int
+    remote_id: str
+    remote_url: Optional[str] = None
+    pending_schedule: bool = False
+
+
+@dataclass
+class DeleteResult:
+    ok: bool
     message: str = ""
 
 

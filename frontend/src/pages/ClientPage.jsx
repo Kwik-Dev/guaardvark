@@ -640,27 +640,31 @@ const ClientPage = () => {
                       <TableCell>{formatDate(client.updated_at)}</TableCell>
                       <TableCell align="right" sx={{ pr: 2 }}>
                         <Tooltip title="Link Projects">
-                          <IconButton
-                            size="small"
-                            onClick={(e) => handleOpenLinkerModal(client, e)}
-                            disabled={isModalSaving}
-                          >
-                            <LinkIcon fontSize="small" />
-                          </IconButton>
+                          <span>
+                            <IconButton
+                              size="small"
+                              onClick={(e) => handleOpenLinkerModal(client, e)}
+                              disabled={isModalSaving}
+                            >
+                              <LinkIcon fontSize="small" />
+                            </IconButton>
+                          </span>
                         </Tooltip>
                         <Tooltip title="Delete Client">
-                          <IconButton
-                            size="small"
-                            onClick={(e) =>
-                              handleDeleteClient(client.id, client.name, e)
-                            }
-                            disabled={isModalSaving}
-                          >
-                            <CloseIcon
-                              fontSize="small"
-                              sx={{ color: "text.secondary" }}
-                            />
-                          </IconButton>
+                          <span>
+                            <IconButton
+                              size="small"
+                              onClick={(e) =>
+                                handleDeleteClient(client.id, client.name, e)
+                              }
+                              disabled={isModalSaving}
+                            >
+                              <CloseIcon
+                                fontSize="small"
+                                sx={{ color: "text.secondary" }}
+                              />
+                            </IconButton>
+                          </span>
                         </Tooltip>
                       </TableCell>
                     </TableRow>

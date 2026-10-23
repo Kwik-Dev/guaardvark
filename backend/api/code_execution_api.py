@@ -1,6 +1,7 @@
 # backend/api/code_execution_api.py
 # Code execution API for CodeEditorPage
 
+import contextlib
 import os
 import subprocess
 import tempfile
@@ -8,6 +9,8 @@ import json
 import logging
 import time
 import shlex
+import shutil
+import re
 import hashlib
 from collections import defaultdict
 from pathlib import Path
@@ -28,6 +31,56 @@ RATE_LIMIT_WINDOW = 60  # seconds
 
 # Rate limiting state
 _rate_limits = defaultdict(list)
+
+# The environment code run from the editor gets: these variables, the LC_*,
+# CUDA_* and NVIDIA_* families, and PYTHONPATH when every entry is inside this
+# install (the checkout or its virtualenv). Nothing else of the backend's
+# environment, which carries the .env secrets (the API key, database, broker
+# and result-backend URLs with their passwords, hub, bot and proxy
+# credentials), reaches the child.
+#
+# This is not a boundary. The code runs as the same user as the backend and
+# can read .env, or /proc/<pid>/environ of the backend, if it sets out to. It
+# only stops casual leakage: a script that prints os.environ, or a library
+# that dumps it in a traceback, no longer shows the secrets in the output.
+ENV_PASSTHROUGH = (
+    "PATH", "HOME", "USER", "LANG", "TERM", "TMPDIR",
+    "VIRTUAL_ENV", "LD_LIBRARY_PATH", "NODE_PATH",
+)
+ENV_PASSTHROUGH_PREFIXES = ("LC_", "CUDA_", "NVIDIA_")
+INSTALL_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _pythonpath_is_this_installs(value: str) -> bool:
+    """True when every entry of a PYTHONPATH is inside the checkout or the
+    virtualenv the backend runs in, so passing it on points the child at this
+    install's own code and nothing else."""
+    roots = [INSTALL_ROOT]
+    venv = os.environ.get("VIRTUAL_ENV")
+    if venv:
+        roots.append(Path(venv).resolve())
+    for entry in value.split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            resolved = Path(entry).resolve()
+        except OSError:
+            return False
+        if not any(resolved == root or root in resolved.parents for root in roots):
+            return False
+    return True
+
+
+def execution_env() -> dict:
+    """The environment for code the editor runs (see ENV_PASSTHROUGH)."""
+    env = {
+        name: value for name, value in os.environ.items()
+        if name in ENV_PASSTHROUGH or name.startswith(ENV_PASSTHROUGH_PREFIXES)
+    }
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    if pythonpath and _pythonpath_is_this_installs(pythonpath):
+        env["PYTHONPATH"] = pythonpath
+    return env
 
 
 def _check_rate_limit():
@@ -71,27 +124,39 @@ def cleanup_temp_file(file_path):
     except Exception as e:
         logger.warning(f"Failed to cleanup temp file {file_path}: {e}")
 
+@contextlib.contextmanager
+def _working_directory(cwd):
+    """`cwd` as given, or a fresh temporary folder for the duration."""
+    if cwd:
+        yield cwd
+        return
+    with tempfile.TemporaryDirectory(prefix="guaardvark-run-") as scratch:
+        yield scratch
+
+
 def execute_command(command, timeout=MAX_EXECUTION_TIME, cwd=None, use_shell=False):
     """Execute a command safely with timeout
 
     Args:
         command: Command to execute (string if use_shell=True, list otherwise)
         timeout: Execution timeout in seconds
-        cwd: Working directory
+        cwd: Working directory; None runs in a fresh temporary folder that
+            is removed afterwards, so nothing starts in the backend's folder
         use_shell: If True, execute command through shell (DANGEROUS - only for trusted input)
     """
     try:
         start_time = time.time()
 
-        result = subprocess.run(
-            command,
-            shell=use_shell,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-            env=os.environ.copy()
-        )
+        with _working_directory(cwd) as run_cwd:
+            result = subprocess.run(
+                command,
+                shell=use_shell,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=run_cwd,
+                env=execution_env()
+            )
 
         execution_time = time.time() - start_time
 
@@ -134,20 +199,21 @@ def execute_command_with_stdin(command, timeout=MAX_EXECUTION_TIME, stdin_data="
         command: Command to execute as list
         timeout: Execution timeout in seconds
         stdin_data: Data to pass to stdin
-        cwd: Working directory
+        cwd: Working directory; None runs in a fresh temporary folder
     """
     try:
         start_time = time.time()
 
-        result = subprocess.run(
-            command,
-            input=stdin_data,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-            env=os.environ.copy()
-        )
+        with _working_directory(cwd) as run_cwd:
+            result = subprocess.run(
+                command,
+                input=stdin_data,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=run_cwd,
+                env=execution_env()
+            )
 
         execution_time = time.time() - start_time
 
@@ -305,7 +371,8 @@ def execute_shell():
 
         command = data['command']
         timeout = min(data.get('timeout', MAX_EXECUTION_TIME), MAX_EXECUTION_TIME)
-        working_directory = data.get('workingDirectory', '/tmp')
+        # Unset: a fresh temporary folder (execute_command).
+        working_directory = data.get('workingDirectory') or None
 
         # Security check - block dangerous commands (defense-in-depth)
         dangerous_commands = ['rm -rf', 'sudo', 'su', 'chmod 777', 'dd if=', 'mkfs', 'fdisk',
@@ -334,9 +401,40 @@ def execute_shell():
         logger.error(f"Error executing shell command: {e}")
         return jsonify({"error": str(e)}), 500
 
+FORMATTERS = {
+    # language: (tool on PATH, argv builder, note shown when the tool is missing)
+    'python': ('black', lambda path, opts: ['black', '--quiet', '--line-length', str(opts.get('maxLineLength', 88)), path]),
+    'javascript': ('prettier', lambda path, opts: ['prettier', '--write', path]),
+    'typescript': ('prettier', lambda path, opts: ['prettier', '--write', path]),
+    'html': ('prettier', lambda path, opts: ['prettier', '--write', '--parser', 'html', path]),
+    'css': ('prettier', lambda path, opts: ['prettier', '--write', '--parser', 'css', path]),
+}
+
+INSTALL_HINTS = {
+    'black': 'pip install black',
+    'prettier': 'npm install -g prettier',
+    'flake8': 'pip install flake8',
+    'eslint': 'npm install -g eslint',
+}
+
+
+def _tool_missing(tool, action):
+    """A missing formatter or linter is a failure the user can act on, never a silent no-op."""
+    return jsonify({
+        "success": False,
+        "error": f"{action} needs {tool}, which is not installed on this machine ({INSTALL_HINTS.get(tool, 'install it and retry')}).",
+        "tool": tool,
+    }), 501
+
+
 @code_exec_bp.route("/format", methods=["POST"])
 def format_code():
-    """Format code using appropriate formatter"""
+    """Format code with a formatter that is actually present.
+
+    JSON is formatted with the standard library. Other languages need their
+    formatter on PATH (black, prettier); when it is missing the response is a
+    501 with the install hint instead of the unchanged code marked "formatted".
+    """
     try:
         data = request.get_json()
         if not data or 'code' not in data or 'language' not in data:
@@ -344,92 +442,103 @@ def format_code():
 
         code = data['code']
         language = data['language']
-        options = data.get('options', {})
+        options = data.get('options', {}) or {}
 
-        # Create temporary file
-        extensions = {
-            'python': '.py',
-            'javascript': '.js',
-            'typescript': '.ts',
-            'html': '.html',
-            'css': '.css',
-            'json': '.json'
-        }
-
-        ext = extensions.get(language, '.txt')
-        temp_file = create_temp_file(code, ext)
-
-        try:
-            formatted_code = code
-            changes = []
-
-            if language == 'python':
-                # Use black for Python formatting
-                command = ['black', '--line-length', str(options.get('maxLineLength', 80)), temp_file]
-                result = execute_command(command, 10)
-                if result['success']:
-                    with open(temp_file, 'r') as f:
-                        formatted_code = f.read()
-                    changes = ["Applied Black formatting"]
-
-            elif language in ['javascript', 'typescript']:
-                # Use prettier for JS/TS formatting
-                command = ['prettier', '--write', temp_file]
-                result = execute_command(command, 10)
-                if result['success']:
-                    with open(temp_file, 'r') as f:
-                        formatted_code = f.read()
-                    changes = ["Applied Prettier formatting"]
-
-            elif language == 'html':
-                # Use prettier for HTML formatting
-                command = ['prettier', '--write', '--parser', 'html', temp_file]
-                result = execute_command(command, 10)
-                if result['success']:
-                    with open(temp_file, 'r') as f:
-                        formatted_code = f.read()
-                    changes = ["Applied Prettier formatting"]
-
-            elif language == 'css':
-                # Use prettier for CSS formatting
-                command = ['prettier', '--write', '--parser', 'css', temp_file]
-                result = execute_command(command, 10)
-                if result['success']:
-                    with open(temp_file, 'r') as f:
-                        formatted_code = f.read()
-                    changes = ["Applied Prettier formatting"]
-
-            elif language == 'json':
-                # Use prettier for JSON formatting
-                command = ['prettier', '--write', '--parser', 'json', temp_file]
-                result = execute_command(command, 10)
-                if result['success']:
-                    with open(temp_file, 'r') as f:
-                        formatted_code = f.read()
-                    changes = ["Applied Prettier formatting"]
-
-            # Cleanup
-            cleanup_temp_file(temp_file)
-
+        if language == 'json':
+            try:
+                indent = options.get('indentSize', 2)
+                formatted_code = json.dumps(json.loads(code), indent=indent, ensure_ascii=False) + "\n"
+            except json.JSONDecodeError as exc:
+                return jsonify({"success": False, "error": f"Not valid JSON: {exc.msg} (line {exc.lineno})"}), 422
             return jsonify({
                 "success": True,
                 "formattedCode": formatted_code,
                 "originalCode": code,
                 "language": language,
-                "changes": changes
+                "tool": "json",
+                "changes": [] if formatted_code == code else ["Reindented with the json module"],
             })
 
-        except Exception as e:
+        spec = FORMATTERS.get(language)
+        if not spec:
+            return jsonify({"success": False, "error": f"No formatter for {language} here."}), 501
+        tool, build_argv = spec
+        if not shutil.which(tool):
+            return _tool_missing(tool, "Format")
+
+        extensions = {'python': '.py', 'javascript': '.js', 'typescript': '.ts', 'html': '.html', 'css': '.css'}
+        temp_file = create_temp_file(code, extensions.get(language, '.txt'))
+        try:
+            result = execute_command(build_argv(temp_file, options), 10)
+            if not result['success']:
+                return jsonify({
+                    "success": False,
+                    "error": (result['stderr'] or result['output'] or f"{tool} exited with {result['exitCode']}").strip(),
+                    "tool": tool,
+                }), 422
+            with open(temp_file, 'r') as f:
+                formatted_code = f.read()
+        finally:
             cleanup_temp_file(temp_file)
-            raise e
+
+        return jsonify({
+            "success": True,
+            "formattedCode": formatted_code,
+            "originalCode": code,
+            "language": language,
+            "tool": tool,
+            "changes": [] if formatted_code == code else [f"Applied {tool} formatting"],
+        })
 
     except Exception as e:
         logger.error(f"Error formatting code: {e}")
         return jsonify({"error": str(e)}), 500
 
+
+_FLAKE8_LINE = re.compile(r"^(?P<path>.+?):(?P<line>\d+):(?P<col>\d+): (?P<code>[A-Z]+\d+) (?P<msg>.*)$")
+
+
+def parse_flake8_output(stdout):
+    """flake8's default format is `path:line:col: CODE message`, one per line, on stdout."""
+    errors, warnings = [], []
+    for raw in (stdout or "").splitlines():
+        match = _FLAKE8_LINE.match(raw.strip())
+        if not match:
+            continue
+        issue = {
+            "line": int(match.group('line')),
+            "column": int(match.group('col')),
+            "code": match.group('code'),
+            "message": match.group('msg').strip(),
+        }
+        (errors if match.group('code')[0] in 'EF' else warnings).append(issue)
+    return errors, warnings
+
+
+def parse_eslint_output(stdout):
+    """eslint --format=json prints one entry per file with its messages."""
+    errors, warnings = [], []
+    for file_result in json.loads(stdout):
+        for message in file_result.get('messages', []):
+            issue = {
+                "line": message.get('line', 1),
+                "column": message.get('column', 1),
+                "code": message.get('ruleId') or 'eslint',
+                "message": message.get('message', ''),
+            }
+            (errors if message.get('severity') == 2 else warnings).append(issue)
+    return errors, warnings
+
+
 @code_exec_bp.route("/lint", methods=["POST"])
 def lint_code():
-    """Lint code for errors and warnings"""
+    """Lint code, saying which tool did it.
+
+    flake8 (Python) or eslint (JavaScript/TypeScript) are used when they are on
+    PATH. Otherwise the response falls back to the real syntax check in
+    backend.services.code_syntax_check and says so in `tool` and `note`; when
+    not even that can parse the language it is a 501, never a clean report.
+    """
     try:
         data = request.get_json()
         if not data or 'code' not in data or 'language' not in data:
@@ -437,105 +546,49 @@ def lint_code():
 
         code = data['code']
         language = data['language']
-        options = data.get('options', {})
 
-        # Create temporary file
-        extensions = {
-            'python': '.py',
-            'javascript': '.js',
-            'typescript': '.ts',
-            'html': '.html',
-            'css': '.css'
-        }
-
-        ext = extensions.get(language, '.txt')
-        temp_file = create_temp_file(code, ext)
-
-        try:
-            errors = []
-            warnings = []
-            suggestions = []
-            score = 100
-
-            if language == 'python':
-                # Use flake8 for Python linting — pass as list, no shell
-                command = ['flake8', temp_file, '--format=json']
-                result = execute_command(command, 10)
-                if result['success'] or result['stderr']:
+        errors, warnings, tool, note = [], [], None, ""
+        linter = {'python': 'flake8', 'javascript': 'eslint', 'typescript': 'eslint'}.get(language)
+        if linter and shutil.which(linter):
+            extensions = {'python': '.py', 'javascript': '.js', 'typescript': '.ts'}
+            temp_file = create_temp_file(code, extensions[language])
+            try:
+                if linter == 'flake8':
+                    result = execute_command(['flake8', '--max-line-length', '120', temp_file], 10)
+                    # flake8 exits 1 when it found something; only an empty stdout with a non-zero exit is a tool failure.
+                    if not result['success'] and not result['stdout'].strip():
+                        return jsonify({"success": False, "error": (result['stderr'] or 'flake8 failed').strip(), "tool": linter}), 422
+                    errors, warnings = parse_flake8_output(result['stdout'])
+                else:
+                    result = execute_command(['eslint', '--format=json', '--no-color', temp_file], 10)
                     try:
-                        if result['stderr']:
-                            # Parse flake8 output
-                            lines = result['stderr'].strip().split('\n')
-                            for line in lines:
-                                if ':' in line:
-                                    parts = line.split(':')
-                                    if len(parts) >= 4:
-                                        line_num = parts[1]
-                                        col_num = parts[2]
-                                        error_code = parts[3].split()[0]
-                                        message = ':'.join(parts[3:]).strip()
+                        errors, warnings = parse_eslint_output(result['stdout'])
+                    except (ValueError, TypeError, AttributeError):
+                        # exit 2 and no JSON: eslint could not run (usually no config for a lone file).
+                        return jsonify({"success": False, "error": (result['stderr'] or result['stdout'] or 'eslint failed').strip(), "tool": linter}), 422
+                tool = linter
+            finally:
+                cleanup_temp_file(temp_file)
+        else:
+            from backend.services.code_syntax_check import check_syntax
+            checked = check_syntax(code, language)
+            if not checked['supported']:
+                hint = f" ({INSTALL_HINTS[linter]} for a full lint)" if linter else ""
+                return jsonify({"success": False, "error": checked['note'] + hint, "tool": None}), 501
+            errors, warnings, tool = checked['errors'], checked['warnings'], checked['tool']
+            note = f"Syntax check only; install {linter} for a full lint." if linter else "Syntax check only."
 
-                                        if error_code.startswith('E'):
-                                            errors.append({
-                                                "line": int(line_num),
-                                                "column": int(col_num),
-                                                "code": error_code,
-                                                "message": message
-                                            })
-                                        elif error_code.startswith('W'):
-                                            warnings.append({
-                                                "line": int(line_num),
-                                                "column": int(col_num),
-                                                "code": error_code,
-                                                "message": message
-                                            })
-                    except Exception as e:
-                        logger.warning(f"Failed to parse flake8 output: {e}")
-
-            elif language in ['javascript', 'typescript']:
-                # Use eslint for JS/TS linting — pass as list, no shell
-                command = ['eslint', temp_file, '--format=json']
-                result = execute_command(command, 10)
-                if result['stdout']:
-                    try:
-                        eslint_output = json.loads(result['stdout'])
-                        for file_result in eslint_output:
-                            for message in file_result.get('messages', []):
-                                if message['severity'] == 2:  # Error
-                                    errors.append({
-                                        "line": message['line'],
-                                        "column": message['column'],
-                                        "code": message['ruleId'],
-                                        "message": message['message']
-                                    })
-                                elif message['severity'] == 1:  # Warning
-                                    warnings.append({
-                                        "line": message['line'],
-                                        "column": message['column'],
-                                        "code": message['ruleId'],
-                                        "message": message['message']
-                                    })
-                    except Exception as e:
-                        logger.warning(f"Failed to parse eslint output: {e}")
-
-            # Calculate score
-            score = max(0, 100 - len(errors) * 10 - len(warnings) * 5)
-
-            # Cleanup
-            cleanup_temp_file(temp_file)
-
-            return jsonify({
-                "success": True,
-                "errors": errors,
-                "warnings": warnings,
-                "suggestions": suggestions,
-                "score": score,
-                "language": language
-            })
-
-        except Exception as e:
-            cleanup_temp_file(temp_file)
-            raise e
+        score = max(0, 100 - len(errors) * 10 - len(warnings) * 5)
+        return jsonify({
+            "success": True,
+            "errors": errors,
+            "warnings": warnings,
+            "suggestions": [],
+            "score": score,
+            "language": language,
+            "tool": tool,
+            "note": note,
+        })
 
     except Exception as e:
         logger.error(f"Error linting code: {e}")

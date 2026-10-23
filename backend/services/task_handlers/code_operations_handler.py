@@ -315,7 +315,7 @@ Return the code properly formatted for {language}."""
         progress_callback(30, "Generating code...", None)
 
         try:
-            session_id = f"code-generation-{task.id}-{datetime.now().timestamp()}"
+            session_id = f"code-gen-{task.id}-{int(datetime.now().timestamp() * 1000)}"
             response = chat_func(
                 session_id=session_id,
                 user_message=prompt,

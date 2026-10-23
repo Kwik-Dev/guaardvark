@@ -475,14 +475,31 @@ def _hardware_default_llm() -> str:
     return "gemma4:e2b"
 
 
+_saved_model_warned: set = set()
+
+
+def _warn_saved_model_cannot_chat(saved: str, used: str) -> None:
+    """Say once per saved model that it was passed over, and for what."""
+    if saved in _saved_model_warned:
+        return
+    _saved_model_warned.add(saved)
+    _config_logger.warning(
+        "The saved chat model %s cannot chat (Ollama lists it as an embedding or decision "
+        "model); using %s instead. Pick a chat model in Settings to stop this.",
+        saved, used,
+    )
+
+
 def get_default_llm():
     """Return the active LLM model name.
 
-    Priority: saved user choice (if model still available) > preference list > first text model.
+    Priority: saved user choice (if model still available and can chat) > preference list > first text model.
+    A saved model Ollama says cannot chat (known_not_to_chat: an embedding or
+    decision model) is passed over with a warning.
     """
     try:
         import requests
-        from backend.utils.ollama_resource_manager import is_text_chat_model
+        from backend.utils.ollama_resource_manager import is_text_chat_model, known_not_to_chat
 
         response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
         if response.status_code != 200:
@@ -492,10 +509,13 @@ def get_default_llm():
         models = response.json().get('models', [])
         available_names = {m.get('name', '') for m in models}
 
-        # 1. Prefer the user's saved model if it's still available in Ollama
+        # 1. Prefer the user's saved model if it's still available in Ollama and can chat
         saved = _read_saved_model_name()
+        passed_over = None
         if saved and saved in available_names:
-            return saved
+            if not known_not_to_chat(saved):
+                return saved
+            passed_over = saved
 
         # 2. Fall back to preference list
         preferred_patterns = [
@@ -506,19 +526,29 @@ def get_default_llm():
             'mistral',
         ]
 
-        for pattern in preferred_patterns:
+        def _first_chat_model():
+            for pattern in preferred_patterns:
+                for model in models:
+                    name = model.get('name', '').lower()
+                    if not is_text_chat_model(name):
+                        continue
+                    if pattern in name and ':' in name:
+                        return model.get('name')
+
+            # 3. Any text chat model
             for model in models:
                 name = model.get('name', '').lower()
-                if not is_text_chat_model(name):
-                    continue
-                if pattern in name and ':' in name:
+                if is_text_chat_model(name):
                     return model.get('name')
+            return None
 
-        # 3. Any text chat model
-        for model in models:
-            name = model.get('name', '').lower()
-            if is_text_chat_model(name):
-                return model.get('name')
+        pick = _first_chat_model()
+        if passed_over:
+            # Never hand back a model known not to chat, even with nothing better installed.
+            pick = pick or _hardware_default_llm()
+            _warn_saved_model_cannot_chat(passed_over, pick)
+        if pick:
+            return pick
 
     except Exception:
         pass
@@ -573,8 +603,13 @@ def get_chat_keep_alive():
     - No GPU: keep resident (env GUAARDVARK_CHAT_KEEP_ALIVE_CPU, default "-1") so a CPU box
       isn't reloading the model from disk every idle cycle. RAM-pressure eviction is handled
       separately by the orchestrator — "resident" does NOT mean "pinned forever".
+    Keep ready (Settings → Models, backend/services/chat_keep_ready.py) asks for -1 on any box;
+    the orchestrator still evicts the model for exclusive GPU work.
     Returns an int when numeric (Ollama: seconds, -1 = forever), else the string (e.g. "15m").
     """
+    from backend.services.chat_keep_ready import keep_ready_on
+    if keep_ready_on():
+        return -1
     try:
         from backend.services.gpu_resource_coordinator import has_gpu
         gpu = has_gpu()

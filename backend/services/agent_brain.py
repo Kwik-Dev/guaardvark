@@ -26,6 +26,7 @@ from backend.services.brain_state import (
 )
 from backend.services.step_budget import StepBudget, TierTelemetry
 from backend.utils.llm_debug_logger import log_decision
+from backend.utils.request_phrases import declines_media
 from backend.services.unified_chat_engine import (
     begin_turn,
     end_turn,
@@ -202,6 +203,8 @@ def is_pure_image_request(message: str, options: Optional[Dict[str, Any]] = None
     """
     if options and options.get("agent_mode"):
         return False
+    if declines_media(message):
+        return False
     msg = (message or "").lower()
     wants_image = any(p in msg for p in _PURE_IMAGE_PHRASES) or re.search(r"\bdraw\b", msg) is not None
     return wants_image and _SCREEN_WORDS.search(msg) is None
@@ -212,6 +215,14 @@ VISION_PATTERNS = re.compile(
     r"agent\s+(?:screen|mode|vision)|on\s+(?:the|your)\s+(?:screen|display)|"
     r"(?:your|the)\s+virtual|use\s+(?:the|your)\s+screen|/vision|/agent)",
 )
+
+
+def vision_prompt_key(message: str, image_data=None) -> str:
+    """The prompt for a vision-routed turn: the screen prompt for a screen task,
+    the chat prompt for a picture pasted into the conversation."""
+    if image_data and not VISION_PATTERNS.search(message or ""):
+        return "chat"
+    return "vision"
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +252,28 @@ def _brain_provenance(request_id: str, tier: int, model, thinking_steps, eye=Non
     except Exception:
         pass
     return prov
+
+
+def _capture_memory(app, message: str, session_id: str, project_id=None) -> None:
+    """Keep a "remember that …" fact from a user turn saved outside the engine.
+
+    The engine runs memory_capture right after it saves the user message; a
+    brain path that saves the turn itself runs the same capture, so a fact
+    the person asked to be remembered is kept whichever tier answered. Only
+    the explicit forms ("remember that", "from now on", "for future
+    reference"): these paths carry task requests, and "my goal is to …" is
+    not a fact to file. Best effort, like _persist_turn: a failure is logged
+    and the reply goes on.
+    """
+    if not app or not message:
+        return
+    try:
+        from backend.services.memory_capture import capture_from_message
+        with app.app_context():
+            capture_from_message(message, session_id=session_id, project_id=project_id,
+                                 explicit_only=True)
+    except Exception:
+        logger.exception("Chat memory auto-capture failed for session %s", session_id)
 
 
 def _persist_turn(app, session_id: str, role: str, content: str, extra: Optional[Dict[str, Any]],
@@ -334,6 +367,8 @@ class AgentBrain:
         request_id = str((options or {}).get("request_id") or "") or str(uuid.uuid4())
         if isinstance(options, dict):
             options["request_id"] = request_id
+        self._decide_turn(session_id, message, options, app, image_data, force_tier,
+                          is_voice_message, request_id)
         tier_used = 0
         tools_called: List[str] = []
         tool_params_log: List[Dict] = []
@@ -387,6 +422,7 @@ class AgentBrain:
                         )
                         if app:
                             temp_engine.app = app
+                        temp_engine._project_id = project_id
                         rid = str(uuid.uuid4())
                         display = message or f"/{ (options or {}).get('slash_command', tool_name) }"
                         # Execute with the caller's emit_fn so UI sees tool_call/result/image/complete
@@ -494,9 +530,11 @@ class AgentBrain:
                     escalation_reason = f"reflex '{reflex_action.name}' failed"
 
             # -- Vision routing. Two triggers:
-            #    (1) image_data present — user pasted an image. ALWAYS use the
-            #        vision prompt regardless of agent-screen state, because
-            #        the user explicitly wants the model to look at the image.
+            #    (1) image_data present — user pasted an image. It rides on the
+            #        user message whatever the prompt; the screen prompt is used
+            #        only when the message is about the screen. A pasted picture
+            #        otherwise gets the chat prompt, so it is read against the
+            #        conversation instead of under screen-control rules.
             #    (2) vision-sounding text ("click the Firefox button") AND the
             #        agent screen is being watched. Without the screen, those
             #        requests route through normal Instinct so the model can
@@ -510,7 +548,7 @@ class AgentBrain:
                     session_id, message, options, emit_fn, app,
                     project_id=project_id, image_data=image_data,
                     image_url=image_url, is_voice_message=is_voice_message,
-                    prompt_key="vision", budget=budget,
+                    prompt_key=vision_prompt_key(message, image_data), budget=budget,
                 )
 
             # -- "Yes" to the assistant's own offer: do it, with tools --
@@ -714,6 +752,11 @@ class AgentBrain:
                         db.session.commit()
                     except Exception:
                         logger.exception("Failed to persist user message in gemma4_direct")
+                # The same memory capture the engine runs after its save, so a
+                # "remember that …" spoken with the agent screen open is kept.
+                if (options or {}).get("persist", True) is not False \
+                        and not (options or {}).get("skip_memory_capture"):
+                    _capture_memory(app, message, session_id, project_id=project_id)
 
             # Delegate straight to the robust execute_task loop
             # Pass the explicit budget (gemma direct counts against the cross-tier cap).
@@ -1348,9 +1391,13 @@ class AgentBrain:
             from backend.services.agent_executor import AgentExecutor
 
             # Tier 3 bypasses the engine, which saves the question for the other
-            # tiers; save it before the run so it survives a crash or a reload.
+            # tiers; save it before the run so it survives a crash or a reload,
+            # and run the engine's memory capture on it, so "remember that …"
+            # is kept when the message also reads as a task.
             if app and message and (options or {}).get("persist", True) is not False:
                 _persist_turn(app, session_id, "user", message, None, project_id=project_id)
+                if not (options or {}).get("skip_memory_capture"):
+                    _capture_memory(app, message, session_id, project_id=project_id)
 
             if budget is None:
                 budget = StepBudget.from_total(self.TOTAL_STEP_CAP)
@@ -1500,6 +1547,29 @@ class AgentBrain:
         return None
 
     # -- Routing helpers ----------------------------------------------------
+
+    def _decide_turn(self, session_id, message, options, app, image_data, force_tier,
+                     is_voice_message, request_id):
+        """Build the turn's TurnDecision (turn_router, legacy mode) and hand it to
+        the engine as options["turn"]; route_turn also writes its telemetry row.
+
+        The route below is still chosen by this method's own chain, which the
+        decision reproduces; nothing dispatches on it yet. Never raises.
+        """
+        try:
+            from backend.services.turn_router import route_turn
+            turn = route_turn(
+                message, options, surface=(options or {}).get("surface"), request_id=request_id,
+                session_id=session_id, image_data=image_data, app=app, state=self.state,
+                force_tier=force_tier, screen_drivable=self._screen_drivable,
+                is_voice_message=is_voice_message,
+            )
+        except Exception as e:
+            logger.debug(f"turn decision skipped: {e}")
+            return None
+        if isinstance(options, dict):
+            options["turn"] = turn
+        return turn
 
     # Historical name; the path is no longer Gemma-specific.
     _gemma4_direct = None  # rebound below the class body

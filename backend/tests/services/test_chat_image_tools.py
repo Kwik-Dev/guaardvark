@@ -3,6 +3,9 @@ from backend.tools.image_tools import EditImageTool, GenerateIdentityTool
 from backend.services.unified_chat_engine import (
     GPU_HEAVY_TOOLS,
     _pin_image_edit_tools,
+    attached_images_for_turn,
+    pasted_image_prompt,
+    pasted_images_note,
     identity_prompt_from_message,
     parse_outpaint_pad,
     user_wants_background_remove,
@@ -417,3 +420,206 @@ def test_api_sends_the_camera_frame_as_context_not_as_the_image(monkeypatch):
     assert options["camera_frame"] == CAMERA_FRAME
     assert kwargs["image_data"] is None
     assert kwargs["image_url"] is None
+
+
+# ---- several pictures on one turn -------------------------------------------
+
+def test_attached_images_default_to_the_primary_picture():
+    assert attached_images_for_turn(None, {}) == []
+    assert attached_images_for_turn("AAAA", {}) == ["AAAA"]
+    assert attached_images_for_turn("AAAA", {"attached_images": "AAAA"}) == ["AAAA"]
+    assert attached_images_for_turn("AAAA", {"attached_images": [None, ""]}) == ["AAAA"]
+
+
+def test_attached_images_keep_order_with_the_primary_first():
+    opts = {"attached_images": ["AAAA", "BBBB", "CCCC"]}
+    assert attached_images_for_turn("AAAA", opts) == ["AAAA", "BBBB", "CCCC"]
+    # A list that does not lead with the primary picture is reordered, not trusted.
+    opts = {"attached_images": ["BBBB", "AAAA", "CCCC"]}
+    assert attached_images_for_turn("AAAA", opts) == ["AAAA", "BBBB", "CCCC"]
+
+
+def test_pasted_images_note_for_one_and_several():
+    assert pasted_images_note([]) is None
+    assert pasted_images_note([None, "  "]) is None
+    assert pasted_images_note(["a red barn"]) == (
+        "[The user pasted an image. Vision model analysis: a red barn]"
+    )
+    assert pasted_images_note(["a red barn", None, "a grey cat"]) == (
+        "[The user pasted 3 images. Vision model analysis: "
+        "Image 1 of 3: a red barn; Image 3 of 3: a grey cat]"
+    )
+
+
+def test_history_returns_every_picture_of_a_multi_picture_turn():
+    """A reload shows all the pictures of a turn, not just the first: the
+    history route flattens ``imageUrls`` out of extra_data like ``imageUrl``."""
+    from flask import Flask
+
+    from backend.api import enhanced_chat_api
+    from backend.models import LLMMessage, LLMSession, db
+
+    urls = ["/api/enhanced-chat/vision/image/a.png", "/api/enhanced-chat/vision/image/b.png"]
+    app = Flask("test_history_multi_picture")
+    app.config.update(TESTING=True, SQLALCHEMY_DATABASE_URI="sqlite:///:memory:",
+                      SQLALCHEMY_TRACK_MODIFICATIONS=False)
+    db.init_app(app)
+    app.register_blueprint(enhanced_chat_api.enhanced_chat_bp)
+    with app.app_context():
+        db.create_all()
+        db.session.add(LLMSession(id="s-pics", user="default"))
+        db.session.flush()
+        db.session.add(LLMMessage(
+            session_id="s-pics", role="user", content="compare these",
+            extra_data={"hasImage": True, "imageUrl": urls[0], "imageUrls": urls,
+                        "messageType": "image_upload"},
+        ))
+        db.session.commit()
+        try:
+            body = app.test_client().get("/api/enhanced-chat/s-pics/history").get_json()
+        finally:
+            db.session.remove()
+            db.drop_all()
+
+    message = body["messages"][0]
+    assert message["imageUrl"] == urls[0]
+    assert message["imageUrls"] == urls
+    assert message["messageType"] == "image_upload"
+
+
+def test_pasted_image_prompt_relays_a_question_but_not_the_default_message():
+    assert pasted_image_prompt("what breed is this?") == (
+        "Describe this image in detail. The user asks: what breed is this?"
+    )
+    plain = "Describe this image in detail. What do you see?"
+    # The entry points' default messages for a picture without text, one or
+    # several, carry no question for the guide dog.
+    assert pasted_image_prompt("Describe this image.") == plain
+    assert pasted_image_prompt("Describe these images.") == plain
+    assert pasted_image_prompt("  describe these images.  ") == plain
+    assert pasted_image_prompt("") == plain
+    assert pasted_image_prompt(None) == plain
+    # The composer's defaults name the files; they are not questions either.
+    assert pasted_image_prompt("Describe this image: photo.png") == plain
+    assert pasted_image_prompt("Describe these 2 images: a.png, b.png") == plain
+    assert pasted_image_prompt("Describe these 10 images: a.png, b.png, c.png") == plain
+    # A user's own words that merely start the same way are still relayed.
+    asked = pasted_image_prompt("Describe this image: is the roof damaged?")
+    assert asked.endswith("The user asks: Describe this image: is the roof damaged?")
+    assert pasted_image_prompt("describe these images in one word").endswith(
+        "The user asks: describe these images in one word"
+    )
+
+
+def test_stop_halts_the_descriptions_of_the_remaining_pictures(monkeypatch):
+    """Up to four guide-dog calls run in sequence for a text-only model; Stop
+    between them leaves the rest undescribed instead of running to the end."""
+    import backend.services.unified_chat_engine as uce
+
+    e = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+    described = []
+
+    def _describe(image, user_message):
+        described.append(image)
+        return f"description of {image}"
+
+    e._analyze_pasted_image = _describe
+    checks = []
+
+    # Stop arrives once the first picture has been described.
+    def _aborted(session_id):
+        checks.append(session_id)
+        return len(described) >= 1
+
+    monkeypatch.setattr(uce, "is_aborted", _aborted)
+
+    out = e._describe_attached_images(["AAAA", "BBBB", "CCCC"], "compare these", "sess-stop")
+
+    assert described == ["AAAA"]
+    assert out == ["description of AAAA", None, None]
+    assert checks == ["sess-stop", "sess-stop"]
+    # The note names what was described; the ReACT loop stops the turn next.
+    assert uce.pasted_images_note(out) == (
+        "[The user pasted 3 images. Vision model analysis: Image 1 of 3: description of AAAA]"
+    )
+
+
+def test_every_picture_is_described_when_the_turn_runs_on(monkeypatch):
+    import backend.services.unified_chat_engine as uce
+
+    e = uce.UnifiedChatEngine.__new__(uce.UnifiedChatEngine)
+    e._analyze_pasted_image = lambda image, user_message: f"description of {image}"
+    monkeypatch.setattr(uce, "is_aborted", lambda session_id: False)
+
+    out = e._describe_attached_images(["AAAA", "BBBB"], "compare these", "sess-run")
+
+    assert out == ["description of AAAA", "description of BBBB"]
+
+
+def test_api_keeps_picture_urls_aligned_when_one_save_fails(monkeypatch):
+    """If the first picture cannot be saved, imageUrl is None, not the second
+    picture's URL; the URL list keeps one slot per picture in attach order."""
+    import threading
+    import types
+    from flask import Flask
+
+    import backend.api.unified_chat_api as api
+    import backend.config as config
+    import backend.services.unified_chat_engine as uce
+    import backend.tools.tool_registry_init as tool_registry_init
+
+    received = []
+
+    class _Engine:
+        def __init__(self, *a, **k):
+            pass
+
+        def chat(self, session_id, message, options, emit_fn, **kwargs):
+            received.append((dict(options), kwargs))
+
+    started = []
+
+    class _Thread(threading.Thread):
+        def start(self):
+            started.append(self)
+            super().start()
+
+    saved = []
+
+    def _save(image_data):
+        saved.append(image_data)
+        return None if image_data == "AAAA" else f"/api/enhanced-chat/vision/image/{image_data}.png"
+
+    monkeypatch.setattr(config, "AGENT_BRAIN_ENABLED", False)
+    monkeypatch.setattr(tool_registry_init, "initialize_all_tools", lambda: object())
+    monkeypatch.setattr(uce, "UnifiedChatEngine", _Engine)
+    monkeypatch.setattr(api, "_save_chat_image", _save)
+    monkeypatch.setattr(api, "_inflight", {})
+    monkeypatch.setattr(api, "threading", types.SimpleNamespace(
+        Thread=_Thread, get_ident=threading.get_ident,
+        current_thread=threading.current_thread, Lock=threading.Lock,
+    ))
+
+    app = Flask("test_picture_urls_api")
+    app.config["LLAMA_INDEX_LLM"] = object()
+    app.register_blueprint(api.unified_chat_bp)
+    response = app.test_client().post("/api/chat/unified", json={
+        "session_id": "sess-pictures-api",
+        "message": "compare these",
+        "images": ["AAAA", "BBBB", "CCCC"],
+    })
+    for thread in started:
+        thread.join(timeout=10)
+
+    assert response.status_code == 200
+    assert saved == ["AAAA", "BBBB", "CCCC"]
+    assert len(received) == 1
+    options, kwargs = received[0]
+    assert kwargs["image_data"] == "AAAA"
+    assert kwargs["image_url"] is None
+    assert options["attached_images"] == ["AAAA", "BBBB", "CCCC"]
+    assert options["attached_image_urls"] == [
+        None,
+        "/api/enhanced-chat/vision/image/BBBB.png",
+        "/api/enhanced-chat/vision/image/CCCC.png",
+    ]

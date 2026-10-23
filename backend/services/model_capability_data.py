@@ -253,6 +253,18 @@ THINKING_NAME_EXCLUDE_PATTERNS = [
     r'embed', r'rerank',
 ]
 
+# Architectures (Ollama's details.family) whose thinking Ollama cannot turn off:
+# think:false is ignored and the model reasons anyway, out of the same num_predict
+# as the answer. The value is the level sent instead when thinking is meant to be
+# off, the least the architecture takes; the caller budgets for the reasoning.
+# gpt-oss:20b on Ollama 0.40.6, 2026-10-19, five document questions replayed with
+# chat's own system prompt: think:false still reasoned 457-1,417 characters a
+# reply (167-425 tokens out); "low" reasoned 28-344 (47-167 tokens), same answers.
+# At a 1,024-token budget think:false left 15 of 30 replies empty.
+THINK_OFF_LEVEL_BY_ARCH = {
+    "gptoss": "low",
+}
+
 # is_vision_model's fallback when the capability resolver cannot be imported.
 VISION_NAME_PATTERNS = [
     r'vl\b', r'vision', r'llava', r'moondream', r'bakllava',
@@ -267,6 +279,15 @@ NON_TEXT_NAME_PATTERNS = [
     r'vl\b', r'vision', r'llava', r'moondream', r'bakllava',
     r'minicpm-v', r'llama.*vision', r'granite.*vision', r'gemma.*vision',
     r'embed', r'retrieval', r'minilm',
+]
+
+# Decision-only models answer a closed question with a label and cannot write
+# a chat reply. Ollama reports their capability list as "decision" alone (no
+# "completion"): nimble:9b-q4_K_M, tev1:4b and tev1:0.8b on Ollama 0.40.1. That
+# list decides whenever Ollama can describe the model; these name rules are
+# only for when it cannot.
+DECISION_NAME_PATTERNS = [
+    r'(^|/)nimble\b', r'(^|/)tev1\b',
 ]
 
 # Tag pairs a model may write around reasoning in its answer text, matched
@@ -297,7 +318,7 @@ INLINE_REASONING_TAGS = (
 # it has its own authority order in model_capability_resolver (EXTERNAL_MODEL_ROWS).
 MODEL_CAPABILITY_ROWS: dict = {}
 OVERRIDABLE_FIELDS = (
-    "tools", "thinking", "completion", "embedding", "native_context", "embedding_dim",
+    "tools", "thinking", "completion", "embedding", "decision", "native_context", "embedding_dim",
     "reasoning_tags",
 )
 

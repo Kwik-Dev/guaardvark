@@ -187,7 +187,7 @@ First boot creates `plugins/video_editor/venv/` and installs ~250 MB of deps
 - `melt.path` — explicit `melt` binary. Auto-resolved from `/snap/shotcut/current/melt` (the wrapper script, NOT `/bin/melt`).
 - `auto_editor.path` — explicit `auto-editor` binary. Defaults to the one installed in the plugin venv.
 - `output.mlt_projects_dir`, `output.renders_dir` — output paths (relative to project root).
-- `registration.backend_url` — where to POST output Documents (default `http://localhost:5002`).
+- `registration.backend_url` — where to POST output Documents (default `http://localhost:$FLASK_PORT`, 5000 when unset).
 - `beat_sync.subdivision` / `min_clip_seconds` / `tightness` — librosa pacing defaults.
 
 ---

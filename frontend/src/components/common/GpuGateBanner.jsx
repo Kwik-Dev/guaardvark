@@ -1,33 +1,37 @@
 import React from "react";
-import { } from "@mui/material";
+import { Tooltip } from "@mui/material";
 import CollapsibleAlert from "./CollapsibleAlert";
 
 /**
  * @param {boolean} [gpuBusy] - GPU held or cooling down (preferred)
  * @param {boolean} [gpuBlocked] - Legacy alias for gpuBusy when queueMode is false
+ * @param {string}  [blockReason] - plain sentence from useJobsGate ("A video is rendering")
+ * @param {string}  [blockDetail] - the holder's kind and id; shown only in a tooltip
  * @param {boolean} [queueMode] - Queue-backed surfaces: informational, not a hard block
  */
 export default function GpuGateBanner({
   gpuBusy,
   gpuBlocked,
   blockReason,
+  blockDetail,
   queueMode = false,
 }) {
   const busy = gpuBusy ?? gpuBlocked;
   if (!busy || !blockReason) return null;
 
-  if (queueMode) {
-    return (
-      <CollapsibleAlert severity="info" sx={{ mb: 1 }}>
-        GPU in use — {blockReason}. New jobs stack in the queue and run automatically when
-        the GPU is free.
-      </CollapsibleAlert>
-    );
-  }
+  const text = queueMode
+    ? `${blockReason}. New jobs wait in line and start on their own when the graphics card is free.`
+    : `${blockReason}. Buttons unlock when the graphics card is free.`;
 
-  return (
+  const alert = (
     <CollapsibleAlert severity="info" sx={{ mb: 1 }}>
-      GPU temporarily unavailable — {blockReason}. Actions will unlock when the GPU is free.
+      {text}
     </CollapsibleAlert>
+  );
+  if (!blockDetail) return alert;
+  return (
+    <Tooltip title={`Job: ${blockDetail}`} arrow>
+      {alert}
+    </Tooltip>
   );
 }

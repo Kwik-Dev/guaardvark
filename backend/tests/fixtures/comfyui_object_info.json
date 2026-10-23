@@ -4634,6 +4634,110 @@
    ],
    "python_module": "comfy_extras.nodes_wan"
   },
+  "WanFirstLastFrameToVideo": {
+   "input": {
+    "required": {
+     "positive": [
+      "CONDITIONING",
+      {}
+     ],
+     "negative": [
+      "CONDITIONING",
+      {}
+     ],
+     "vae": [
+      "VAE",
+      {}
+     ],
+     "width": [
+      "INT",
+      {
+       "default": 832,
+       "min": 16,
+       "max": 16384,
+       "step": 16
+      }
+     ],
+     "height": [
+      "INT",
+      {
+       "default": 480,
+       "min": 16,
+       "max": 16384,
+       "step": 16
+      }
+     ],
+     "length": [
+      "INT",
+      {
+       "default": 81,
+       "min": 1,
+       "max": 16384,
+       "step": 4
+      }
+     ],
+     "batch_size": [
+      "INT",
+      {
+       "default": 1,
+       "min": 1,
+       "max": 4096
+      }
+     ]
+    },
+    "optional": {
+     "clip_vision_start_image": [
+      "CLIP_VISION_OUTPUT",
+      {}
+     ],
+     "clip_vision_end_image": [
+      "CLIP_VISION_OUTPUT",
+      {}
+     ],
+     "start_image": [
+      "IMAGE",
+      {}
+     ],
+     "end_image": [
+      "IMAGE",
+      {}
+     ]
+    }
+   },
+   "input_order": {
+    "required": [
+     "positive",
+     "negative",
+     "vae",
+     "width",
+     "height",
+     "length",
+     "batch_size"
+    ],
+    "optional": [
+     "clip_vision_start_image",
+     "clip_vision_end_image",
+     "start_image",
+     "end_image"
+    ]
+   },
+   "output": [
+    "CONDITIONING",
+    "CONDITIONING",
+    "LATENT"
+   ],
+   "output_is_list": [
+    false,
+    false,
+    false
+   ],
+   "output_name": [
+    "positive",
+    "negative",
+    "latent"
+   ],
+   "python_module": "comfy_extras.nodes_wan"
+  },
   "WanImageToVideo": {
    "input": {
     "optional": {

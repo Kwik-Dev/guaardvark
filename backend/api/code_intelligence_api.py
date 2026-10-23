@@ -939,7 +939,7 @@ Provide:
 Make the explanation clear and educational."""
 
                 try:
-                    session_id = f"offline-explanation-{datetime.now().timestamp()}"
+                    session_id = f"offline-explain-{int(datetime.now().timestamp() * 1000)}"
                     response = send_chat_message_internal(
                         session_id=session_id,
                         user_message=explanation_prompt,
@@ -978,6 +978,7 @@ def refactor_code():
 
         code_content = data.get('content', '')
         refactor_type = data.get('refactorType', 'optimize')
+        rules_cutoff = data.get('rulesCutoff', False) or data.get('bypassRules', False)
         language = data.get('language', 'javascript')
         file_path = data.get('filePath', 'untitled')
 
@@ -1371,7 +1372,14 @@ Format as structured JSON with suggestions array."""
 
 @code_intelligence_bp.route("/validate", methods=["POST"])
 def validate_code():
-    """Validate code for syntax and logical errors"""
+    """Syntax-check code with a real parser and return the errors it found.
+
+    This used to send the file to the model and discard the answer, returning
+    empty error lists that the editor showed as "no issues". It now runs
+    backend.services.code_syntax_check (Python and JSON via the standard
+    library, JavaScript via `node --check`) and says in `mode` and `note` when
+    the language could not be checked at all.
+    """
     try:
         data = request.get_json()
         if not data:
@@ -1379,64 +1387,32 @@ def validate_code():
 
         code_content = data.get('content', '')
         language = data.get('language', 'javascript')
-        file_path = data.get('filePath', 'untitled')
-        rules_cutoff = data.get('rulesCutoff', False) or data.get('bypassRules', False)
 
         if not code_content:
             return error_response("No code content provided"), 400
 
-        prompt = f"""Validate this {language} code for errors:
+        from backend.services.code_syntax_check import check_syntax
+        checked = check_syntax(code_content, language)
+        if not checked['supported']:
+            return success_response({
+                "validation": checked['note'],
+                "errors": [],
+                "warnings": [],
+                "language": language,
+                "mode": "unchecked",
+                "tool": None,
+                "note": checked['note'],
+            })
 
-File: {file_path}
-
-```{language}
-{code_content}
-```
-
-Please identify:
-1. Syntax errors with line numbers
-2. Logical errors and potential bugs
-3. Missing imports or dependencies
-4. Type errors (if applicable)
-5. Best practice violations
-
-Format response as structured JSON with errors array containing line, column, message, and severity."""
-
-        if send_chat_message_internal:
-            try:
-                session_id = f"code-validation-{datetime.now().timestamp()}"
-                response = send_chat_message_internal(
-                    session_id=session_id,
-                    user_message=prompt,
-                    project_id=None,
-                    use_rag=False,
-                    bypass_rules=rules_cutoff
-                )
-
-                return success_response({
-                    "validation": response.get("message", ""),
-                    "errors": [],  # Would be parsed from structured response
-                    "warnings": [],
-                    "language": language
-                })
-            except Exception as e:
-                logger.warning(f"LLM validation failed: {e}")
-
-        # Get active model for validation context
-        try:
-            from backend.models import get_active_model_name
-            active_model = get_active_model_name()
-        except Exception as e:
-            logger.warning(f"Could not get active model: {e}")
-            active_model = "local_model"
-
-        # Provide validation response indicating local model processing
+        count = len(checked['errors'])
         return success_response({
-            "validation": f"Code validation completed using {active_model} for {language}",
-            "errors": [],
-            "warnings": [],
+            "validation": "No syntax errors" if count == 0 else f"{count} syntax error{'s' if count != 1 else ''}",
+            "errors": checked['errors'],
+            "warnings": checked['warnings'],
             "language": language,
-            "model_used": active_model
+            "mode": "syntax",
+            "tool": checked['tool'],
+            "note": "",
         })
 
     except Exception as e:

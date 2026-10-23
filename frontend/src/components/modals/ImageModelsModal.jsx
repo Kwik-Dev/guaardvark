@@ -327,7 +327,7 @@ const ImageModelsModal = ({ open, onClose, showMessage, installModelId }) => {
                             {model.description}
                           </Typography>
                         )}
-                        <Typography variant="caption" color="text.disabled" component="span" display="block">
+                        <Typography variant="caption" color="text.secondary" component="span" display="block">
                           {model.path}
                         </Typography>
                       </>
@@ -376,7 +376,7 @@ const ImageModelsModal = ({ open, onClose, showMessage, installModelId }) => {
                     </Box>
                   }
                   secondary={
-                    <Typography variant="caption" color="text.disabled" component="span" display="block">
+                    <Typography variant="caption" color="text.secondary" component="span" display="block">
                       {a.hf_repo}
                     </Typography>
                   }
@@ -426,7 +426,7 @@ const ImageModelsModal = ({ open, onClose, showMessage, installModelId }) => {
                       <Typography variant="body2" color="text.secondary" component="span" display="block">
                         {pack.description}
                       </Typography>
-                      <Typography variant="caption" color="text.disabled" component="span" display="block">
+                      <Typography variant="caption" color="text.secondary" component="span" display="block">
                         Chat: {(pack.tools || []).join(", ")}
                       </Typography>
                     </>

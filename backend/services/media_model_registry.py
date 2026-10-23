@@ -169,6 +169,18 @@ MEDIA_MODEL_REGISTRY: dict[str, dict[str, Any]] = {
 #                                         row's unless GUAARDVARK_IMAGE_STRICT_LIMITS
 #                                         is on (the model's own values are what the
 #                                         validator recommends)
+
+
+def _registry_vram_mb(model_id: str, default: int) -> int:
+    """A ComfyUI family's admission price, read once from its registry entry so
+    the number is declared in one place."""
+    try:
+        from backend.services.video_model_registry import vram_mb_for_model
+        return int(vram_mb_for_model(model_id, default=default))
+    except Exception:  # noqa: BLE001 — the registry import is environment-specific
+        return default
+
+
 IMAGE_FAMILY_SPECS: dict[str, dict[str, Any]] = {
     # Z-Image: official canvas ~512-2048 per side / ~2048^2 area. The long side
     # may reach 2688 so 16:9 2K packs (2688x1472, ~3.95 MP) fit under the area.
@@ -183,20 +195,29 @@ IMAGE_FAMILY_SPECS: dict[str, dict[str, Any]] = {
     # for one 1024 image on a 32 GB box). Slopes calibrated 2026-08-04 on a
     # 16 GB 4070 Ti SUPER, sequential offload with VAE tiling: 1448^2 peak
     # 12467 MB, 2048^2 peak 9534 MB.
+    # max_prompt_tokens: how much of a prompt the offline pipeline encodes
+    # (chat template included); the tokenizer drops the rest without a warning.
+    # The diffusers default is 512. 1024 measured 2026-10-12 on a 16 GB card,
+    # 1344x768, 9 steps, three seeds, same prompt and seed at 512 and 1024: five
+    # objects named after token 512 appeared on 3/3 seeds at 1024 and 0/3 at 512,
+    # with the same composition and no visible quality loss; a prompt under 512
+    # gave the same picture (pixel-level noise only); ~0.3 s more, no VRAM change.
+    # The transformer's caption positions run to 1536; nothing above 1024 tested.
     "zimage": {
         "max_side": 2688, "max_pixel_area": 2048 * 2048, "min_side": 256, "dimension_alignment": 16,
         "width": 1024, "height": 1024, "default_steps": 9, "min_steps": 2, "cfg_when_unset": 0.0,
-        "prompt_style": "natural", "engine": "offline",
+        "prompt_style": "natural", "engine": "offline", "max_prompt_tokens": 1024,
         "vram_mb": 11000, "ram_gb": 21.0, "vram_slope_mb_per_mp": 500, "ram_slope_gb_per_mp": 1.0,
     },
     # Krea 2: native 2K, same canvas as Z-Image. The family row is Turbo
     # (8 steps, CFG-free); Raw overrides below. Model-offload peak ~14 GB on a
     # 16 GB card (2026-07-11); sequential offload on cards up to 18 GB peaks at
     # ~10 GB. Also an LLM encoder (Qwen3-VL) but not A/B'd, so "tags".
+    # max_prompt_tokens 512 is the Krea2Pipeline default; longer has not been tried.
     "krea2": {
         "max_side": 2688, "max_pixel_area": 2048 * 2048, "min_side": 256, "dimension_alignment": 16,
         "width": 1024, "height": 1024, "default_steps": 8, "cfg_when_unset": 0.0,
-        "prompt_style": "tags", "engine": "offline",
+        "prompt_style": "tags", "engine": "offline", "max_prompt_tokens": 512,
         "vram_mb": 14000, "vram_mb_sequential": 10000, "ram_gb": 24.0,
         "vram_slope_mb_per_mp": 1000, "ram_slope_gb_per_mp": 1.0,
     },
@@ -207,6 +228,19 @@ IMAGE_FAMILY_SPECS: dict[str, dict[str, Any]] = {
         "width": 1024, "height": 1024, "default_steps": 28, "cfg_when_unset": 3.5,
         "prompt_style": "tags", "engine": "comfy",
         "vram_mb": 12000, "ram_gb": 16.0,
+    },
+    # Qwen-Image 2.1 through ComfyUI. Every number is the official Comfy-Org
+    # template's (image_qwen_image_2_1_t2i: 1024x1024, 25 steps, cfg 1.0; its
+    # usage note names native 2K output and sides in multiples of 32). No step
+    # count below 25 has been compared, so there is no min_steps. vram_mb is the
+    # registry entry's measured figure (video_model_registry "qwen-image-21");
+    # ram_gb is sized from the files, not measured.
+    # prompt_style "natural": a Qwen3-VL encoder reads prompts as prose.
+    "qwen-image-21": {
+        "max_side": 2048, "max_pixel_area": 2048 * 2048, "min_side": 256, "dimension_alignment": 32,
+        "width": 1024, "height": 1024, "default_steps": 25, "cfg_when_unset": 1.0,
+        "prompt_style": "natural", "engine": "comfy",
+        "vram_mb": _registry_vram_mb("qwen-image-21", 9500), "ram_gb": 16.0,
     },
     # SDXL loads whole onto cards of 10 GB and up (vram_mb 8000: ~6.9 GB of fp16
     # weights plus the working set). Below that it runs with CPU model offload,
@@ -260,6 +294,14 @@ IMAGE_MODEL_LIMITS: dict[str, dict[str, Any]] = {
     # FluxGuidance, not classic CFG. Heavy: batches run one image at a time.
     "flux-dev": {"family": "flux", "steps_range": (8, 50), "cfg_range": (1.0, 6.0),
                  "min_dimensions": (512, 512), "hard_clamp": False, "force_max_workers": 1},
+    # The template's usage note: cfg stays 1.0 unless a negative prompt is used;
+    # the official pipeline samples 40-50 steps, the template starts at 25.
+    # cfg compared 2026-10-11 (1024x1024, 25 steps, seed 1984, with a negative
+    # prompt): 3 and 5 render clean; 9 crushes the shadows to black and hardens
+    # the contrast. The Studio slider stops at 5; a value typed through the API
+    # still wins, so the range is not hard-clamped.
+    "qwen-image-21": {"family": "qwen-image-21", "steps_range": (10, 50), "cfg_range": (1.0, 5.0),
+                      "min_dimensions": (512, 512), "hard_clamp": False, "force_max_workers": 1},
     # SDXL: guidance above 9 renders black images, so its range is enforced.
     "sd-xl": {"family": "sdxl", "steps_range": (20, 40), "cfg_range": (4.0, 9.0),
               "min_dimensions": (768, 768)},
@@ -338,7 +380,35 @@ def resolve_stills_model(requested: str | None = None) -> str:
 
 
 def get_stills_model_setting() -> str:
-    return _read_setting(SETTING_STILLS_MODEL, ENV_STILLS, DEFAULT_STILLS_MODEL)
+    # "auto" saved in the picker is no choice: answer with the product default,
+    # as when nothing was saved, or sampling and prompt style would follow an
+    # unknown family (SD defaults on a Z-Image render).
+    val = _read_setting(SETTING_STILLS_MODEL, ENV_STILLS, DEFAULT_STILLS_MODEL)
+    return DEFAULT_STILLS_MODEL if val == AUTO else val
+
+
+def configured_stills_default() -> Optional[str]:
+    """The Stills model a person chose in Settings > Generation (or set through
+    GUAARDVARK_STILLS_MODEL), or None when nothing was chosen.
+
+    get_stills_model_setting() answers "which model" and fills in the product
+    default; this answers "did anyone choose one", which is what an Auto pick
+    needs: a chosen model is honoured, an unchosen one leaves Auto to its own
+    per-card routing. "auto" saved in the picker counts as no choice.
+    """
+    val = _read_setting(SETTING_STILLS_MODEL, ENV_STILLS, "")
+    if not val or val == AUTO:
+        return None
+    return val
+
+
+def stills_default_catalog_key(model_id: str) -> str:
+    """The image catalog key a Stills profile id renders with (sdxl-legacy ->
+    sd-xl, flux-dev -> flux-dev); ids outside the registry pass through."""
+    p = get_profile(model_id)
+    if not p:
+        return (model_id or "").strip().lower()
+    return p.get("offline_model_key") or p.get("comfy_model_tag") or p["id"]
 
 
 def get_cast_train_base_setting() -> str:
@@ -658,6 +728,9 @@ def public_settings_payload() -> dict[str, Any]:
     maxq = get_max_quality_model_setting()
     return {
         "stills_model": stills,
+        # The choice itself, None when nothing was chosen: the Settings picker
+        # shows Auto then, not the filled-in default as if someone picked it.
+        "stills_chosen": configured_stills_default(),
         "cast_train_base": train,
         "max_quality_model": maxq,
         "character_lora_strength": _lora_strength_settings(),

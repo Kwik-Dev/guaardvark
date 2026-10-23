@@ -672,16 +672,21 @@ def run_selftest():
         except Exception as e:
             legacy_results["pip_check"] = f"Error running pip check: {e}"
 
-        try:
-            outdated = subprocess.run(
-                [sys.executable, "-m", "pip", "list", "--outdated"],
-                capture_output=True, text=True, timeout=30
-            )
-            legacy_results["pip_outdated"] = outdated.stdout.strip() if outdated.returncode == 0 else f"Error (code {outdated.returncode})"
-        except subprocess.TimeoutExpired:
-            legacy_results["pip_outdated"] = "Timeout after 30 seconds"
-        except Exception as e:
-            legacy_results["pip_outdated"] = f"Error listing outdated packages: {e}"
+        # Listing outdated packages asks PyPI about every installed package.
+        from backend.utils.settings_utils import web_access_block_reason
+        if web_access_block_reason("check PyPI for newer packages"):
+            legacy_results["pip_outdated"] = "Skipped: it asks PyPI, and web access is off"
+        else:
+            try:
+                outdated = subprocess.run(
+                    [sys.executable, "-m", "pip", "list", "--outdated"],
+                    capture_output=True, text=True, timeout=30
+                )
+                legacy_results["pip_outdated"] = outdated.stdout.strip() if outdated.returncode == 0 else f"Error (code {outdated.returncode})"
+            except subprocess.TimeoutExpired:
+                legacy_results["pip_outdated"] = "Timeout after 30 seconds"
+            except Exception as e:
+                legacy_results["pip_outdated"] = f"Error listing outdated packages: {e}"
 
         results["legacy_diagnostics"] = legacy_results
 

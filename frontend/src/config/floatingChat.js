@@ -9,7 +9,8 @@
  * Entries are exact paths, or a prefix ending in "*" that covers every path
  * beneath it.
  */
-export const FLOATING_CHAT_HIDDEN_ROUTES = ["/chat"];
+// "/chat/*" covers a project's chat (/chat/<projectId>), the same page.
+export const FLOATING_CHAT_HIDDEN_ROUTES = ["/chat", "/chat/*"];
 
 export const isFloatingChatHiddenRoute = (pathname, routes = FLOATING_CHAT_HIDDEN_ROUTES) =>
   routes.some((route) =>

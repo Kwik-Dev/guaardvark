@@ -1,7 +1,11 @@
 """YouTube publishing via the Data API v3.
 
-Uploads are forced to ``private``: making a video public is a deliberate step
-the operator takes in YouTube Studio, not a side effect of generating one.
+Uploads are ``private`` unless the person turns on "Allow public uploads" on
+the connection (``Capabilities.public_opt_in``): making a video public is a
+deliberate choice, not a side effect of generating one. A scheduled release
+(``status.publishAt``) makes the video public at that time, so it needs the
+same opt-in as a public upload. The publish path refuses such a post before
+it gets here; ``publish`` and ``schedule`` check again and refuse it too.
 
 The resumable upload protocol is driven directly over HTTPS rather than through
 google-api-python-client, which keeps the backend venv free of that dependency
@@ -13,20 +17,36 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import timezone
 from typing import Dict, Tuple
 
 import requests
 
+from backend.services.connections import gates
 from backend.services.connections.base import (
     AUTH_OAUTH2,
+    BOT_LABEL_NONE,
+    DISCLOSE_GENERATED_MEDIA,
+    DISCLOSURE_FLAG,
     FAMILY_SOCIAL,
+    SCHEDULE_GONE,
+    SCHEDULE_PENDING,
+    SCHEDULE_PUBLISHED,
+    AIDisclosure,
+    BotLabel,
     Capabilities,
     ConnCtx,
     CredentialField,
+    DeleteRequest,
+    DeleteResult,
+    NativeScheduling,
     ProgressFn,
     ProviderSpec,
+    PublicOptIn,
     PublishRequest,
     PublishResult,
+    RateLimit,
+    ScheduleCheck,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,6 +59,10 @@ UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos"
 API_URL = "https://www.googleapis.com/youtube/v3"
 SCOPES = ["https://www.googleapis.com/auth/youtube"]
 CATEGORY_SCIENCE_TECH = "28"
+
+AI_DISCLOSURE_SOURCE = "https://support.google.com/youtube/answer/14328491"
+DEVELOPER_POLICIES = "https://developers.google.com/youtube/terms/developer-policies"
+VIDEOS_RESOURCE = "https://developers.google.com/youtube/v3/docs/videos"
 
 SPEC = ProviderSpec(
     provider="youtube",
@@ -70,6 +94,74 @@ SPEC = ProviderSpec(
         supports_tags=True,
         visibilities=("private", "unlisted", "public"),
         default_visibility="private",
+        rate_limits=(
+            # Uploads draw on their own bucket of 100 videos.insert calls a day,
+            # shared by every channel that uses the same Google Cloud project.
+            RateLimit(
+                posts=10,
+                window_seconds=24 * 3600,
+                platform_limit="100 videos.insert calls per day per Google Cloud project",
+                source="https://developers.google.com/youtube/v3/determine_quota_cost",
+            ),
+        ),
+        ai_disclosure=AIDisclosure(
+            required_when=DISCLOSE_GENERATED_MEDIA,
+            mechanism=DISCLOSURE_FLAG,
+            flag="status.containsSyntheticMedia",
+            rule=(
+                "YouTube requires disclosure of realistic content made or meaningfully "
+                "altered with AI. A generated video is uploaded with YouTube's altered or "
+                "synthetic content flag."
+            ),
+            source=AI_DISCLOSURE_SOURCE,
+        ),
+        bot_label=BotLabel(
+            kind=BOT_LABEL_NONE,
+            how=(
+                "YouTube has no account label for automation. Its developer policies ask "
+                "for the channel owner's prior, specific consent to automated uploads; "
+                "Guaardvark uploads only what a person approved."
+            ),
+            source=DEVELOPER_POLICIES,
+        ),
+        native_scheduling=NativeScheduling(
+            field="status.publishAt",
+            # Not a published minimum: YouTube releases the video at publishAt
+            # only if the upload has finished, so the lead covers the upload.
+            min_lead_seconds=15 * 60,
+            # publishAt is the moment a private video becomes public.
+            visibilities=("public",),
+            source=VIDEOS_RESOURCE,
+        ),
+        deletable=True,
+        public_opt_in=PublicOptIn(
+            visibilities=("unlisted", "public"),
+            label="Allow public uploads",
+            explanation=(
+                "Off: every upload from this account is private, and you make a video "
+                "public yourself in YouTube Studio. On: an upload can also be public or "
+                "unlisted, and a scheduled upload can be released publicly by YouTube at "
+                "its time (status.publishAt). Every upload still waits for your approval "
+                "on the Approvals page. YouTube's own rules apply: it requires disclosure "
+                "of realistic content made or meaningfully altered with AI (a generated "
+                "video is uploaded with its altered or synthetic content flag), and its "
+                "developer policies ask for the channel owner's prior, specific consent to "
+                "automated uploads."
+            ),
+            refusal=(
+                "Public and unlisted uploads are off for this YouTube account, so it "
+                "uploads as private only; a scheduled upload goes out as private at its "
+                "time. To allow them, and YouTube's own scheduled public release, turn on "
+                "\"Allow public uploads\" on the account's card on the Connections page."
+            ),
+            sources=(
+                ("AI disclosure", AI_DISCLOSURE_SOURCE),
+                ("Developer policies", DEVELOPER_POLICIES),
+                ("status.publishAt", VIDEOS_RESOURCE),
+            ),
+            # Read for a connection whose card has no choice stored yet.
+            legacy_setting="youtube_allow_public_publish",
+        ),
     ),
     hint_field="client_secret",
     docs_url="https://developers.google.com/youtube/v3/guides/uploading_a_video",
@@ -231,58 +323,130 @@ def _upload_chunks(session_url: str, item, on_progress: ProgressFn) -> Dict:
     raise RuntimeError("Upload ended without a response from YouTube.")
 
 
-def publish(ctx: ConnCtx, req: PublishRequest, on_progress: ProgressFn) -> PublishResult:
-    videos = [m for m in req.media if m.kind == "video"]
-    if not videos:
-        return PublishResult(ok=False, message="YouTube requires a video file.")
-    item = videos[0]
-
-    # Public requires both an explicit request and an operator opt-in.
-    visibility = req.visibility or "private"
-    if visibility != "private" and not _public_publish_allowed():
-        visibility = "private"
-
-    body = {
+def _video_body(req: PublishRequest, item, status: Dict) -> Dict:
+    if req.ai_disclosure:
+        # Sent only when on: leaving it out makes no claim either way.
+        status = {**status, "containsSyntheticMedia": True}
+    return {
         "snippet": {
             "title": (req.title or os.path.basename(item.path))[:100],
             "description": (req.body or "")[:5000],
             "tags": list(req.tags or []),
             "categoryId": CATEGORY_SCIENCE_TECH,
         },
-        "status": {"privacyStatus": visibility, "selfDeclaredMadeForKids": False},
+        "status": {**status, "selfDeclaredMadeForKids": False},
     }
 
+
+def _upload(ctx: ConnCtx, req: PublishRequest, status: Dict, on_progress: ProgressFn):
+    """Upload the request's video with ``status``. Returns (video_id, error)."""
+    videos = [m for m in req.media if m.kind == "video"]
+    if not videos:
+        return None, "YouTube requires a video file."
+    item = videos[0]
     try:
         on_progress(10, "Authenticating…")
         token = _access_token(ctx)
         on_progress(15, "Starting upload…")
-        session_url = _start_resumable(token, body, item)
+        session_url = _start_resumable(token, _video_body(req, item, status), item)
         result = _upload_chunks(session_url, item, on_progress)
     except ValueError as e:
-        return PublishResult(ok=False, message=str(e))
+        return None, str(e)
     except (OSError, RuntimeError) as e:
-        return PublishResult(ok=False, message=str(e))
+        return None, str(e)
     except requests.RequestException as e:
-        return PublishResult(ok=False, message=f"Could not reach YouTube: {e}")
+        return None, f"Could not reach YouTube: {e}"
+    return result.get("id"), None
 
-    video_id = result.get("id")
+
+def _watch_url(video_id) -> str | None:
+    return f"https://www.youtube.com/watch?v={video_id}" if video_id else None
+
+
+def publish(ctx: ConnCtx, req: PublishRequest, on_progress: ProgressFn) -> PublishResult:
+    visibility = req.visibility or SPEC.capabilities.default_visibility
+    refusal = gates.visibility_refusal(SPEC.provider, ctx.config, visibility)
+    if refusal:
+        return PublishResult(ok=False, message=refusal)
+
+    video_id, error = _upload(ctx, req, {"privacyStatus": visibility}, on_progress)
+    if error:
+        return PublishResult(ok=False, message=error)
     return PublishResult(
         ok=True,
         remote_id=video_id,
-        remote_url=f"https://www.youtube.com/watch?v={video_id}" if video_id else None,
+        remote_url=_watch_url(video_id),
         message=f"Uploaded to YouTube ({visibility}).",
     )
 
 
-def _public_publish_allowed() -> bool:
-    try:
-        from backend.utils.settings_utils import get_setting
+def schedule(ctx: ConnCtx, req: PublishRequest, on_progress: ProgressFn) -> PublishResult:
+    """Upload as private now; YouTube makes it public at ``req.publish_at``."""
+    if req.publish_at is None:
+        return PublishResult(ok=False, message="No release time was given.")
+    # The release makes it public, whatever visibility the request names.
+    refusal = gates.visibility_refusal(SPEC.provider, ctx.config, "public")
+    if refusal:
+        return PublishResult(ok=False, message=refusal)
+    publish_at = req.publish_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    status = {"privacyStatus": "private", "publishAt": publish_at}
+    video_id, error = _upload(ctx, req, status, on_progress)
+    if error:
+        return PublishResult(ok=False, message=error)
+    return PublishResult(
+        ok=True,
+        remote_id=video_id,
+        remote_url=_watch_url(video_id),
+        message=f"Uploaded to YouTube as private; YouTube makes it public at {publish_at}.",
+    )
 
-        return (get_setting("youtube_allow_public_publish", "false") or "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
+
+def scheduled_state(ctx: ConnCtx, remote_id: str) -> ScheduleCheck:
+    """Whether YouTube has made a scheduled video public (1 quota unit)."""
+    try:
+        token = _access_token(ctx)
+        resp = requests.get(
+            f"{API_URL}/videos",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"part": "status", "id": remote_id},
+            timeout=TIMEOUT,
         )
-    except Exception:  # noqa: BLE001 - default to the safe answer
-        return False
+    except (ValueError, RuntimeError) as e:
+        return ScheduleCheck(state=SCHEDULE_PENDING, message=f"Could not check: {e}")
+    except requests.RequestException as e:
+        return ScheduleCheck(state=SCHEDULE_PENDING, message=f"Could not reach YouTube: {e}")
+    if resp.status_code >= 400:
+        return ScheduleCheck(state=SCHEDULE_PENDING, message=f"YouTube returned {resp.status_code}.")
+
+    items = (resp.json() or {}).get("items") or []
+    if not items:
+        return ScheduleCheck(state=SCHEDULE_GONE, message="The video is no longer on YouTube.")
+    status = items[0].get("status") or {}
+    upload = status.get("uploadStatus")
+    if upload in ("failed", "rejected", "deleted"):
+        reason = status.get("failureReason") or status.get("rejectionReason") or upload
+        return ScheduleCheck(state=SCHEDULE_GONE, message=f"YouTube did not publish it ({reason}).")
+    if status.get("privacyStatus") == "public":
+        return ScheduleCheck(state=SCHEDULE_PUBLISHED, remote_url=_watch_url(remote_id))
+    return ScheduleCheck(state=SCHEDULE_PENDING)
+
+
+def delete(ctx: ConnCtx, req: DeleteRequest) -> DeleteResult:
+    """Delete the video from the channel (videos.delete, 50 quota units)."""
+    try:
+        token = _access_token(ctx)
+        resp = requests.delete(
+            f"{API_URL}/videos",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"id": req.remote_id},
+            timeout=TIMEOUT,
+        )
+    except (ValueError, RuntimeError) as e:
+        return DeleteResult(ok=False, message=str(e))
+    except requests.RequestException as e:
+        return DeleteResult(ok=False, message=f"Could not reach YouTube: {e}")
+    if resp.status_code == 404:
+        return DeleteResult(ok=True, message="The video was already gone from YouTube.")
+    if resp.status_code >= 400:
+        return DeleteResult(ok=False, message=f"YouTube returned {resp.status_code}.")
+    return DeleteResult(ok=True, message="Deleted from YouTube.")

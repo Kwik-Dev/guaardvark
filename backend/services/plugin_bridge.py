@@ -318,8 +318,26 @@ def _count_active_video_render_jobs(max_age_s: float = 1800.0) -> int:
         return 0
 
 
+def manual_stop_blocked_reason(plugin_id: str) -> Optional[str]:
+    """Why a stop a person asked for must wait, or None.
+
+    Only where stopping would end a job that cannot be resumed: an upscale
+    queued or running in this backend. ComfyUI keeps its own rule (a person's
+    stop cancels its video batches first).
+    """
+    if plugin_id == "upscaling":
+        from backend.services.upscale_supervisor import stop_blocked_reason
+
+        reason = stop_blocked_reason()
+        if reason:
+            return f"{reason}; cancel it or let it finish first"
+    return None
+
+
 def _stop_blocked_reason(plugin_id: str) -> Optional[str]:
     """Return a human reason if an active job blocks stopping this plugin."""
+    if plugin_id == "upscaling":
+        return manual_stop_blocked_reason(plugin_id)
     if plugin_id == "comfyui":
         n = _count_active_video_render_jobs()
         if n > 0:
@@ -335,6 +353,9 @@ def _stop_blocked_reason(plugin_id: str) -> Optional[str]:
             return None
 
         kind = holder.get("kind")
+        # An upscale holds the gate as video_render but runs in its own service.
+        if str(holder.get("native_id") or "").startswith("upscale:"):
+            return None
         # ComfyUI / video_editor back VIDEO_RENDER and production pipelines.
         if plugin_id in ("comfyui", "video_editor") and kind in (
             JobKind.VIDEO_RENDER.value,
@@ -354,6 +375,24 @@ def _stop_blocked_reason(plugin_id: str) -> Optional[str]:
     return None
 
 
+def _is_external(plugin_id: str) -> bool:
+    """The Ollama card's "I run Ollama myself: never start or stop it" switch.
+    An external plugin is never claimed, started or stopped by the orchestrator."""
+    if plugin_id != "ollama":
+        return False
+    try:
+        from backend.plugins.plugin_manager import ollama_is_external
+        return ollama_is_external()
+    except Exception:
+        return False
+
+
+# Plugins whose external-refusal has been logged, so a route change does not
+# repeat it. A claim made before the switch was turned on is dropped on the
+# first refusal; after that nothing retries.
+_external_logged: Set[str] = set()
+
+
 def _stop_plugin(plugin_id: str, *, reason: str) -> Dict[str, Any]:
     pm = _plugin_manager()
     if not _is_running(plugin_id):
@@ -367,6 +406,17 @@ def _stop_plugin(plugin_id: str, *, reason: str) -> Dict[str, Any]:
     res = pm.stop_plugin(plugin_id)
     if res.get("success"):
         logger.info("plugin_bridge: stopped %s (%s)", plugin_id, reason)
+    elif res.get("external"):
+        with _state_lock:
+            _orchestrator_claims.discard(plugin_id)
+            first = plugin_id not in _external_logged
+            _external_logged.add(plugin_id)
+        if first:
+            logger.info(
+                "plugin_bridge: %s is marked external (never started or stopped by Guaardvark); "
+                "leaving it running and dropping the orchestrator's claim (%s)",
+                plugin_id, reason,
+            )
     else:
         logger.warning("plugin_bridge: stop %s failed: %s", plugin_id, res.get("error"))
     return res
@@ -391,6 +441,8 @@ def _resolve_gpu_conflict(needed: Set[str]) -> List[Dict[str, Any]]:
             actions.append({"action": "gpu_swap_stop", "plugin_id": pid})
         elif res.get("blocked_by_job"):
             actions.append({"action": "gpu_swap_blocked", "plugin_id": pid, "error": res.get("error")})
+        elif res.get("external"):
+            actions.append({"action": "gpu_swap_left_external", "plugin_id": pid})
     return actions
 
 
@@ -399,11 +451,62 @@ def _resolve_gpu_conflict(needed: Set[str]) -> List[Dict[str, Any]]:
 # Video renders start ComfyUI through prepare_video_model regardless.
 JOB_SERVICE_START_ENV = "GUAARDVARK_JOB_SERVICE_START"
 
+# Job contexts that start their service while GUAARDVARK_JOB_SERVICE_START is
+# unset. Upscaling is here because its page offered no way in but the Plugins
+# page; set the variable to 0 to turn it off, or to 1 to turn it on for all.
+JOB_SERVICE_START_DEFAULT_ON = frozenset({"upscale"})
 
-def job_service_start_enabled() -> bool:
-    return os.environ.get(JOB_SERVICE_START_ENV, "0").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
+
+def job_service_start_enabled(context: Optional[str] = None) -> bool:
+    raw = os.environ.get(JOB_SERVICE_START_ENV, "").strip().lower()
+    if not raw:
+        return context in JOB_SERVICE_START_DEFAULT_ON
+    return raw in ("1", "true", "yes", "on")
+
+
+# Display names for the plugins a job can need.
+SERVICE_LABELS = {"comfyui": "ComfyUI", "audio_foundry": "Audio Foundry", "upscaling": "Upscaling"}
+
+
+def _start_switches(context: Optional[str]) -> List[str]:
+    """The settings that are off and keep Guaardvark from starting a stopped
+    service for a job in ``context``, as NAME=1 strings.
+
+    "video" renders start ComfyUI through video_model_registry.prepare_video_model,
+    which only the auto-orchestrator gates. Music-video stages start theirs
+    through PipelineService.prepare_stage (GUAARDVARK_PIPELINE_STAGE_PREP). The
+    other job contexts, and Film Crew's render ("film-crew"), go through
+    start_for_job and need GUAARDVARK_JOB_SERVICE_START.
+    """
+    switches = []
+    if context == "music-video":
+        from backend.services.pipeline_service import STAGE_PREP_ENV, stage_prep_enabled
+        if not stage_prep_enabled():
+            switches.append(f"{STAGE_PREP_ENV}=1")
+    elif context != "video" and not job_service_start_enabled(context):
+        switches.append(f"{JOB_SERVICE_START_ENV}=1")
+    if not auto_orchestrator_enabled():
+        switches.append("GUAARDVARK_PLUGIN_AUTO_ORCHESTRATOR=1")
+    return switches
+
+
+def service_down_message(plugin_id: str, context: Optional[str] = None, why: str = "") -> str:
+    """The one sentence every tool gives when a service its job needs is down.
+
+    Names the plugin and how to start it. While automatic start is off for
+    this kind of job (``context``, see _start_switches) it names the setting
+    that turns it on; when automatic start is on and did not help, ``why``.
+    Changes no default.
+    """
+    label = SERVICE_LABELS.get(plugin_id, plugin_id)
+    text = (f"{label} is not running. Start the {label} plugin on the Plugins page "
+            f"(or POST /api/plugins/{plugin_id}/start)")
+    switches = _start_switches(context)
+    if switches:
+        text += f", or set {' and '.join(switches)} so Guaardvark starts it when a job needs it"
+    elif why:
+        text += f". Automatic start did not bring it up: {why}"
+    return text + "."
 
 
 def _stage_wait_s(context: str, stage: str) -> float:
@@ -432,7 +535,7 @@ def start_for_job(context: str, stage: str, *, is_up, wait_s: Optional[float] = 
     """
     if is_up():
         return True, ""
-    if not job_service_start_enabled():
+    if not job_service_start_enabled(context):
         return False, f"automatic start is off ({JOB_SERVICE_START_ENV})"
     if not auto_orchestrator_enabled():
         return False, "automatic start is off (GUAARDVARK_PLUGIN_AUTO_ORCHESTRATOR=0)"
@@ -626,6 +729,8 @@ def prepare_plugins_for_route(route: str) -> Dict[str, Any]:
                         "plugin_id": pid,
                         "error": res.get("error"),
                     })
+                elif res.get("external"):
+                    actions.append({"action": "left_external", "plugin_id": pid})
 
     actions.extend(_resolve_gpu_conflict(needed))
 
@@ -637,6 +742,15 @@ def prepare_plugins_for_route(route: str) -> Dict[str, Any]:
                 else:
                     actions.append({"action": "user_controlled_stopped", "plugin_id": plugin_id})
                 continue
+
+        # The user's own Ollama: used when it answers, never claimed, so no
+        # later route change tries to stop it, and never started here.
+        if _is_external(plugin_id):
+            actions.append({
+                "action": "external_running" if _is_running(plugin_id) else "external_stopped",
+                "plugin_id": plugin_id,
+            })
+            continue
 
         if _is_running(plugin_id):
             with _state_lock:

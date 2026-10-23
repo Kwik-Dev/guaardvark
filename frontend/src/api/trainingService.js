@@ -325,6 +325,35 @@ export const removeTrainingLibraries = async (planToken) => {
   return data.data || data;
 };
 
+// Settings > Training libraries > GGUF converter (llama.cpp's converter that
+// Export to Ollama runs). plan: also ask for the one-use token Install and
+// Remove send back; the backend downloads nothing without it.
+export const getGgufConverter = async ({ plan = false } = {}) => {
+  const response = await fetch(`${BASE_URL}/training/libraries/gguf-converter${plan ? "?plan=1" : ""}`);
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
+export const installGgufConverter = async (planToken) => {
+  const response = await fetch(`${BASE_URL}/training/libraries/gguf-converter/install`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "install", plan_token: planToken }),
+  });
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
+export const removeGgufConverter = async (planToken) => {
+  const response = await fetch(`${BASE_URL}/training/libraries/gguf-converter/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "remove", plan_token: planToken }),
+  });
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
 export const getImageFolders = async () => {
   try {
     const response = await fetch(`${BASE_URL}/training/images`);
@@ -350,6 +379,40 @@ export const getHardwareCapabilities = async () => {
 };
 
 // Pipeline API
+// Build from folder: a messages dataset from a folder of notes. check scans
+// and scrubs (no model), probe times three passages with the local model,
+// start queues the build on the training queue.
+const postFolderBuild = async (suffix, body) => {
+  const response = await fetch(`${BASE_URL}/training/pipeline/build-from-folder${suffix}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await handleResponse(response);
+  return data.data || data;
+};
+
+export const checkFolderBuild = (body) => postFolderBuild("/check", body);
+export const probeFolderBuild = (body) => postFolderBuild("/probe", body);
+export const startFolderBuild = (body) => postFolderBuild("", body);
+
+// The word list a folder build replaces with [name]; kept on this machine.
+export const getScrubTerms = async () => {
+  const response = await fetch(`${BASE_URL}/training/scrub-terms`);
+  const data = await handleResponse(response);
+  return (data.data || data).terms || [];
+};
+
+export const saveScrubTerms = async (terms) => {
+  const response = await fetch(`${BASE_URL}/training/scrub-terms`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ terms }),
+  });
+  const data = await handleResponse(response);
+  return (data.data || data).terms || [];
+};
+
 export const startParseJob = async (parseData) => {
   try {
     const response = await fetch(`${BASE_URL}/training/pipeline/parse`, {

@@ -1,6 +1,6 @@
 // frontend/src/pages/AgentsPage.jsx
-// The built-in agents as small tiles in four groups. A click opens the editor;
-// a right-click offers Edit, Test, Enable/Disable, Copy id and Reset.
+// The built-in agents as tiles in four groups, or as one table. A click opens
+// the editor; a right-click offers Edit, Test, Enable/Disable, Copy id and Reset.
 /* eslint-env browser */
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
@@ -14,7 +14,17 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Paper,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
+  Tooltip,
 } from "@mui/material";
 import CollapsibleAlert from "../components/common/CollapsibleAlert";
 import {
@@ -25,13 +35,17 @@ import {
   Error as ErrorIcon,
 } from "@mui/icons-material";
 import { alpha } from "@mui/material/styles";
+import ViewList from "@mui/icons-material/ViewList";
+import ViewModule from "@mui/icons-material/ViewModule";
+
 import EmptyState from "../components/common/EmptyState";
 import EntityContextMenu from "../components/common/EntityContextMenu";
 import { ContextualLoader } from "../components/common/LoadingStates";
 import { ActionButton, Cluster } from "../components/settings/ui";
-import AgentTile, { agentEdits } from "../components/agents/AgentTile";
+import AgentTile, { agentEdits, agentStatus, agentTone } from "../components/agents/AgentTile";
 import AgentEditDialog, { ResetAgentDialog } from "../components/agents/AgentEditDialog";
 import useContextMenu from "../hooks/useContextMenu";
+import copyText from "../utils/copyText";
 import { executeAgent, getAgents, resetAgent, toggleAgent } from "../api/agentsService";
 import { createPlan } from "../api/orchestratorService";
 import { useStatus } from "../contexts/StatusContext";
@@ -83,13 +97,111 @@ function groupAgents(agents) {
 }
 
 
-// Small fixed-width tiles, like the Interconnector tile on Settings: they wrap
-// instead of stretching across the row when a group has only one or two agents.
+// Fixed-width tiles: they wrap instead of stretching across the row when a
+// group has only one or two agents.
 const TILE_GRID = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fill, minmax(200px, 240px))",
-  gap: 1.25,
+  gridTemplateColumns: "repeat(auto-fill, minmax(300px, 360px))",
+  gap: 1.5,
 };
+
+// Tiles or table, remembered in this browser.
+const VIEW_KEY = "agentsPageViewMode";
+const readView = () => {
+  try {
+    return localStorage.getItem(VIEW_KEY) === "table" ? "table" : "tiles";
+  } catch {
+    return "tiles";
+  }
+};
+const writeView = (view) => {
+  try {
+    localStorage.setItem(VIEW_KEY, view);
+  } catch {
+    /* private window or storage blocked: the choice lasts this visit */
+  }
+};
+
+const TONE_COLOR = { ok: "success.main", warn: "warning.main", off: "text.disabled" };
+
+const HEAD_CELL = { fontWeight: 700, fontSize: "0.72rem", whiteSpace: "nowrap" };
+
+/** Every agent in one table, in the same group order as the tiles. */
+const AgentsTable = ({ groups, onOpen, onContextMenu }) => (
+  <TableContainer component={Paper} variant="outlined">
+    <Table size="small" aria-label="Agents">
+      <TableHead>
+        <TableRow>
+          <TableCell sx={HEAD_CELL}>Agent</TableCell>
+          <TableCell sx={HEAD_CELL}>Group</TableCell>
+          <TableCell sx={HEAD_CELL}>What it does</TableCell>
+          <TableCell sx={HEAD_CELL}>Status</TableCell>
+          <TableCell sx={HEAD_CELL} align="right">Tools</TableCell>
+          <TableCell sx={HEAD_CELL} align="right">Max steps</TableCell>
+          <TableCell sx={HEAD_CELL}>Model</TableCell>
+          <TableCell sx={HEAD_CELL}>Edited</TableCell>
+        </TableRow>
+      </TableHead>
+      <TableBody>
+        {groups.flatMap((group) =>
+          group.agents.map((agent) => {
+            const tone = agentTone(agent);
+            const tools = (agent.tools || []).length;
+            const edits = agentEdits(agent);
+            return (
+              <TableRow
+                key={agent.id}
+                hover
+                data-testid={`agent-row-${agent.id}`}
+                tabIndex={0}
+                onClick={() => onOpen(agent)}
+                onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onOpen(agent)}
+                onContextMenu={(e) => onContextMenu(e, agent)}
+                sx={{ cursor: "pointer", "& td": { py: 1 } }}
+              >
+                <TableCell sx={{ fontWeight: 600, whiteSpace: "nowrap" }}>
+                  <Box
+                    component="span"
+                    sx={{
+                      display: "inline-block",
+                      width: 8,
+                      height: 8,
+                      borderRadius: "50%",
+                      bgcolor: TONE_COLOR[tone],
+                      mr: 1,
+                    }}
+                  />
+                  {agent.name}
+                </TableCell>
+                <TableCell sx={{ color: "text.secondary", whiteSpace: "nowrap" }}>{group.label}</TableCell>
+                <TableCell sx={{ maxWidth: 360 }}>
+                  <Tooltip title={agent.description || ""} placement="top-start">
+                    <span>{agent.summary || agent.description}</span>
+                  </Tooltip>
+                </TableCell>
+                <TableCell sx={{ color: tone === "ok" ? "text.primary" : TONE_COLOR[tone] }}>
+                  {agent.unavailable_detail ? (
+                    <Tooltip title={agent.unavailable_detail}>
+                      <span>{agentStatus(agent)}</span>
+                    </Tooltip>
+                  ) : (
+                    agentStatus(agent)
+                  )}
+                </TableCell>
+                <TableCell align="right">{isOrchestrator(agent) ? "—" : tools}</TableCell>
+                <TableCell align="right">{isOrchestrator(agent) ? "—" : agent.max_iterations}</TableCell>
+                <TableCell sx={{ color: agent.model ? "text.primary" : "text.secondary", whiteSpace: "nowrap" }}>
+                  {agent.model || "Chat model"}
+                </TableCell>
+                <TableCell sx={{ color: "text.secondary" }}>{edits.length ? edits.join(", ") : "—"}</TableCell>
+              </TableRow>
+            );
+          }),
+        )}
+      </TableBody>
+    </Table>
+  </TableContainer>
+);
 
 const AgentsPage = () => {
   const { activeModel, isLoadingModel, modelError } = useStatus();
@@ -109,6 +221,12 @@ const AgentsPage = () => {
   const [testResult, setTestResult] = useState(null);
 
   const menu = useContextMenu();
+  const [view, setView] = useState(readView);
+  const changeView = useCallback((_event, next) => {
+    if (!next) return;
+    setView(next);
+    writeView(next);
+  }, []);
 
   const notify = useCallback((message, severity = "success") => {
     setSnackbar({ open: true, message, severity });
@@ -166,12 +284,9 @@ const AgentsPage = () => {
 
   const copyId = useCallback(
     async (agent) => {
-      try {
-        await navigator.clipboard.writeText(agent.id);
-        notify(`Copied ${agent.id}`);
-      } catch (_err) {
-        notifyError("Could not copy to the clipboard");
-      }
+      // copyText falls back to execCommand: navigator.clipboard is absent over plain http on the LAN.
+      if (await copyText(agent.id)) notify(`Copied ${agent.id}`);
+      else notifyError("Could not copy to the clipboard");
     },
     [notify, notifyError],
   );
@@ -250,9 +365,23 @@ const AgentsPage = () => {
       title="Agents"
       variant="standard"
       actions={
-        <ActionButton startIcon={<Refresh />} onClick={loadAgents} disabled={loading}>
-          Refresh
-        </ActionButton>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <ToggleButtonGroup value={view} exclusive onChange={changeView} size="small" aria-label="Agents view">
+            <ToggleButton value="tiles" aria-label="Tile view">
+              <Tooltip title="Tile view">
+                <ViewModule fontSize="small" />
+              </Tooltip>
+            </ToggleButton>
+            <ToggleButton value="table" aria-label="Table view">
+              <Tooltip title="Table view">
+                <ViewList fontSize="small" />
+              </Tooltip>
+            </ToggleButton>
+          </ToggleButtonGroup>
+          <ActionButton startIcon={<Refresh />} onClick={loadAgents} disabled={loading}>
+            Refresh
+          </ActionButton>
+        </Box>
       }
       modelStatus
       activeModel={isLoadingModel ? "Loading..." : modelError ? "Error" : activeModel}
@@ -273,6 +402,8 @@ const AgentsPage = () => {
           title="No agents found"
           description="Agents will appear here once configured"
         />
+      ) : view === "table" ? (
+        <AgentsTable groups={groups} onOpen={(a) => setEditingId(a.id)} onContextMenu={(event, a) => menu.open(event, a)} />
       ) : (
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
           {groups.map((group) => (
@@ -321,9 +452,14 @@ const AgentsPage = () => {
       <Dialog open={Boolean(testAgent)} onClose={() => setTestAgent(null)} maxWidth="md" fullWidth>
         <DialogTitle>Test {testAgent?.name}</DialogTitle>
         <DialogContent>
-          {isOrchestrator(testAgent) && (
+          {isOrchestrator(testAgent) ? (
             <Alert severity="info" sx={{ mb: 2 }}>
               Shows the plan the orchestrator makes for this message; the steps are not run.
+            </Alert>
+          ) : (
+            <Alert severity="info" sx={{ mb: 2 }}>
+              Run really runs the agent with this message, the same as asking in chat: it uses its tools and may create
+              files in Guaardvark&apos;s outputs folder.
             </Alert>
           )}
           <TextField

@@ -251,6 +251,7 @@ const CastingPanel = ({ productionId, onCastingConfirmed }) => {
                         <FormControlLabel value="use_existing_lora" control={<Radio />} label="Existing LoRA" />
                         <FormControlLabel value="train_from_uploads" control={<Radio />} label="Upload Photos" />
                         <FormControlLabel value="train_from_generated" control={<Radio />} label="AI Generated" />
+                        <FormControlLabel value="as_described" control={<Radio />} label="As described" />
                       </RadioGroup>
                     </FormControl>
                   ) : (
@@ -267,6 +268,11 @@ const CastingPanel = ({ productionId, onCastingConfirmed }) => {
                       renderInput={(params) => <TextField {...params} label="Select LoRA" size="small" />}
                       onChange={(_, newValue) => handleLoraChange(subj.id, newValue)}
                     />
+                  )}
+                  {castingData[subj.id]?.action === 'as_described' && (
+                    <Typography variant="body2" color="text.secondary">
+                      Drawn from the script each shot, with no training. Its face can change between shots.
+                    </Typography>
                   )}
                   {castingData[subj.id]?.action === 'train_from_uploads' && (
                     <DragDropImageUpload

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_doc": "Every way Guaardvark reaches outside this machine, in one list. The inbound guard reads it three ways: new code that names an outside host no entry declares is held at high severity (a declared host is still held, as any new destination is); the posture check reports any entry whose switch turns on; the network monitor extension reports a Guaardvark process reaching a host no entry declares. 'switch' says what turns a path on; 'person' means it runs only when someone starts it. 'any_host' marks paths whose destination someone chooses (a URL, a configured server), which therefore declare no fixed host.",
+  "_doc": "Every way Guaardvark reaches outside this machine, in one list. The inbound guard reads it three ways: new code that names an outside host no entry declares is held at high severity (a declared host is still held, as any new destination is); the posture check reports any entry whose switch turns on; the network monitor extension reports a Guaardvark process reaching a host no entry declares. 'switch' says what turns a path on; 'person' means it runs only when someone starts it; 'connection' names a provider whose enabled connection with stored credentials turns it on while publishing is on. 'any_host' marks paths whose destination someone chooses (a URL, a configured server), which therefore declare no fixed host.",
 
   "paths": [
     {
@@ -12,7 +12,7 @@
     },
     {
       "id": "github-downloads",
-      "title": "GitHub release weights and tools a person installs (CodeFormer, facexlib, rembg, whisper.cpp; Real-ESRGAN upscaling models from Install only)",
+      "title": "GitHub release weights and tools a person installs (CodeFormer, facexlib, rembg, whisper.cpp; Real-ESRGAN upscaling models and the GGUF converter for Export to Ollama, from Install only)",
       "hosts": ["github.com", "*.github.com", "*.githubusercontent.com"],
       "switch": {"person": true},
       "sends": "requests for the files being installed"
@@ -68,13 +68,6 @@
       "sends": "requests for rules and threads with the agent browser's Reddit cookies; approved posts"
     },
     {
-      "id": "outreach-unsupervised",
-      "title": "Outreach posting without a person's approval (supervised mode switched off)",
-      "hosts": ["www.reddit.com", "*.reddit.com"],
-      "switch": {"all": [{"setting": "social_outreach_enabled"}, {"setting_equals": ["social_outreach_supervised", "false"]}]},
-      "sends": "graded drafts, posted under the user's name without review"
-    },
-    {
       "id": "google-indexing",
       "title": "Google Indexing auto-drip",
       "hosts": ["indexing.googleapis.com", "oauth2.googleapis.com", "www.googleapis.com"],
@@ -95,7 +88,14 @@
       "hosts": ["www.googleapis.com", "oauth2.googleapis.com", "youtube.googleapis.com", "bsky.social", "*.bsky.network", "api.telegram.org", "discord.com", "discordapp.com"],
       "any_host": true,
       "switch": {"check": "publish_connections"},
-      "sends": "posts a person approves or publishes"
+      "sends": "posts a person approves or publishes, at once or at the time scheduled for them, and deletes a person asks for on Social Posts"
+    },
+    {
+      "id": "publish-linkedin",
+      "title": "LinkedIn connection: member posts through the official API, with the person's own LinkedIn app",
+      "hosts": ["api.linkedin.com", "www.linkedin.com"],
+      "switch": {"connection": "linkedin"},
+      "sends": "the app's client id and secret and the authorization code (www.linkedin.com, when a person authorizes); the access token, a profile lookup on Test, and each post a person approves or its delete (api.linkedin.com)"
     },
     {
       "id": "wordpress",

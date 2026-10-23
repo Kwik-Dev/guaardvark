@@ -9,14 +9,12 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
-  MenuItem,
   Stack,
-  TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
+
 import CollapsibleAlert from "../common/CollapsibleAlert";
-import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 
 import {
   fetchConnections,
@@ -24,29 +22,36 @@ import {
   preflightPublish,
   queuePublish,
 } from "../../api/connectionsService";
-
-/** Debounce so preflight doesn't fire on every keystroke. */
-const useDebounced = (value, delay = 400) => {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const id = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(id);
-  }, [value, delay]);
-  return debounced;
-};
+import { defaultVisibility, strictestLimit, visibilityChoices } from "../social/platformRules";
+import PostFields, { scheduledIsoOf, useDebounced } from "../social/PostFields";
 
 /**
- * Compose a post and publish selected assets to one or more connections.
- * Validation limits come from each provider's capabilities, never hardcoded.
+ * Compose a post and publish selected assets, or text alone when there are
+ * none, to one or more connections. Validation limits come from each
+ * provider's capabilities, never hardcoded; the AI disclosure rule and who
+ * sends a scheduled post come back per destination from preflight. Fields a
+ * platform needs per post (its post_fields) appear while it is selected.
+ *
+ * Each destination has its own visibility, starting at its platform's
+ * declared default; what the select shows is what is sent, explicitly.
  */
-const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
+// One empty list, so a text-only post does not reset the form on every render.
+const NO_DOCUMENTS = [];
+
+const PublishModal = ({ open, onClose, documents = NO_DOCUMENTS, onFeedback }) => {
   const [connections, setConnections] = useState([]);
   const [specs, setSpecs] = useState({});
   const [selected, setSelected] = useState([]);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [tags, setTags] = useState("");
-  const [visibility, setVisibility] = useState("");
+  // Visibilities the person picked, by connection id; the rest go out with
+  // their platform's default (visibilityTargets).
+  const [visibilities, setVisibilities] = useState({});
+  const [aiDisclosure, setAiDisclosure] = useState(false);
+  const [postOptions, setPostOptions] = useState({});
+  const [scheduleOn, setScheduleOn] = useState(false);
+  const [scheduledAt, setScheduledAt] = useState("");
   const [preflight, setPreflight] = useState(null);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -82,42 +87,56 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
     setBody(first?.metadata?.original_prompt || first?.summary || "");
     setTags(Array.isArray(first?.tags) ? first.tags.join(", ") : "");
     setSelected([]);
-    setVisibility("");
+    setVisibilities({});
+    setAiDisclosure(false);
+    setPostOptions({});
+    setScheduleOn(false);
+    setScheduledAt("");
     setPreflight(null);
     setError(null);
   }, [open, documents]);
 
-  const selectedSpecs = useMemo(
+  // ISO with the browser's offset, so the server reads the same moment.
+  const scheduledIso = useMemo(() => scheduledIsoOf(scheduleOn, scheduledAt), [scheduleOn, scheduledAt]);
+
+  const selectedConnections = useMemo(
     () =>
       selected
         .map((id) => connections.find((c) => c.id === id))
-        .filter(Boolean)
-        .map((c) => specs[c.provider])
-        .filter(Boolean),
+        .filter((c) => c && specs[c.provider]),
     [selected, connections, specs],
+  );
+  const selectedSpecs = useMemo(
+    () => selectedConnections.map((c) => specs[c.provider]),
+    [selectedConnections, specs],
+  );
+
+  const visibilityTargets = useMemo(
+    () =>
+      selectedConnections.map((conn) => {
+        const spec = specs[conn.provider];
+        return {
+          key: String(conn.id),
+          label: conn.display_name || conn.handle || spec.label || conn.provider,
+          value: visibilities[conn.id] ?? defaultVisibility(spec),
+          choices: visibilityChoices(spec, conn),
+        };
+      }),
+    [selectedConnections, specs, visibilities],
+  );
+  // Sent for every target, so none falls back to a default the select did not show.
+  const sentVisibilities = useMemo(
+    () => Object.fromEntries(visibilityTargets.map((t) => [t.key, t.value])),
+    [visibilityTargets],
   );
 
   // The strictest limit across the selected targets governs the counter.
-  const charLimit = useMemo(() => {
-    const limits = selectedSpecs
-      .map((s) => s.capabilities?.max_text_chars)
-      .filter((n) => typeof n === "number" && n > 0);
-    return limits.length ? Math.min(...limits) : null;
-  }, [selectedSpecs]);
-
+  const charLimit = useMemo(() => strictestLimit(selectedSpecs, "max_text_chars"), [selectedSpecs]);
   const supportsTitle = selectedSpecs.some((s) => s.capabilities?.supports_title);
-  const supportsTags = selectedSpecs.some((s) => s.capabilities?.supports_tags);
-
-  const visibilityOptions = useMemo(() => {
-    const sets = selectedSpecs
-      .map((s) => s.capabilities?.visibilities || [])
-      .filter((v) => v.length);
-    if (!sets.length) return [];
-    return sets.reduce((acc, cur) => acc.filter((v) => cur.includes(v)));
-  }, [selectedSpecs]);
 
   const debouncedBody = useDebounced(body);
   const debouncedTitle = useDebounced(title);
+  const debouncedOptions = useDebounced(postOptions);
 
   useEffect(() => {
     if (!open || !selected.length) {
@@ -130,7 +149,10 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
       document_ids: documentIds,
       body: debouncedBody,
       title: supportsTitle ? debouncedTitle : null,
-      visibility: visibility || null,
+      visibilities: sentVisibilities,
+      scheduled_at: scheduledIso,
+      ai_disclosure: aiDisclosure,
+      post_options: debouncedOptions,
     })
       .then((result) => !cancelled && setPreflight(result))
       .catch(() => !cancelled && setPreflight(null));
@@ -139,7 +161,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
     };
   }, [
     open, selected, documentIds, debouncedBody, debouncedTitle,
-    visibility, supportsTitle,
+    sentVisibilities, supportsTitle, scheduledIso, aiDisclosure, debouncedOptions,
   ]);
 
   const toggle = useCallback((id) => {
@@ -163,6 +185,23 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
     return [...general, ...perConnection];
   }, [preflight]);
 
+  const fieldValues = {
+    title, body, tags, aiDisclosure, postOptions, scheduleOn, scheduledAt,
+  };
+  const setters = {
+    title: setTitle,
+    body: setBody,
+    tags: setTags,
+    aiDisclosure: setAiDisclosure,
+    postOptions: setPostOptions,
+    scheduleOn: setScheduleOn,
+    scheduledAt: setScheduledAt,
+  };
+  const handleFieldChange = (patch) =>
+    Object.entries(patch).forEach(([key, value]) => setters[key]?.(value));
+  const handleVisibilityChange = (key, value) =>
+    setVisibilities((prev) => ({ ...prev, [key]: value }));
+
   const handlePublish = useCallback(async () => {
     setSubmitting(true);
     setError(null);
@@ -176,14 +215,20 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
           .split(",")
           .map((t) => t.trim())
           .filter(Boolean),
-        visibility: visibility || null,
+        visibilities: sentVisibilities,
         requested_by: "ui",
+        scheduled_at: scheduledIso,
+        ai_disclosure: aiDisclosure,
+        post_options: postOptions,
       });
+      const verb = scheduledIso ? "Scheduled" : "Queued";
       onFeedback?.({
         open: true,
         message: result.requires_approval
-          ? `Queued ${result.count} publish(es) — review them under Approvals.`
-          : `Publishing to ${result.count} destination(s).`,
+          ? `${verb} ${result.count} publish(es) — review them under Approvals.`
+          : scheduledIso
+            ? `Scheduled ${result.count} publish(es); see them under Social Posts.`
+            : `Publishing to ${result.count} destination(s).`,
         severity: "success",
       });
       onClose?.();
@@ -193,18 +238,24 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
       setSubmitting(false);
     }
   }, [
-    selected, documentIds, body, title, tags, visibility, supportsTitle,
-    onClose, onFeedback,
+    selected, documentIds, body, title, tags, sentVisibilities, supportsTitle,
+    scheduledIso, aiDisclosure, postOptions, onClose, onFeedback,
   ]);
 
   const overLimit = charLimit !== null && body.length > charLimit;
   const canPublish =
-    selected.length > 0 && !overLimit && !allViolations.length && !submitting;
+    selected.length > 0 &&
+    !overLimit &&
+    !allViolations.length &&
+    !submitting &&
+    (!scheduleOn || Boolean(scheduledIso));
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>
-        Publish {documents.length > 1 ? `${documents.length} items` : "asset"}
+        {documents.length
+          ? `Publish ${documents.length > 1 ? `${documents.length} items` : "asset"}`
+          : "New post"}
       </DialogTitle>
       <DialogContent dividers>
         {loading ? (
@@ -217,7 +268,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
 
             {!connections.length && (
               <CollapsibleAlert severity="info">
-                No social connections yet. Add one on the Connections page first.
+                No social accounts yet. Add one on the Social Accounts page first.
               </CollapsibleAlert>
             )}
 
@@ -263,62 +314,15 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
 
             <Divider />
 
-            {supportsTitle && (
-              <TextField
-                label="Title"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                size="small"
-              />
-            )}
-
-            <TextField
-              label="Caption"
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              multiline
-              minRows={3}
-              size="small"
-              error={overLimit}
-              helperText={
-                charLimit !== null
-                  ? `${body.length} / ${charLimit} characters`
-                  : `${body.length} characters`
-              }
+            <PostFields
+              specs={selectedSpecs}
+              values={fieldValues}
+              onChange={handleFieldChange}
+              visibilityTargets={visibilityTargets}
+              onVisibilityChange={handleVisibilityChange}
+              preflight={preflight}
+              bodyLabel={documents.length ? "Caption" : "Text"}
             />
-
-            {supportsTags && (
-              <TextField
-                label="Tags"
-                value={tags}
-                onChange={(e) => setTags(e.target.value)}
-                size="small"
-                helperText="Comma separated."
-              />
-            )}
-
-            {visibilityOptions.length > 0 && (
-              <TextField
-                select
-                label="Visibility"
-                value={visibility || visibilityOptions[0]}
-                onChange={(e) => setVisibility(e.target.value)}
-                size="small"
-              >
-                {visibilityOptions.map((option) => (
-                  <MenuItem key={option} value={option}>
-                    {option}
-                    {option !== "private" && (
-                      <WarningAmberIcon
-                        fontSize="small"
-                        color="warning"
-                        sx={{ ml: 1, verticalAlign: "middle" }}
-                      />
-                    )}
-                  </MenuItem>
-                ))}
-              </TextField>
-            )}
 
             {allViolations.length > 0 && (
               <CollapsibleAlert severity="warning">
@@ -337,7 +341,7 @@ const PublishModal = ({ open, onClose, documents = [], onFeedback }) => {
       <DialogActions>
         <Button onClick={onClose}>Cancel</Button>
         <Button variant="contained" onClick={handlePublish} disabled={!canPublish}>
-          {submitting ? "Publishing…" : "Publish"}
+          {submitting ? (scheduleOn ? "Scheduling…" : "Publishing…") : scheduleOn ? "Schedule" : "Publish"}
         </Button>
       </DialogActions>
     </Dialog>

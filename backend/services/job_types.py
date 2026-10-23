@@ -163,6 +163,26 @@ _UNIFIED_PROGRESS_STATUS_MAP = {
     "canceled": JobStatus.CANCELLED,
 }
 
+# SelfImprovementRun.status (self_improvement_service.py). "no_change" is a run
+# that scanned and found nothing to do; "blocked_by_guardian" is a run the
+# guardian stopped before it applied anything, so it is cancelled, not broken.
+_SELF_IMPROVEMENT_STATUS_MAP = {
+    "running": JobStatus.RUNNING,
+    "success": JobStatus.COMPLETED,
+    "no_change": JobStatus.COMPLETED,
+    "failed": JobStatus.FAILED,
+    "blocked_by_guardian": JobStatus.CANCELLED,
+    "cancelled": JobStatus.CANCELLED,
+}
+
+# ExperimentRun.status (rag_autoresearch_service.py). A row is written once the
+# experiment has run; "keep" and "discard" are its verdict, not its health.
+_EXPERIMENT_STATUS_MAP = {
+    "keep": JobStatus.COMPLETED,
+    "discard": JobStatus.COMPLETED,
+    "crash": JobStatus.FAILED,
+}
+
 # Catch-all fallback for less-trafficked kinds. Unknown values map to FAILED
 # rather than silently to a "looks healthy" status.
 _GENERIC_STATUS_MAP = {
@@ -196,6 +216,8 @@ def map_status(kind: JobKind, native_status: str | None) -> JobStatus:
         JobKind.PUBLISH: _TASK_STATUS_MAP,
         JobKind.WEBSITE: _TASK_STATUS_MAP,
         JobKind.TRAINING: _TRAINING_STATUS_MAP,
+        JobKind.SELF_IMPROVEMENT: _SELF_IMPROVEMENT_STATUS_MAP,
+        JobKind.EXPERIMENT: _EXPERIMENT_STATUS_MAP,
         JobKind.UNIFIED_PROGRESS: _UNIFIED_PROGRESS_STATUS_MAP,
         JobKind.VIDEO_GEN: _GENERIC_STATUS_MAP,
         JobKind.MUSIC_VIDEO: _GENERIC_STATUS_MAP,
@@ -216,6 +238,7 @@ class RenderErrorKind(str, Enum):
     MODEL_NOT_INSTALLED = "model_not_installed"
     COMPANION_MISSING = "companion_missing"    # the model is installed, a file it needs is not
     COMFYUI_DOWN = "comfyui_down"              # unreachable, refused to start, or died mid-render
+    SERVICE_DOWN = "service_down"              # another plugin the job needs (Audio Foundry, ...) is not running
     NODE_MISSING = "node_missing"              # a custom node the graph uses is not loaded
     CARD_TOO_SMALL = "card_too_small"          # the model can never fit this card
     VRAM_BUSY = "vram_busy"                    # the card did not free up before the wait ran out
@@ -241,13 +264,22 @@ RENDER_ERROR_POLICY: dict[RenderErrorKind, dict[str, Any]] = {
         "action": "Change the request as the message says."},
     RenderErrorKind.MODEL_NOT_INSTALLED: {
         "label": "Model not installed", "retryable": False, "retry_after_s": [],
-        "action": "Open Manage Video Models and install it."},
+        "action": "Open Manage Video Models and install it.",
+        # Where the install button is for the other kinds of job.
+        "action_by_surface": {
+            "image": "Open Manage Image Models and install it.",
+            "audio": "Open Audio Studio → Manage models and install it.",
+            "voice": "Open Audio Studio → Manage models and install it.",
+        }},
     RenderErrorKind.COMPANION_MISSING: {
         "label": "Companion file missing", "retryable": False, "retry_after_s": [],
         "action": "Open Manage Video Models and install the model again; companions come with it."},
     RenderErrorKind.COMFYUI_DOWN: {
         "label": "ComfyUI not running", "retryable": True, "retry_after_s": [30],
         "action": "Start the ComfyUI plugin; if it does not stay up, read logs/comfyui.log."},
+    RenderErrorKind.SERVICE_DOWN: {
+        "label": "Service not running", "retryable": True, "retry_after_s": [30],
+        "action": "Start the plugin it needs on the Plugins page; if it does not stay up, read its log in logs/."},
     RenderErrorKind.NODE_MISSING: {
         "label": "ComfyUI node missing", "retryable": False, "retry_after_s": [],
         "action": "Run plugins/comfyui/scripts/install_deps.sh, then restart the ComfyUI plugin."},
@@ -259,7 +291,12 @@ RENDER_ERROR_POLICY: dict[RenderErrorKind, dict[str, Any]] = {
         "action": "Another job holds the GPU; retry when it finishes."},
     RenderErrorKind.OOM: {
         "label": "Out of GPU memory", "retryable": False, "retry_after_s": [],
-        "action": "Lower the size, length or steps, or turn off upscale and LoRAs."},
+        "action": "Lower the size, length or steps, or turn off upscale and LoRAs.",
+        "action_by_surface": {
+            "image": "Lower the size or steps, or turn off LoRAs.",
+            "audio": "Ask for a shorter song, or stop other GPU work first.",
+            "voice": "Split the text into shorter calls, or stop other GPU work first.",
+        }},
     RenderErrorKind.NODE_ERROR: {
         "label": "ComfyUI node failed", "retryable": False, "retry_after_s": [],
         "action": "The message names the node; logs/comfyui.log has the traceback."},
@@ -271,12 +308,24 @@ RENDER_ERROR_POLICY: dict[RenderErrorKind, dict[str, Any]] = {
         "action": "Usually a model file is incomplete; reinstall it from Manage Video Models."},
     RenderErrorKind.OUTPUT_MISSING: {
         "label": "No video written", "retryable": True, "retry_after_s": [30],
-        "action": "ComfyUI finished without a video file; check its output folder and logs/comfyui.log."},
+        "action": "ComfyUI finished without a video file; check its output folder and logs/comfyui.log.",
+        "label_by_surface": {"image": "No image written", "audio": "No audio written",
+                             "voice": "No audio written"},
+        "action_by_surface": {
+            "image": "ComfyUI finished without an image; check its output folder and logs/comfyui.log.",
+            "audio": "The job finished without a file; logs/audio_foundry.log has the details.",
+            "voice": "The job finished without a file; logs/audio_foundry.log has the details.",
+        }},
     RenderErrorKind.CANCELLED: {
         "label": "Cancelled", "retryable": False, "retry_after_s": [], "action": ""},
     RenderErrorKind.UNKNOWN: {
         "label": "Render failed", "retryable": False, "retry_after_s": [],
-        "action": "logs/backend.log has the details."},
+        "action": "logs/backend.log has the details.",
+        # Audio jobs fail inside the Audio Foundry sidecar, which logs there.
+        "action_by_surface": {
+            "audio": "logs/audio_foundry.log has the details.",
+            "voice": "logs/audio_foundry.log has the details.",
+        }},
 }
 
 
@@ -296,20 +345,29 @@ class RenderFailure(str):
 
 
 def failure_kind(message: Any, default: "RenderErrorKind | None" = None) -> "RenderErrorKind | None":
-    """The kind a message carries, else ``default``."""
+    """The kind a message carries, else ``default``. A ``kind`` that is not a
+    RenderErrorKind (BackendError's "plugin_offline", say) is not one."""
     kind = getattr(message, "kind", None)
-    return RenderErrorKind(kind) if kind else default
+    if not kind:
+        return default
+    try:
+        return RenderErrorKind(kind)
+    except ValueError:
+        return default
 
 
-def describe_failure(kind: "RenderErrorKind | str | None", message: str | None) -> dict[str, Any]:
-    """The record status JSON carries for a failure."""
+def describe_failure(kind: "RenderErrorKind | str | None", message: str | None,
+                     surface: str | None = None) -> dict[str, Any]:
+    """The record status JSON carries for a failure. ``surface`` ("image",
+    "audio", "voice"; None for video) picks the wording for that kind of job
+    where the policy has one."""
     k = RenderErrorKind(kind) if kind else RenderErrorKind.UNKNOWN
     policy = RENDER_ERROR_POLICY[k]
     return {
         "kind": k.value,
-        "label": policy["label"],
+        "label": (policy.get("label_by_surface") or {}).get(surface, policy["label"]),
         "message": str(message or ""),
-        "action": policy["action"],
+        "action": (policy.get("action_by_surface") or {}).get(surface, policy["action"]),
         "retryable": policy["retryable"],
         "retry_after_s": list(policy["retry_after_s"]),
     }
@@ -332,27 +390,34 @@ def retry_waits(kind: "RenderErrorKind | str | None") -> list[float]:
     return [float(s) for s in policy["retry_after_s"]] if policy["retryable"] else []
 
 
-def failure_text(kind: "RenderErrorKind | str | None", message: str | None) -> str:
+def failure_text(kind: "RenderErrorKind | str | None", message: str | None,
+                 surface: str | None = None) -> str:
     """One line for chat and MCP: label, message, next step."""
-    d = describe_failure(kind, message)
-    text = f"{d['label']}: {d['message']}" if d["message"] else d["label"]
-    if d["action"]:
-        text += f" Next: {d['action']}"
-    if d["retryable"]:
+    return record_text(describe_failure(kind, message, surface))
+
+
+def record_text(record: dict[str, Any]) -> str:
+    """One line for a failure record describe_failure built: its own label,
+    message and next step (the record already has the job kind's wording)."""
+    text = f"{record['label']}: {record['message']}" if record.get("message") else record["label"]
+    if record.get("action"):
+        text += f" Next: {record['action']}"
+    if record.get("retryable"):
         text += " (Retrying later can succeed.)"
     return text
 
 
-def batch_failure(status: Any) -> dict[str, Any] | None:
+def batch_failure(status: Any, surface: str | None = None) -> dict[str, Any] | None:
     """The failure record a batch reports: its own error, else its first
     failed clip's, else None when nothing failed. Reads any status object
     with status/error/error_kind/results (BatchVideoStatus)."""
     error = getattr(status, "error", None)
     if getattr(status, "status", None) == "cancelled":
-        return describe_failure(RenderErrorKind.CANCELLED, error or "Cancelled")
+        return describe_failure(RenderErrorKind.CANCELLED, error or "Cancelled", surface)
     if error:
-        return describe_failure(getattr(status, "error_kind", None), error)
+        return describe_failure(getattr(status, "error_kind", None) or failure_kind(error), error, surface)
     failed = next((r for r in getattr(status, "results", None) or [] if not r.success), None)
     if failed is not None:
-        return describe_failure(getattr(failed, "error_kind", None), failed.error)
+        return describe_failure(getattr(failed, "error_kind", None) or failure_kind(failed.error),
+                                failed.error, surface)
     return None

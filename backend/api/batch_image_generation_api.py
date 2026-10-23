@@ -20,6 +20,8 @@ from datetime import datetime
 import time
 import threading
 
+from backend.services.job_types import batch_failure, describe_failure
+
 logger = logging.getLogger(__name__)
 
 # Import dependencies with fallback handling
@@ -32,7 +34,8 @@ try:
         start_batch_from_csv,
         start_batch_from_prompts,
         get_batch_status,
-        cancel_batch
+        cancel_batch,
+        SEED_SPACE,
     )
     from backend.utils.response_utils import success_response, error_response
     from backend.utils.unified_progress_system import ProcessType
@@ -40,6 +43,7 @@ try:
 except ImportError as e:
     logger.error(f"Failed to import batch generation dependencies: {e}")
     service_available = False
+    SEED_SPACE = 2 ** 32
     # Fallback functions
     def error_response(message, status_code=500, error_code=None, data=None, details=None):
         return {"error": message, "status": status_code}
@@ -140,6 +144,20 @@ def _image_download_dest(img, catalog_key: str, hf_model_id: str) -> Path:
     return img._get_model_path(hf_model_id)
 
 
+def _image_download_watch_dirs(img, catalog_key: str, hf_model_id: str) -> List[Path]:
+    """Every directory the download writes: the model's own, plus the companion
+    entries a user ComfyUI model installs beside it (text_encoders/, vae/)."""
+    dirs = [_image_download_dest(img, catalog_key, hf_model_id)]
+    try:
+        from backend.services.user_image_models import companion_dirs
+        for d in companion_dirs(img, catalog_key):
+            if d not in dirs:
+                dirs.append(d)
+    except Exception as e:  # noqa: BLE001 — progress only; the download itself decides
+        logger.debug("companion watch dirs for %s skipped: %s", catalog_key, e)
+    return dirs
+
+
 def _reconcile_image_download_status_on_load() -> None:
     global model_download_status, _IMAGE_DOWNLOAD_EPOCH
     try:
@@ -189,6 +207,18 @@ IMAGE_MODEL_SIZES = {
     "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers": 9.7,
     "Efficient-Large-Model/Sana_Sprint_0.6B_1024px_diffusers": 7.7,
 }
+
+def _catalog_size_gb(path: str) -> float:
+    """Download size of a catalog row. A ``comfy:`` key is the sum of its registry
+    install plan (model + companions); anything else comes from IMAGE_MODEL_SIZES."""
+    if path.startswith("comfy:"):
+        from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY, install_plan
+        total = sum(float(VIDEO_MODEL_REGISTRY.get(e, {}).get("size_gb") or 0)
+                    for e in install_plan(path.split(":", 1)[1]))
+        if total:
+            return round(total, 2)
+    return IMAGE_MODEL_SIZES.get(path, 2.5)
+
 
 # Why a model is missing from the picker, phrased for the person reading it.
 _AVAILABILITY_REASONS = {
@@ -480,6 +510,18 @@ def _parse_generation_params(data: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict
     params['preserve_order'] = _as_bool(data.get('preserve_order'), True)
     params['generate_thumbnails'] = _as_bool(data.get('generate_thumbnails'), True)
     params['save_metadata'] = _as_bool(data.get('save_metadata'), True)
+    # A typed seed: the first image renders with it, each next image with the
+    # next number (create_batch_from_prompts). Blank keeps a seed per image.
+    raw_seed = data.get('seed')
+    if raw_seed not in (None, ""):
+        try:
+            seed = int(str(raw_seed).strip())
+        except (TypeError, ValueError):
+            seed = -1
+        if 0 <= seed < SEED_SPACE:
+            params['seed'] = seed
+        else:
+            validation_info["warnings"].append(f"Seed {raw_seed!r} is not a whole number from 0 to {SEED_SPACE - 1}; ignored.")
     if 'ui_config' in data:
         params['ui_config'] = data['ui_config']
 
@@ -665,6 +707,35 @@ def get_service_status():
         return error_response(str(e), 500)
 
 
+def _auto_resolves_to(gen) -> Optional[str]:
+    """The catalog key Auto renders with on this box for a neutral prompt, or
+    None when the generator cannot say.
+
+    The same selection the batch intake uses: the Stills default from Settings
+    when the generator can honour it (configured_default_for_auto, which also
+    covers a ComfyUI-only default), else the per-card router for an empty
+    prompt (_auto_select_model, which _resolve_batch_model_key also asks).
+    """
+    if gen is None:
+        return None
+    preferred = getattr(gen, "configured_default_for_auto", None)
+    if callable(preferred):
+        try:
+            key = preferred()
+            if key:
+                return str(key)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Stills default not consulted for the models list: %s", e)
+    select = getattr(gen, "_auto_select_model", None)
+    if callable(select):
+        try:
+            key = select("", "realistic")
+            return str(key) if key else None
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Auto selection failed for the models list: %s", e)
+    return None
+
+
 @batch_image_bp.route("/models", methods=["GET"])
 def list_models():
     """List all available models and their installation status."""
@@ -683,9 +754,11 @@ def list_models():
         # (?check=1, Check access in Manage models), never on page load.
         check = request.args.get("check", "").lower() in ("1", "true", "yes")
         meta = generator.image_generator.get_available_models(probe_remote=check)
+        from backend.services.stills_defaults import prompt_style, prompt_style_for_family
         models = []
         unavailable = []
         for model_id, info in sorted(meta.items(), key=lambda kv: kv[1].get("order", 99)):
+            family = info.get("family")
             row = {
                 "id": model_id,
                 "path": info["id"],
@@ -694,13 +767,21 @@ def list_models():
                 "label": info.get("label", model_id),
                 "description": info.get("description", ""),
                 "recommended": info.get("recommended", False),
-                "size_gb": info.get("size_gb") or IMAGE_MODEL_SIZES.get(info["id"], 2.5),
+                "size_gb": info.get("size_gb") or _catalog_size_gb(info["id"]),
                 "availability": info.get("availability", "downloadable"),
                 "gated": bool(info.get("gated")),
                 # User catalog rows (Manage Image Models → Add new model).
                 "user": bool(info.get("user")),
-                "family": info.get("family"),
+                "family": family,
                 "kind": info.get("kind"),
+                # ComfyUI models: the files (model + companions) Install still has
+                # to fetch, in the editing packs' "<entry>:<file>" shape.
+                "missing_files": list(info.get("missing_files") or []),
+                # "natural": an LLM text encoder that reads prompts as prose, so
+                # the page's content-type tags and anatomy phrasing are not
+                # applied (offline_image_generator.enhance_prompt_for_quality).
+                # "tags": CLIP-era models that take the tag suffixes.
+                "prompt_style": prompt_style_for_family(family) if family else prompt_style(model_id),
             }
             # A model the user cannot actually run must not sit in the picker — that
             # is how a gated Krea 2 got selected and silently produced SD 1.5 output.
@@ -720,10 +801,15 @@ def list_models():
         except Exception as e:  # noqa: BLE001 — the picker must list even if a pack probe fails
             logger.warning("image editing pack rows failed: %s", e)
             editing = []
+        auto_model = _auto_resolves_to(generator.image_generator)
         return success_response({
             "models": models,
             "unavailable_models": unavailable,
             "default_model": "auto",
+            # What Auto renders with today, so the page can say which controls
+            # apply before a model is picked.
+            "auto_model": auto_model,
+            "auto_prompt_style": prompt_style(auto_model or "auto"),
             # User LoRAs never enter the picker; the page shows them as chips and
             # the modal lists them with Install / Remove.
             "adapters": catalog_rows(generator.image_generator),
@@ -813,6 +899,14 @@ def _start_image_model_download(model_path: str):
             estimated_size_gb = round(file_bytes / (1024 ** 3), 3)
         else:
             estimated_size_gb = IMAGE_MODEL_SIZES.get(catalog_key, IMAGE_MODEL_SIZES.get(hf_model_id, 2.5))
+        if user_entry:
+            # A user ComfyUI model's Install also fetches the companions its
+            # family's shipped entry requires; the progress bar counts them.
+            try:
+                from backend.services.user_image_models import missing_companion_size_gb
+                estimated_size_gb = round(estimated_size_gb + missing_companion_size_gb(img, catalog_key), 3)
+            except Exception as e:  # noqa: BLE001 — the estimate only shapes the progress bar
+                logger.debug("companion size for %s skipped: %s", catalog_key, e)
 
         with model_download_lock:
             now = time.time()
@@ -842,9 +936,9 @@ def _start_image_model_download(model_path: str):
         def download_task(hf_model_id, total_gb, epoch):
             _start_time = time.time()
             total_bytes = int(total_gb * 1024**3) if total_gb else 1
-            dest = _image_download_dest(generator.image_generator, catalog_key, hf_model_id)
+            dests = _image_download_watch_dirs(generator.image_generator, catalog_key, hf_model_id)
             hf_cache = _hf_cache_repo_dir(hf_model_id)
-            watched = [d for d in (dest, hf_cache) if d is not None]
+            watched = [d for d in (*dests, hf_cache) if d is not None]
             baseline = sum(_dir_bytes(d) for d in watched)
             stalled = threading.Event()
 
@@ -1347,6 +1441,55 @@ def analyze_prompt():
         return error_response(str(e), 500)
 
 
+@batch_image_bp.route("/prompt-tokens", methods=["POST"])
+def prompt_tokens():
+    """How many tokens a prompt uses out of what the chosen model reads.
+
+    ``limit`` is None when the model has no declared cap, or when it renders
+    through ComfyUI, whose tokenizers read the whole prompt; ``tokens`` is None
+    when the model's tokenizer is not on disk.
+    """
+    try:
+        if not service_available:
+            return error_response("Batch image generation service not available", 503)
+
+        data = request.get_json(silent=True) or {}
+        prompt = data.get("prompt")
+        if not isinstance(prompt, str):
+            return error_response("No prompt provided", 400)
+        model = str(data.get("model") or "auto").strip() or "auto"
+
+        gen = get_batch_image_generator().image_generator
+        if not gen:
+            return error_response("Image generator not initialized", 503)
+
+        from backend.services.prompt_token_budget import count_prompt_tokens, load_tokenizer, max_prompt_tokens
+        from backend.services.stills_pipeline import zimage_via_comfyui_enabled
+
+        key = model
+        if model.lower() == "auto":
+            preferred = gen.configured_default_for_auto()
+            key = preferred if preferred and gen.is_comfy_only_model(preferred) else gen._auto_select_model(prompt)
+        if not key:
+            return success_response({"model": None, "family": None, "tokens": None, "limit": None})
+
+        family = gen._model_family(key)
+        limit = max_prompt_tokens(family)
+        if family == "zimage" and zimage_via_comfyui_enabled():
+            limit = None
+        tokens = None
+        if limit:
+            tokenizer = load_tokenizer(gen._get_model_path(gen._resolve_model_ref(key)))
+            if tokenizer is not None:
+                tokens = count_prompt_tokens(family, prompt, tokenizer)
+
+        return success_response({"model": key, "family": family, "tokens": tokens, "limit": limit})
+
+    except Exception as e:
+        logger.error(f"Error counting prompt tokens: {e}")
+        return error_response(str(e), 500)
+
+
 @batch_image_bp.route("/enhance-prompt", methods=["POST"])
 def enhance_prompt():
     """Enhance a prompt with quality and consistency improvements."""
@@ -1678,6 +1821,9 @@ def get_batch_generation_status(batch_id: str):
             "retry_data": getattr(status, "retry_data", None),
             "gpu_wait_reason": getattr(status, "gpu_wait_reason", None),
             "progress_percentage": _progress_percentage(status),
+            # The failure with its kind and next step (job_types), as video batches report it.
+            "error_kind": getattr(status, "error_kind", None),
+            "failure": batch_failure(status, surface="image"),
         }
 
         # Include results if requested
@@ -1694,6 +1840,9 @@ def get_batch_generation_status(batch_id: str):
                     "thumbnail_path": r.thumbnail_path,
                     "generation_time": r.generation_time,
                     "error": r.error,
+                    "error_kind": getattr(r, "error_kind", None),
+                    "failure": (describe_failure(getattr(r, "error_kind", None), r.error, "image")
+                                if not r.success else None),
                     "metadata": r.metadata
                 }
                 for r in status.results

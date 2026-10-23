@@ -26,6 +26,7 @@ from backend.services import training_base_models as tbm
 from backend.services import training_libraries as tl
 
 SMALL, DEFAULT = "Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct"
+GEMMA = "google/gemma-4-E4B-it"
 GPU_16 = {"practical": True, "reason": "NVIDIA GPU with 16 GB of memory.", "gpu": "test card",
           "vram_mb": 16376, "ram_gb": 64}
 
@@ -79,7 +80,7 @@ def hub(monkeypatch):
 # ---- the declared list ------------------------------------------------------------
 
 def test_every_entry_declares_what_the_product_enforces():
-    assert [e["id"] for e in tbm.BASE_MODELS] == [SMALL, DEFAULT]
+    assert [e["id"] for e in tbm.BASE_MODELS] == [SMALL, DEFAULT, GEMMA]
     for entry in tbm.BASE_MODELS:
         assert entry["repo"] == entry["id"] and entry["revision"]
         assert entry["license"] == "Apache-2.0"
@@ -87,13 +88,26 @@ def test_every_entry_declares_what_the_product_enforces():
         assert entry["vram_mb"] > 0 and entry["vram_measured"]
         assert entry["export"] in ("verified", "unverified")
         assert entry["ollama_tags"] and all(":" in tag for tag in entry["ollama_tags"])
-        assert "<|im_start|>" in entry["ollama_template"] and entry["ollama_stop"]
+        assert entry["response_markers"]["response"].rstrip("\n") in entry["ollama_template"]
+        assert entry["ollama_stop"]
         assert '"""' not in entry["ollama_template"]  # it sits in a Modelfile's triple quotes
         assert set(entry["response_markers"]) == {"instruction", "response"}
 
 
-def test_export_is_not_offered_until_verified():
-    assert tbm.export_verified(DEFAULT) is False
+def test_a_model_not_yet_measured_downloads_but_takes_no_job(machine, hub):
+    entry = tbm.get(GEMMA)
+    hub.cached[GEMMA] = _snapshot(machine.tmp / "gemma")
+
+    assert tbm.trainable(entry) is False and tbm.trainable(tbm.get(DEFAULT)) is True
+    assert {m["id"]: m for m in tbm.status()["models"]}[GEMMA]["trainable"] is False
+    assert "not offered for training yet" in tbm.refusal_for_job(GEMMA)
+    assert tbm.fit(entry)[0] is True  # so the Download is offered on a 16 GB card
+
+
+def test_export_is_offered_only_where_it_was_measured():
+    assert tbm.export_verified(DEFAULT) is True and tbm.get(DEFAULT)["export_measured"]
+    assert tbm.export_verified(SMALL) is False
+    assert tbm.export_verified(GEMMA) is False
     assert tbm.export_verified("org/unknown") is False
 
 

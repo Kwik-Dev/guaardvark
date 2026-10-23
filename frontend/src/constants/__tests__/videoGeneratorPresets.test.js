@@ -2,6 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   ASPECT_RATIO_PRESETS,
   aspectRatiosFor,
+  canvasDimensions,
+  MAX_SEED,
+  parseSeed,
+  COGVIDEOX15_DURATION_PRESETS,
   durationPresetsFor,
   resolveAspectRatio,
   isMinimaxModel,
@@ -41,6 +45,34 @@ describe("durationPresetsFor", () => {
       expect((p.duration_frames - 1) % 8).toBe(0);
     }
     for (const p of Object.values(durationPresetsFor("cogvideox-5b"))) expect(p.fps).toBe(8);
+  });
+
+  it("gives CogVideoX 1.5 I2V its card's 5 s at 16fps", () => {
+    expect(durationPresetsFor("cogvideox-5b-i2v")).toBe(COGVIDEOX15_DURATION_PRESETS);
+    expect(Object.values(COGVIDEOX15_DURATION_PRESETS).map((p) => [p.duration_frames, p.fps]))
+      .toEqual([[81, 16]]);
+  });
+});
+
+describe("parseSeed", () => {
+  it("reads a typed seed and leaves anything else random", () => {
+    expect(parseSeed("1273355921")).toBe(1273355921);
+    expect(parseSeed(" 42 ")).toBe(42);
+    expect(parseSeed("0")).toBe(0);
+    for (const blank of ["", "  ", null, undefined, "12a", "-5", "1.5"]) expect(parseSeed(blank)).toBeNull();
+    expect(parseSeed(String(MAX_SEED))).toBe(MAX_SEED);
+    expect(parseSeed(String(MAX_SEED + 1))).toBeNull();
+  });
+});
+
+describe("canvasDimensions", () => {
+  it("holds CogVideoX 1.5 I2V's 768 short side and caps the long side at 1360", () => {
+    const { canvas, dimensionAlignment } = MODEL_OPTIONS["cogvideox-5b-i2v"];
+    const at = (ratio) => canvasDimensions(canvas, ASPECT_RATIO_PRESETS[ratio].ratio, dimensionAlignment);
+    expect(at("16:9")).toEqual({ width: 1360, height: 768 });
+    expect(at("9:16")).toEqual({ width: 768, height: 1360 });
+    expect(at("1:1")).toEqual({ width: 768, height: 768 });
+    expect(at("3:2")).toEqual({ width: 1152, height: 768 });
   });
 });
 

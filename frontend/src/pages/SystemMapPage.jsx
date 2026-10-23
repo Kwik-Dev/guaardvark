@@ -566,24 +566,26 @@ export default function SystemMapPage() {
                 : `Just computed in ${cacheInfo?.computed_in_seconds || "?"}s`
             }
           >
-            <IconButton
-              onClick={() => {
-                load(true);
-                loadFindings();
-              }}
-              disabled={loading}
-              sx={{
-                color: P.ink(0.7),
-                pointerEvents: "auto",
-                "&:hover": { color: P.ink(1) },
-              }}
-            >
-              {loading ? (
-                <CircularProgress size={20} sx={{ color: P.ink(0.7) }} />
-              ) : (
-                <RefreshIcon />
-              )}
-            </IconButton>
+            <span>
+              <IconButton
+                onClick={() => {
+                  load(true);
+                  loadFindings();
+                }}
+                disabled={loading}
+                sx={{
+                  color: P.ink(0.7),
+                  pointerEvents: "auto",
+                  "&:hover": { color: P.ink(1) },
+                }}
+              >
+                {loading ? (
+                  <CircularProgress size={20} sx={{ color: P.ink(0.7) }} />
+                ) : (
+                  <RefreshIcon />
+                )}
+              </IconButton>
+            </span>
           </Tooltip>
         </Box>
 

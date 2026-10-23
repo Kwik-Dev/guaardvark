@@ -41,6 +41,7 @@ import SpeedIcon from "@mui/icons-material/Speed";
 import TrendingUpIcon from "@mui/icons-material/TrendingUp";
 
 import DashboardCardWrapper from "../dashboard/DashboardCardWrapper";
+import { loadedTab } from "./tabOrigin";
 import * as wordpressService from "../../api/wordpressService";
 
 
@@ -524,17 +525,15 @@ const WordPressPagesCard = React.forwardRef(
       const fileName = `${page.slug || `page-${page.id}`}.html`;
       
       // Create new tab with raw HTML content
-      const newTab = {
+      const newTab = loadedTab({
         id: Math.random().toString(36).slice(2, 11),
         filePath: fileName,
-        content: content,
         language: "html",
-        isModified: false,
         isNew: false,
         source: "wordpress",
         wordpressPageId: page.id,
         wordpressPageTitle: page.title,
-      };
+      }, content);
       
       setOpenTabs(prev => {
         const newTabs = [...prev, newTab];

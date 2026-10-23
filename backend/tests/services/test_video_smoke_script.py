@@ -49,6 +49,7 @@ def test_every_ready_t2v_or_i2v_model_gets_one_clip_per_mode():
     ("ltx25-distilled-int8", 17, (832, 448), 8),  # its 64 px output grid
     ("hunyuan-t2v", 25, (848, 480), 20),   # 16 px grid
     ("cogvideox-5b", 9, (672, 384), 50),   # its declared 16 GB canvas
+    ("cogvideox-5b-i2v", 81, (1360, 768), 50),  # CogVideoX 1.5: fixed 768 short side, 81 frames only
     ("minimax-h3-int8", 73, (864, 480), 20),  # min_clip_s 3 s = 72, up onto 17k+5
 ])
 def test_smallest_clip(model, frames, size, steps):

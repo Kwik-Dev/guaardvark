@@ -238,4 +238,22 @@ export const makeDefaultSubjectLora = async (id, baseModelId) => {
   return response.data;
 };
 
+// The image encoder behind the Cast identity check (Settings > Generation):
+// what it is, whether it is installed, which check the smoke still gets, and
+// any install in progress. Install is the only path that downloads it. A
+// refused Install or Remove (409) still carries the status, plus `error`.
+const identityCheckCall = async (method, path) => {
+  try {
+    const response = await axios({ method, url: `${API_BASE}/cast-library/identity-check${path}` });
+    return response.data;
+  } catch (e) {
+    if (e.response?.data?.error) return e.response.data;
+    throw e;
+  }
+};
+
+export const getIdentityCheck = () => identityCheckCall("get", "");
+export const installIdentityEncoder = () => identityCheckCall("post", "/install");
+export const removeIdentityEncoder = () => identityCheckCall("post", "/remove");
+
 export default productionService;

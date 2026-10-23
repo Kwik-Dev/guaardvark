@@ -8,11 +8,28 @@ from typing import Any, Dict, List, Optional
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
 from backend.models import db, AgentMemory, AgentMemoryAudit
-from backend.api.memory_api import add_memory, _query_memories
-from backend.services.memory_contract import query_terms
-from backend.utils.backend_http import BackendError, is_mcp_transport, request_json, run_tool_in_backend
+from backend.api.memory_api import MemoryNotFound, add_memory, _query_memories, update_memory_entry
+from backend.services.memory_contract import normalize_memory_type, query_terms
+from backend.utils.backend_http import (
+    BackendError, is_mcp_caller, is_mcp_transport, request_json, run_tool_in_backend,
+)
 
 logger = logging.getLogger(__name__)
+
+# The entry types save_memory writes. MCP clients may change or delete only
+# these; lessons, snippets and the observations Guaardvark records itself are
+# managed on the Agent Memory page.
+USER_MEMORY_TYPES = ("fact", "preference", "note")
+
+
+def _mcp_refusal(tool, memory, verb: str) -> Optional[str]:
+    """Why an MCP client may not change this entry, or None."""
+    if is_mcp_caller(tool) and memory.type not in USER_MEMORY_TYPES:
+        return (
+            f"Memory {memory.id} is a '{memory.type}' entry; over MCP only fact, preference and note "
+            f"entries can be {verb}. Use the Agent Memory page for it."
+        )
+    return None
 
 class SaveMemoryTool(BaseTool):
     """Save a fact, preference, or note to long-term memory."""
@@ -22,12 +39,15 @@ class SaveMemoryTool(BaseTool):
     destructive = False
     description = (
         "Store one fact, preference or standing instruction in Guaardvark's long-term memory; returns "
-        "'Successfully saved to long-term memory (ID: <id>).' Guaardvark's chat recalls relevant "
-        "entries into its prompts: facts as ground truth, notes as rules, preferences as defaults. Use "
-        "it when the user tells you about themselves, their projects or how they want you to behave; "
-        "run search_memory first to avoid duplicates. Each call adds a new entry (nothing is merged); "
-        "over MCP the entry is visible to every project and session. Entries are edited or deleted on "
-        "the Agent Memory page, not with this tool. Needs the Guaardvark backend running."
+        "'Successfully saved to long-term memory (ID: <id>).', or 'Already saved in long-term memory "
+        "(ID: <id>, <type>); nothing new was stored.' when the same text, ignoring case, spacing and "
+        "trailing punctuation, is already saved where this entry would be recalled. Guaardvark's chat "
+        "recalls relevant entries into its prompts: facts as ground truth, notes as rules, preferences "
+        "as defaults. Use it when the user tells you about themselves, their projects or how they want "
+        "you to behave; run search_memory first, since a reworded copy is stored as a new entry "
+        "(nothing is merged). From a project chat the entry stays in that project; over MCP it is visible "
+        "to every project and session. To correct a saved entry use update_memory; to remove one, "
+        "delete_memory. Needs the Guaardvark backend running."
     )
     is_dangerous = False
     requires_approval = False
@@ -97,12 +117,9 @@ class SaveMemoryTool(BaseTool):
             if memory is None:
                 return ToolResult(success=False, error="Memory was rejected or could not be saved.")
 
-            logger.info(f"Agent saved memory {memory.id}: {content[:50]}...")
-            return ToolResult(
-                success=True,
-                output=f"Successfully saved to long-term memory (ID: {memory.id}).",
-                metadata={"id": memory.id, "content": memory.content, "type": memory.type}
-            )
+            if not memory.already_saved:
+                logger.info(f"Agent saved memory {memory.id}: {content[:50]}...")
+            return _saved_result(memory.id, memory.content, memory.type, memory.already_saved)
         except Exception as e:
             try:
                 db.session.rollback()
@@ -131,11 +148,25 @@ class SaveMemoryTool(BaseTool):
         memory = (body or {}).get("memory") or {}
         if not memory.get("id"):
             return ToolResult(success=False, error="Memory was not saved: the backend returned no memory id.")
-        return ToolResult(
-            success=True,
-            output=f"Successfully saved to long-term memory (ID: {memory['id']}).",
-            metadata={"id": memory["id"], "content": memory.get("content"), "type": memory.get("type")},
+        return _saved_result(
+            memory["id"], memory.get("content"), memory.get("type"), bool((body or {}).get("already_saved")),
         )
+
+
+def _saved_result(memory_id, content, memory_type, already_saved: bool) -> ToolResult:
+    """save_memory's answer: a new entry, or the entry that already held the text."""
+    if already_saved:
+        output = (
+            f"Already saved in long-term memory (ID: {memory_id}, {memory_type}); "
+            "nothing new was stored."
+        )
+    else:
+        output = f"Successfully saved to long-term memory (ID: {memory_id})."
+    return ToolResult(
+        success=True,
+        output=output,
+        metadata={"id": memory_id, "content": content, "type": memory_type, "already_saved": already_saved},
+    )
 
 
 class SearchMemoryTool(BaseTool):
@@ -224,26 +255,147 @@ class SearchMemoryTool(BaseTool):
             return ToolResult(success=False, error=f"Database error: {str(e)}")
 
 
-class DeleteMemoryTool(BaseTool):
-    """Delete a memory by ID."""
-    
-    name = "delete_memory"
-    description = "Delete a specific memory by its ID. Use this if a user tells you to forget something."
-    is_dangerous = True
+class UpdateMemoryTool(BaseTool):
+    """Change a saved memory in place."""
+
+    name = "update_memory"
+    read_only = False
+    destructive = True
+    idempotent = True
+    description = (
+        "Change one saved entry in Guaardvark's long-term memory in place, by the ID search_memory "
+        "prints: its text, its type, its tags or its importance. Fields left out keep their values; "
+        "the old version is kept in the entry's audit history. Returns 'Updated memory <id> (<type>): "
+        "<content>'. Use it when the user corrects or refines something saved earlier, so the old and "
+        "new versions are not both recalled; to add an entry use save_memory, to remove one "
+        "delete_memory. Over MCP only fact, preference and note entries can be changed; lessons, "
+        "snippets and the observations Guaardvark records itself are edited on the Agent Memory page. "
+        "In Guaardvark's own chat the user approves each change first. An unknown ID, or a call that "
+        "changes nothing, is an error. Needs the Guaardvark backend running."
+    )
+    is_dangerous = False
     requires_approval = True
-    
+
     parameters = {
         "memory_id": ToolParameter(
             name="memory_id",
             type="string",
-            description="The ID of the memory to delete (obtained from search_memory).",
+            description="The entry's ID as search_memory prints it after 'ID:', e.g. 'd810bf6d7946'.",
+            required=True,
+        ),
+        "content": ToolParameter(
+            name="content",
+            type="string",
+            description="New text for the entry, replacing the old text whole: one self-contained statement, e.g. 'Prefers metric units'.",
+            required=False,
+        ),
+        "type": ToolParameter(
+            name="type",
+            type="string",
+            enum=list(USER_MEMORY_TYPES),
+            description="New type: 'fact' (recalled as ground truth), 'preference' (a default the user can override) or 'note' (a standing instruction).",
+            required=False,
+        ),
+        "tags": ToolParameter(
+            name="tags",
+            type="list",
+            items="string",
+            description="New keywords, replacing the old ones whole, e.g. ['python', 'formatting']; [] clears them.",
+            required=False,
+        ),
+        "importance": ToolParameter(
+            name="importance",
+            type="float",
+            minimum=0.0,
+            maximum=1.0,
+            description="New importance, 0.0-1.0: how strongly Guaardvark's chat ranks the entry when recalling.",
+            required=False,
+        ),
+    }
+
+    def execute(self, **kwargs) -> ToolResult:
+        memory_id = str(kwargs.get("memory_id") or "").strip()
+        if not memory_id:
+            return ToolResult(success=False, error="memory_id is required.")
+        changes: Dict[str, Any] = {}
+        if kwargs.get("content") is not None:
+            changes["content"] = kwargs["content"]
+        if kwargs.get("type"):
+            changes["type"] = normalize_memory_type(kwargs["type"])
+            if changes["type"] not in USER_MEMORY_TYPES:
+                return ToolResult(success=False, error="type must be 'fact', 'preference' or 'note'.")
+        if kwargs.get("tags") is not None:
+            changes["tags"] = kwargs["tags"]
+        if kwargs.get("importance") is not None:
+            changes["importance"] = kwargs["importance"]
+        if not changes:
+            return ToolResult(success=False, error="Nothing to change: pass content, type, tags or importance.")
+
+        if is_mcp_transport(self):
+            return run_tool_in_backend(self.name, {"memory_id": memory_id, **changes})
+
+        try:
+            memory = db.session.query(AgentMemory).filter_by(id=memory_id).first()
+            if not memory:
+                return ToolResult(success=False, error=f"Memory with ID '{memory_id}' not found.")
+            refusal = _mcp_refusal(self, memory, "changed")
+            if refusal:
+                return ToolResult(success=False, error=refusal)
+            memory = update_memory_entry(memory_id, changes, actor="agent")
+        except MemoryNotFound:
+            return ToolResult(success=False, error=f"Memory with ID '{memory_id}' not found.")
+        except ValueError as e:
+            db.session.rollback()
+            return ToolResult(success=False, error=f"Memory {memory_id} was not changed: {e}")
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Failed to update memory {memory_id}: {e}")
+            return ToolResult(success=False, error=f"Database error: {str(e)}")
+
+        return ToolResult(
+            success=True,
+            output=f"Updated memory {memory.id} ({memory.type}): {memory.content}",
+            metadata={"memory": memory.to_dict(), "changed": sorted(changes)},
+        )
+
+
+class DeleteMemoryTool(BaseTool):
+    """Delete a memory by ID."""
+
+    name = "delete_memory"
+    read_only = False
+    destructive = True
+    idempotent = False
+    description = (
+        "Delete one entry from Guaardvark's long-term memory by the ID search_memory prints, for when "
+        "the user asks you to forget something. The entry stops being recalled at once and these "
+        "tools cannot bring it back; a copy stays in the memory audit history. Returns "
+        "\"Successfully deleted memory: '<content>'\". An unknown ID is an error. Over MCP only fact, "
+        "preference and note entries can be deleted; lessons, snippets and the observations "
+        "Guaardvark records itself are managed on the Agent Memory page. In Guaardvark's own chat the "
+        "user approves each deletion first. To correct an entry instead of removing it use "
+        "update_memory. Needs the Guaardvark backend running."
+    )
+    is_dangerous = True
+    requires_approval = True
+
+    parameters = {
+        "memory_id": ToolParameter(
+            name="memory_id",
+            type="string",
+            description="The entry's ID as search_memory prints it after 'ID:', e.g. 'd810bf6d7946'.",
             required=True
         )
     }
 
     def execute(self, **kwargs) -> ToolResult:
-        memory_id = kwargs.get("memory_id")
-        
+        memory_id = str(kwargs.get("memory_id") or "").strip()
+        if not memory_id:
+            return ToolResult(success=False, error="memory_id is required.")
+
+        if is_mcp_transport(self):
+            return run_tool_in_backend(self.name, {"memory_id": memory_id})
+
         try:
             memory = db.session.query(AgentMemory).filter_by(id=memory_id).first()
             if not memory:
@@ -251,7 +403,10 @@ class DeleteMemoryTool(BaseTool):
                     success=False,
                     error=f"Memory with ID '{memory_id}' not found."
                 )
-                
+            refusal = _mcp_refusal(self, memory, "deleted")
+            if refusal:
+                return ToolResult(success=False, error=refusal)
+
             content = memory.content
             before = memory.to_dict()
             db.session.delete(memory)
@@ -262,7 +417,7 @@ class DeleteMemoryTool(BaseTool):
                 before=before,
             ))
             db.session.commit()
-            
+
             logger.info(f"Agent deleted memory {memory_id}")
             return ToolResult(
                 success=True,

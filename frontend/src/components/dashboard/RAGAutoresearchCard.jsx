@@ -149,9 +149,11 @@ const RAGAutoresearchCard = React.forwardRef(
               </Tooltip>
             ) : (
               <Tooltip title="Start bounded research run">
-                <IconButton size="small" onClick={handleStart} disabled={loading}>
-                  <PlayIcon sx={{ fontSize: 16 }} />
-                </IconButton>
+                <span>
+                  <IconButton size="small" onClick={handleStart} disabled={loading}>
+                    <PlayIcon sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </span>
               </Tooltip>
             )}
           </Box>

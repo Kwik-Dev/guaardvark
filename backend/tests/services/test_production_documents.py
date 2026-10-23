@@ -139,6 +139,7 @@ def test_separate_categories_get_separate_folders(app, tmp_path):
     assert d_story.folder_id != d_clip.folder_id
 
 
+
 def test_output_resolves_and_outlives_the_render_temp_dir(app, tmp_path):
     """The reason ``path`` is relative: production renders land in an absolute
     temp directory (tempfile.mkdtemp), which the resolver cannot serve and the
@@ -163,3 +164,26 @@ def test_output_resolves_and_outlives_the_render_temp_dir(app, tmp_path):
     resolved = resolve_document_path(doc)
     assert resolved is not None, "output stopped resolving once the temp dir was reclaimed"
     assert resolved.read_bytes() == b"mp4 bytes"
+
+
+def test_registered_output_is_not_marked_as_indexing(app, tmp_path):
+    """Registration queues nothing, so the row must not claim indexing is
+    under way (the Files page showed an orange "Indexing..." dot forever)."""
+    prod = _setup_production(project_id=None)
+    f = tmp_path / "shot_9.png"
+    f.write_bytes(b"png")
+
+    doc = register_production_output(production=prod, file_path=str(f), category="storyboard")
+
+    assert doc.index_status == "NOT_INDEXED"
+
+
+def test_document_row_defaults_to_not_indexed(app):
+    """A Document saved without a status is NOT_INDEXED; INDEXING and PENDING
+    are set by the paths that queue a task."""
+    doc = Document(filename="plain.bin", path="plain.bin")
+    db.session.add(doc)
+    db.session.commit()
+
+    assert db.session.get(Document, doc.id).index_status == "NOT_INDEXED"
+

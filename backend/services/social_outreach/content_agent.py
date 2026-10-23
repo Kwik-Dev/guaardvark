@@ -11,12 +11,9 @@ Self-contained: reads everything from the candidate row's draft_text JSON
 payload (which Recon populates with title, selftext_preview, top_comments,
 feature_hint). No live Reddit fetch — that was Recon's job.
 
-Doesn't post. Doesn't call the servo. The servo path is Phase 3 (Outreach),
-which already exists in tick_process_approved_drafts. When unsupervised
-(kill on, not supervised, grade ≥ MIN_GRADE, cadence OK, independent check
-ran and passed), Content promotes straight to ``approved`` — same would_post
-gate as /draft-comment — so YouTube chain-draft matches Reddit unsupervised
-behavior.
+Doesn't post. Doesn't call the servo, and never approves: every draft it
+writes waits as ``drafted`` for a person, who approves it and then starts
+the post (watched_post).
 """
 
 from __future__ import annotations
@@ -25,17 +22,17 @@ import json
 import logging
 from typing import Optional
 
-from backend.services.social_outreach import audit, external_grader, gates, persona
+from backend.services.social_outreach import audit, external_grader, gates, persona, profile
 
 logger = logging.getLogger(__name__)
 
 
 MIN_GRADE = 0.7
-"""Drafts below this self-grade get rejected. Matches the threshold the existing
-draft-comment endpoint uses for the would_post gate so we stay consistent."""
+"""Drafts below this self-grade get rejected. Matches the grade_ok threshold
+the draft-comment endpoint reports so we stay consistent."""
 
 MIN_REPLY_GRADE = 0.6
-"""Looser threshold for replies on Guaardvark's own videos — the rubric in
+"""Looser threshold for replies on the account's own videos — the rubric in
 REPLY_TO_OWN_VIDEO_SYSTEM_BLOCK is different (we're not asking "would a
 stranger flag this as promo?", we're asking "is this a real engagement?"),
 so 0.6+ posts there. Set just below MIN_GRADE rather than equal to it to
@@ -85,6 +82,18 @@ def _build_thread_context(payload: dict) -> str:
         f"TITLE: {title}\n\n"
         f"OP BODY:\n{selftext}\n\n"
         f"TOP COMMENTS:\n" + "\n---\n".join(comments[:5])
+    )
+
+
+def _build_reply_context(payload: dict) -> str:
+    """What the grader reads for a reply on the account's own video: the video
+    title, our earlier comment and the viewer's reply to it."""
+    title = payload.get("title") or "(not recorded)"
+    author = payload.get("incoming_author") or "a viewer"
+    return (
+        f"VIDEO TITLE: {title}\n\n"
+        f"OUR EARLIER COMMENT:\n{payload.get('parent_text', '')}\n\n"
+        f"THEIR REPLY ({author}):\n{payload.get('incoming_text', '')}"
     )
 
 
@@ -154,16 +163,16 @@ class ContentAgent:
                         or "(unspecified)",
                         "link_url": payload.get("link_url")
                         or payload.get("share_link")
-                        or persona.SITE_URL,
+                        or profile.site_url(),
                     },
                     mode="share",
                     feature_hint=feature_hint,
                 )
             else:
                 thread_context = _build_thread_context(payload)
-                # YouTube outbound comments market the GitHub repo on relevant
-                # videos (Ollama, ComfyUI, voice, coding agents, …). Reddit
-                # comments stay soft-mention unless a caller opts in.
+                # YouTube outbound comments carry the profile's repo (or site)
+                # link on relevant videos. Reddit comments stay soft-mention
+                # unless a caller opts in.
                 is_youtube = (row.platform or "").strip().lower() == "youtube"
                 result = persona.draft_outreach_text(
                     platform=row.platform,
@@ -171,7 +180,7 @@ class ContentAgent:
                     mode="comment",
                     feature_hint=feature_hint,
                     include_link=is_youtube,
-                    link_url=persona.GITHUB_URL if is_youtube else None,
+                    link_url=profile.cta_url("youtube") if is_youtube else None,
                 )
         except Exception as e:
             logger.warning("ContentAgent.draft_candidate %s: persona call raised: %s", audit_id, e)
@@ -182,7 +191,10 @@ class ContentAgent:
         grade = float(result.get("grade") or 0.0)
 
         if not draft_text:
-            audit.mark_rejected(audit_id, "empty draft from LLM")
+            # The persona says why when it made no draft at all (nothing to
+            # promote, no link to give); otherwise the model declined.
+            why = (result.get("reason") or "").strip() if grade == 0.0 else ""
+            audit.mark_rejected(audit_id, f"empty draft: {why}" if why else "empty draft from LLM")
             return {"status": "rejected", "grade": grade, "reason": "empty_draft"}
 
         grade_threshold = MIN_REPLY_GRADE if row.action == "reply" else MIN_GRADE
@@ -190,27 +202,26 @@ class ContentAgent:
             audit.mark_rejected(audit_id, f"grade_too_low:{grade:.2f}")
             return {"status": "rejected", "grade": grade, "reason": "grade_too_low"}
 
-        # Reply path skips the external grader entirely — its rubric was
-        # tuned for outreach comments ("would a stranger flag this as
-        # promotional?"), which scores replies-to-fans as low even when
-        # the reply is good. We keep the self-grade threshold (MIN_REPLY_GRADE).
-        # With no independent check, an unsupervised reply waits for approval
-        # (gates.independent_ok) rather than posting on its self-grade.
-        # A share has no thread for the rubric at all; gates holds every share.
-        if row.action == "reply":
-            ext = {"checked": False, "skipped": True, "reason": "skip_for_reply_action"}
-        elif row.action == "share":
+        # A share has no thread for the rubric at all. A reply on the
+        # account's own video answers one viewer, so it is asked only whether
+        # it answers them and whether the tone fits (the "reply" rubric), not
+        # whether it engages a thread.
+        if row.action == "share":
             ext = {"checked": False, "skipped": True, "reason": "share_not_graded"}
+        elif row.action == "reply":
+            ext = external_grader.grade_draft_externally(
+                draft_text, _build_reply_context(payload), kind="reply",
+            )
         else:
             # Second-opinion grade — different model family, rubric-based,
             # blind to the self-grade. Drafter is biased toward its own
             # output; this catches generic, off-tone, or oversold comments
             # that the writer rated highly. If the grader is unavailable the
-            # draft is not rejected; the would_post gate below decides
-            # whether it may still post.
+            # draft is not rejected; the person reviewing it sees that.
             ext = external_grader.grade_draft_externally(draft_text, thread_context)
         if gates.independent_check_label(ext) == "failed":
-            missed = ",".join(q for q in external_grader.RUBRIC_QUESTIONS if not ext.get(q))
+            asked = ext.get("questions") or external_grader.RUBRIC_QUESTIONS
+            missed = ",".join(q for q in asked if not ext.get(q))
             reason = f"external_check_failed:{missed or 'not_passed'} ({ext.get('reason', '')[:120]})"
             audit.mark_rejected(audit_id, reason)
             return {
@@ -220,7 +231,7 @@ class ContentAgent:
                 "external": ext,
             }
 
-        # UTM-tag any guaardvark.com links the LLM wrote, same as the
+        # UTM-tag any links to the profile's own hosts, same as the
         # existing /draft-comment endpoint does. Tagging at the draft
         # boundary catches every URL — including ones the user may later
         # edit into the draft via the UI. (For replies this is a no-op
@@ -254,35 +265,17 @@ class ContentAgent:
                 "incoming_author": payload.get("incoming_author", ""),
             })
 
-        # Store posted_text alongside the draft so the Outreach agent
-        # doesn't have to re-tag at servo time. Goes through the audit
-        # helper (detached session) so we don't accidentally flush other
-        # caller-pending mutations under celery.
-        #
-        # Unsupervised parity with /draft-comment: when enabled, not
-        # supervised, grade ≥ MIN_GRADE, cadence allows, and the independent
-        # check ran and passed → approved so tick_process_approved_drafts can
-        # post without a human click. An unchecked draft is held as drafted,
-        # and so is one whose thread recon could not put to the thread-fit
-        # judge (relevance_skipped in the candidate payload).
-        from backend.services.social_outreach import kill_switch
-        enabled = kill_switch.is_enabled()
-        supervised = kill_switch.is_supervised()
-        cadence_ok, cadence_reason = kill_switch.cadence_allows_post(row.platform)
+        # Store posted_text alongside the draft so the poster doesn't have to
+        # re-tag at servo time. Goes through the audit helper (detached
+        # session) so we don't accidentally flush other caller-pending
+        # mutations under celery. The draft waits for a person whatever the
+        # grades say; a thread recon could not put to the thread-fit judge is
+        # noted for them (relevance_skipped in the candidate payload).
         relevance_unchecked = bool(payload.get("relevance_skipped"))
         independent_pass, independent_reason = gates.independent_ok(
-            ext, supervised=supervised, action=row.action,
-            relevance_unchecked=relevance_unchecked,
+            ext, action=row.action, relevance_unchecked=relevance_unchecked,
         )
-        would_post = (
-            enabled
-            and not supervised
-            and cadence_ok
-            and grade >= MIN_GRADE
-            and bool((draft_text or "").strip())
-            and independent_pass
-        )
-        promote_status = "approved" if would_post else "drafted"
+        promote_status = "drafted"
         hold_reason = None if independent_pass else independent_reason
 
         promoted = audit.mark_drafted_from_candidate(
@@ -318,10 +311,12 @@ class ContentAgent:
                 "external_checked": bool(ext.get("checked")),
                 "external_skipped": ext.get("skipped", False),
                 "external_reason": ext.get("reason", ""),
+                "external_model": ext.get("model"),
+                "drafter_model": ext.get("drafter_model"),
+                "external_independent": ext.get("independent"),
                 "relevance_unchecked": relevance_unchecked,
+                "independent_reason": independent_reason,
                 "promoted_status": promote_status,
-                "would_post": would_post,
-                "cadence_block": cadence_reason if not cadence_ok else None,
                 "hold_reason": hold_reason,
             },
         )
@@ -331,7 +326,7 @@ class ContentAgent:
             "grade": grade,
             "reason": None,
             "external": ext,
-            "would_post": would_post,
+            "independent_reason": independent_reason,
             "hold_reason": hold_reason,
         }
 

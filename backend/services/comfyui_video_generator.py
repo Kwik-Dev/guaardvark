@@ -133,6 +133,101 @@ def _looks_like_blank_video(video_path) -> Optional[str]:
         return None
 
 
+def reference_count_error(limits: dict, entry_name: str, images: list, videos: list,
+                          audios: list) -> Optional[str]:
+    """One sentence when a reference request breaks the model's ref_limits,
+    else None. Videos are ``{"path", "audio_path"?, "include_audio"?}``; a
+    separate soundtrack counts as a file of its own."""
+    if not images and not videos:
+        return (f"{entry_name} needs at least one reference image or clip; audio "
+                f"cannot be the only reference.")
+    for kind, items, key in (("image", images, "images"), ("clip", videos, "videos"), ("audio", audios, "audios")):
+        cap = (limits or {}).get(key)
+        if cap is not None and len(items) > cap:
+            return f"{entry_name} takes at most {cap} reference {kind}s; {len(items)} given."
+    total = len(images) + len(videos) + len(audios) + sum(
+        1 for v in videos if isinstance(v, dict) and v.get("audio_path")
+    )
+    files = (limits or {}).get("files")
+    if files and total > files:
+        return f"{entry_name} takes at most {files} reference files; {total} given."
+    return None
+
+
+def _h3_latent_frames(frames: int) -> int:
+    """Latent frames H3 gives ``frames`` video frames: the count snaps up to
+    the 17k+5 grid, and each 17 frames become 5 latent ones (the node's
+    temporal_shape)."""
+    n = max(5, int(frames or 0))
+    n += (5 - n % 17) % 17
+    return 2 if n <= 5 else ((n - 5) // 17) * 5 + 2
+
+
+def _h3_grid_floor(frames: float) -> int:
+    """The longest 17k+5 frame count not over ``frames``: what the reference
+    node reads of a clip that long."""
+    n = max(5, int(frames))
+    return ((n - 5) // 17) * 17 + 5
+
+
+def reference_clip_frames(budget: Optional[int], render_frames: int, width: int, height: int,
+                          pictures: int, clips: int) -> Optional[int]:
+    """Frames of reference video each clip may add on a card whose board has a
+    measured token budget (tier_defaults ref_token_budget). Clips and pictures
+    are read at the render's pixel area, so every latent frame costs
+    (width/16)*(height/16) tokens; the render's latent frames and one per
+    picture come first and the clips share the rest, on the 17k+5 grid. None
+    when no budget is declared or no clip is on the board; 0 when nothing is
+    left."""
+    if not budget or not clips:
+        return None
+    patches = max(1, (int(width) // 16) * (int(height) // 16))
+    room = (int(budget) // patches - _h3_latent_frames(render_frames) - int(pictures)) // int(clips)
+    if room < 2:
+        return 0
+    return ((room - 2) // 5) * 17 + 5
+
+
+def _media_seconds(path) -> Optional[float]:
+    """Seconds of the media at ``path``, or None when ffprobe cannot tell."""
+    from backend.services.connections.media import probe_duration
+    return probe_duration(str(path)) if path else None
+
+
+def _media_dims(path) -> Optional[tuple]:
+    """(width, height) of the first video stream at ``path``, or None."""
+    if not path:
+        return None
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        w, h = (int(v) for v in out.stdout.strip().split(",")[:2])
+        return (w, h) if w > 0 and h > 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _media_has_audio(path) -> Optional[bool]:
+    """True when ``path`` has an audio stream, False when it has none, None
+    when ffprobe is missing or cannot read the file."""
+    if not path:
+        return None
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return bool(out.stdout.strip())
+
+
 @dataclass
 class VideoGenerationRequest:
     prompt: str = ""
@@ -159,6 +254,8 @@ class VideoGenerationRequest:
     enhance_prompt: bool = True       # Whether to run prompt through the enhancer
     fidelity_mode: bool = False       # Light enhancement only (Exact text / preserve fidelity mode)
     wan_sampler_profile: Optional[str] = None  # Wan 5B: "adaptive" | "official" (see WAN5B_SAMPLER_PROFILES)
+    # Deprecated, ignored: FreeU patches UNet skip connections and every routed
+    # model is a transformer. Kept so older callers passing freeu= still construct.
     freeu: bool = False
     face_restore: bool = False
     lora_name: Optional[str] = None
@@ -356,6 +453,41 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         return str(out)
 
 
+    def _prepare_reference_clip(self, path: str, width: int, height: int, max_s: Optional[float] = None) -> str:
+        """Return the clip as the reference graph should read it: no larger than
+        the render's pixel area and no longer than ``max_s``. The node reads a
+        clip at its own size up to a 768x1344 canvas, and every frame of it
+        rides through every sampling step beside the clip being rendered, so a
+        1080p clip costs about 2.5 times the memory of a 480p one. Pictures get
+        the same treatment from the node's "match" sizing. Returns the original
+        path when the clip is inside both limits or cannot be read."""
+        dims = _media_dims(path)
+        seconds = _media_seconds(path)
+        area = int(width or 0) * int(height or 0)
+        size = None
+        if dims and area and dims[0] * dims[1] > area:
+            k = (area / (dims[0] * dims[1])) ** 0.5
+            size = (max(32, int(dims[0] * k) // 32 * 32), max(32, int(dims[1] * k) // 32 * 32))
+        cut = max_s if (max_s and seconds is not None and seconds > max_s + 0.01) else None
+        if not size and not cut:
+            return path
+        base = Path(getattr(self, "cache_dir", None) or Path(tempfile.gettempdir())) / "h3_refs"
+        base.mkdir(parents=True, exist_ok=True)
+        out = base / f"{uuid.uuid4().hex}.mp4"
+        cmd = ["ffmpeg", "-y", "-i", str(path)]
+        if cut:
+            cmd += ["-t", f"{cut:.3f}"]
+        if size:
+            cmd += ["-vf", f"scale={size[0]}:{size[1]}:flags=lanczos"]
+        cmd += ["-c:v", "libx264", "-crf", "16", "-preset", "fast", "-c:a", "aac", str(out)]
+        proc = subprocess.run(cmd, capture_output=True, timeout=300)
+        if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+            tail = (proc.stderr or b"").decode(errors="replace").strip().splitlines()[-1:] or [""]
+            raise RuntimeError(f"ffmpeg could not prepare the reference clip: {tail[0]}")
+        logger.info("Reference clip %s prepared at %s%s", Path(path).name,
+                    f"{size[0]}x{size[1]}" if size else "its own size", f", first {cut:g} s" if cut else "")
+        return str(out)
+
     # ── CogVideoX model mapping ──────────────────────────────────────────────
 
     # cogvideox-5b is a diffusers snapshot the registry installs under
@@ -371,8 +503,6 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
     }
     # Single-file CogVideoX loader map — DERIVED from the registry like Wan/LTX.
     COGVIDEOX_I2V_FILES = _cogvideox_comfyui_map()
-    # Both wrapper loaders emit COGVIDEOMODEL; the FreeU/LoRA hooks below key on them.
-    _COG_MODEL_LOADER_NODES = ("DownloadAndLoadCogVideoModel", "CogVideoXModelLoader")
 
     # ── Wan 2.2 model mapping ────────────────────────────────────────────────
     # DERIVED from the shared registry (backend/services/video_model_registry.py)
@@ -610,7 +740,17 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         from backend.services.user_video_models import DEFAULT_ADAPTER_STRENGTH
 
         out = []
-        for raw in request.adapters or []:
+        raws = list(request.adapters or [])
+        # A legacy lora_name rides the adapter path when it names a catalog LoRA
+        # made for this model. Anything else (an SDXL cast LoRA the film pipeline
+        # threads through, a stray file name) is left out and logged after the
+        # graph is built: applying a LoRA trained on another base breaks the render.
+        legacy_id = self._lora_name_adapter_id(getattr(request, "lora_name", None), model_key)
+        if legacy_id and not any(
+            (r if isinstance(r, str) else (r or {}).get("id")) == legacy_id for r in raws
+        ):
+            raws.append({"id": legacy_id, "strength": getattr(request, "lora_strength", None)})
+        for raw in raws:
             if isinstance(raw, str):
                 aid, strength = raw, None
             elif isinstance(raw, dict):
@@ -649,6 +789,26 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                 ),
             })
         return out, None
+
+    @staticmethod
+    def _lora_name_adapter_id(lora_name: Optional[str], model_key: str) -> Optional[str]:
+        """The catalog id of the LoRA a legacy ``lora_name`` names (by id or by
+        file name), when it is an adapter for ``model_key``; None otherwise."""
+        name = (lora_name or "").strip()
+        if not name:
+            return None
+        from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY, speed_profile_loras
+        owned = speed_profile_loras(model_key)
+        base = os.path.basename(name)
+        for aid, entry in VIDEO_MODEL_REGISTRY.items():
+            if entry.get("type") != "lora" or entry.get("adapter") is False or aid in owned:
+                continue
+            if model_key not in (entry.get("applies_to") or []):
+                continue
+            files = {os.path.basename(f.get("dst") or "") for f in entry.get("files") or []}
+            if name == aid or base in files:
+                return aid
+        return None
 
     def _resolve_minimax_common(self, request: VideoGenerationRequest, model_key: str, caps: dict, entry_name: str) -> tuple:
         """Speed profile, LoRA, step count and prompt for either H3 build.
@@ -725,20 +885,9 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                 f"{entry_name} takes references, not first/last frames or guides; "
                 f"pick MiniMax H3 (Int8) for those."
             )
-        if not images and not videos:
-            return None, (
-                f"{entry_name} needs at least one reference image or clip; audio "
-                f"cannot be the only reference."
-            )
-        for kind, items, key in (("image", images, "images"), ("clip", videos, "videos"), ("audio", audios, "audios")):
-            cap = limits.get(key)
-            if cap is not None and len(items) > cap:
-                return None, f"{entry_name} takes at most {cap} reference {kind}s; {len(items)} given."
-        total = len(images) + len(videos) + len(audios) + sum(
-            1 for v in videos if isinstance((v or {}).get("audio"), str) and v.get("audio")
-        )
-        if limits.get("files") and total > limits["files"]:
-            return None, f"{entry_name} takes at most {limits['files']} reference files; {total} given."
+        count_err = reference_count_error(limits, entry_name, images, videos, audios)
+        if count_err:
+            return None, count_err
 
         common, err = self._resolve_minimax_common(request, model_key, caps, entry_name)
         if err:
@@ -764,9 +913,51 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                 return None, err
             image_names.append(name)
         video_specs = []
+        shortest, longest = (list(limits.get("video_seconds") or []) + [None, None])[:2]
+        # On a card with a measured board budget, clips share what the render
+        # and the pictures leave (tier_defaults ref_token_budget). A board of
+        # pictures alone costs one latent frame each, about what the base build
+        # costs at the same length, so the budget applies only with clips.
+        from backend.services.video_model_registry import tier_defaults_for
+        tier = tier_defaults_for(model_key)
+        budget = tier.get("ref_token_budget") if videos else None
+        fps = float(request.fps or 24)
+        render_s = request.duration_frames / fps
+        if budget:
+            patches = max(1, (int(request.width) // 16) * (int(request.height) // 16))
+            room = budget // patches - _h3_latent_frames(request.duration_frames)
+            if len(images) > room:
+                return None, (
+                    f"On a {tier.get('tier')} GB card a {render_s:.0f} s {entry_name} clip at "
+                    f"{request.width}x{request.height} with a reference clip takes at most {max(0, room)} "
+                    f"reference pictures; use fewer pictures, a shorter length or a smaller size."
+                )
+        per_clip = reference_clip_frames(budget, request.duration_frames, request.width, request.height,
+                                         len(images), len(videos))
+        if per_clip is not None and shortest and per_clip < _h3_grid_floor(shortest * fps):
+            return None, (
+                f"On a {tier.get('tier')} GB card a {render_s:.0f} s {entry_name} clip at "
+                f"{request.width}x{request.height} leaves {per_clip / fps:.1f} s of reference video per "
+                f"clip, under the {shortest:g} s a clip needs; choose a shorter length or a smaller size, "
+                f"or use fewer clips or pictures."
+            )
+        read_s = min(x for x in (longest, per_clip and per_clip / fps) if x) if (longest or per_clip) else None
         for video in videos:
             video = video if isinstance(video, dict) else {"path": video}
-            name, err = _upload(video.get("path"), "clip")
+            seconds = _media_seconds(video.get("path"))
+            if seconds is not None and shortest and seconds < shortest:
+                return None, (
+                    f"{entry_name} needs reference clips of at least {shortest:g} s; "
+                    f"{Path(video.get('path') or '').name} is {seconds:.1f} s."
+                )
+            if seconds is not None and read_s and seconds > read_s:
+                logger.info("Reference clip %s is %.1f s; the model reads its first %.2g s",
+                            video.get("path"), seconds, read_s)
+            try:
+                clip_path = self._prepare_reference_clip(video.get("path"), request.width, request.height, read_s)
+            except Exception as e:  # noqa: BLE001 — the message is the diagnosis
+                return None, str(e)
+            name, err = _upload(clip_path, "clip")
             if err:
                 return None, err
             audio = video.get("audio_path")
@@ -775,7 +966,9 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                 if err:
                     return None, err
             else:
-                audio = bool(video.get("include_audio", True))
+                # The loader's audio output fails on a clip with no sound, so a
+                # silent clip goes in without a soundtrack whatever was asked.
+                audio = bool(video.get("include_audio", True)) and _media_has_audio(video.get("path")) is not False
             video_specs.append({"filename": name, "audio": audio})
         audio_names = []
         for path in audios:
@@ -1042,7 +1235,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
             logger.debug("ComfyUI queue probe failed: %s", e)
             return None
 
-    def _ensure_comfyui_reserve_for(self, model: str) -> Optional[str]:
+    def _ensure_comfyui_reserve_for(self, model: str, with_clips: bool = False) -> Optional[str]:
         """Relaunch ComfyUI when its --reserve-vram is not the one this model needs.
 
         The reserve is declared per model in the registry
@@ -1062,7 +1255,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
         except Exception as e:  # noqa: BLE001
             logger.debug("reserve helpers unavailable: %s", e)
             return None
-        needed = comfyui_reserve_vram_gb_for_model(model)
+        needed = comfyui_reserve_vram_gb_for_model(model, with_clips=with_clips)
         if needed is None:
             return None
         if explicit_reserve_vram_gb(launch_env(self._project_root)) is not None:
@@ -1896,9 +2089,12 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
             image_path = request.metadata.get("image_path") if request.metadata else None
             model = request.model or "cogvideox-5b"
             seed = request.seed if request.seed is not None else int(time.time() * 1000) % (2**31)
+            # The seed this clip renders with, so the Studio can reuse a take.
+            result.metadata["seed"] = seed
 
-            # The running ComfyUI must carry this model's --reserve-vram.
-            reserve_error = self._ensure_comfyui_reserve_for(model)
+            # The running ComfyUI must carry this model's --reserve-vram (a
+            # reference board with clips may declare its own).
+            reserve_error = self._ensure_comfyui_reserve_for(model, with_clips=bool(request.ref_videos))
             if reserve_error:
                 return result.fail(RenderErrorKind.COMFYUI_DOWN, reserve_error)
 
@@ -2016,6 +2212,16 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                     uploaded_image = self._upload_image_to_comfyui(image_path)
                     if not uploaded_image:
                         return result.fail(RenderErrorKind.INVALID_REQUEST, self._upload_failure("image"))
+                    end_image = None
+                    if request.last_frame_path:
+                        if "flf2v" not in (render_limits.limits_for(model_key, family).get("modes") or []):
+                            return result.fail(RenderErrorKind.INVALID_REQUEST, f"{model_key} takes no end frame.")
+                        if not Path(request.last_frame_path).exists():
+                            return result.fail(RenderErrorKind.INVALID_REQUEST,
+                                               f"End frame not found: {request.last_frame_path}")
+                        end_image = self._upload_image_to_comfyui(request.last_frame_path)
+                        if not end_image:
+                            return result.fail(RenderErrorKind.INVALID_REQUEST, self._upload_failure("end frame"))
                     workflow = self._create_wan22_i2v_workflow(
                         speed_profile=request.speed_profile,
                         image_filename=uploaded_image,
@@ -2037,8 +2243,9 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         shift_override=wan_shift,
                         extra_loras=extra_loras,
                         text_encoder=te_file,
+                        end_image_filename=end_image,
                     )
-                    logger.info(f"Using Wan 2.2 image-to-video ({model_key}) via ComfyUI GGUF")
+                    logger.info(f"Using Wan 2.2 image-to-video ({model_key}{', first+last frame' if end_image else ''}) via ComfyUI GGUF")
                 else:
                     workflow = self._create_wan22_t2v_workflow(
                         speed_profile=request.speed_profile,
@@ -2172,6 +2379,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                         f"(companions auto-pull). Generation never downloads on its own."
                     ))
                 files = self._cogvideox_i2v_files(model)
+                from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY as _reg
                 workflow = self._create_cogvideox_i2v_workflow(
                     image_filename=uploaded_image,
                     prompt=request.prompt,
@@ -2187,6 +2395,7 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                     seed=seed,
                     fps=request.fps,
                     interpolation_multiplier=interpolation,
+                    sequential_cpu_offload=bool((_reg.get(model) or {}).get("sequential_cpu_offload")),
                 )
                 # Add optional TeaCache / FETA nodes for CogVideoX I2V
                 meta = request.metadata or {}
@@ -2354,11 +2563,14 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                     if source_ref:
                         self._add_upscale_node(workflow, source_ref, vhs_node_id)
 
-            # Apply FaceRestore if requested (requires facerestore_cf custom node)
+            # Apply FaceRestore if requested (requires facerestore_cf custom node).
+            # The node downloads its face detector and parser when they are
+            # missing, so CodeFormer counts as ready only with its whole install
+            # plan on disk.
             if request.face_restore:
                 try:
-                    from backend.services.video_model_registry import is_model_installed
-                    model_ready = is_model_installed("codeformer")
+                    from backend.services.video_model_registry import is_plan_installed
+                    model_ready = is_plan_installed("codeformer")
                 except Exception:
                     model_ready = False
                 if (
@@ -2382,83 +2594,30 @@ class ComfyUIVideoGenerator(ComfyUIVideoWorkflowMixin):
                             "face restore."
                         )
                     else:
+                        try:
+                            from backend.services.video_model_registry import missing_plan_files
+                            missing_restore = ", ".join(missing_plan_files("codeformer"))
+                        except Exception:
+                            missing_restore = ""
                         logger.warning(
-                            "Face restore requested but codeformer.pth is not installed. "
-                            "Install CodeFormer from Manage Video Models. Continuing without face restore."
+                            "Face restore requested but CodeFormer is not fully installed%s. "
+                            "Install CodeFormer from Manage Video Models. Continuing without "
+                            "face restore.",
+                            f" (missing {missing_restore})" if missing_restore else "",
                         )
 
-            # Apply FreeU if requested
-            if request.freeu:
-                model_node_id = None
-                for nid, node in workflow.items():
-                    if node.get("class_type") in self._COG_MODEL_LOADER_NODES:
-                        model_node_id = nid
-                        break
-                if model_node_id:
-                    # CogVideoX uses a custom typed model (COGVIDEOMODEL) from the wrapper.
-                    # Generic FreeU_V2 outputs plain MODEL, which causes ComfyUI prompt
-                    # validation to fail with "Return type mismatch ... MODEL vs COGVIDEOMODEL"
-                    # on the CogVideoSampler input. Skip for Cog (Wan never reaches here).
-                    family = self._model_family(model)
-                    if family == "cogvideox":
-                        logger.warning(
-                            "FreeU Enhance requested for CogVideoX model but skipped: "
-                            "incompatible with custom COGVIDEOMODEL typing (would produce "
-                            "invalid prompt for CogVideoSampler). General options like "
-                            "interpolation, upscale, and prompt enhancement still apply. "
-                            "FreeU works on supported Wan paths."
-                        )
-                    else:
-                        freeu_id = self._add_freeu_node(workflow, model_node_id, is_cogvideo=True)
-                        for nid, node in workflow.items():
-                            if node.get("class_type") == "CogVideoSampler":
-                                if node["inputs"].get("model", [None])[0] == model_node_id:
-                                    node["inputs"]["model"] = [freeu_id, 0]
-
-            # Apply Lora if requested. Only the CogVideoX backbone has a LoRA hook
-            # here (DownloadAndLoadCogVideoModel + CLIPLoader → LoraLoader chain).
-            # Wan 2.2's GGUF backbone (UnetLoaderGGUF) has NO matching hook and no
-            # base-matched Wan LoRAs exist, so wiring would be a no-op at best —
-            # be HONEST about the skip instead of silently dropping it. Identity on
-            # the Wan i2v path comes from the init (keyframe) image, not a LoRA.
-            if request.lora_name:
-                model_node_id = None
-                clip_node_id = None
-                for nid, node in workflow.items():
-                    if node.get("class_type") in self._COG_MODEL_LOADER_NODES:
-                        model_node_id = nid
-                    elif node.get("class_type") == "CLIPLoader":
-                        clip_node_id = nid
-                family = self._model_family(model)
-                if family == "cogvideox":
-                    # Same type incompatibility as FreeU: LoraLoader produces generic
-                    # MODEL; CogVideoSampler expects COGVIDEOMODEL from the custom loader.
-                    # This produces the exact "Return type mismatch MODEL vs COGVIDEOMODEL"
-                    # validation error seen in logs. Skip with explanation.
-                    logger.warning(
-                        "LoRA '%s' requested for CogVideoX but not applied: "
-                        "incompatible with custom COGVIDEOMODEL typing used by "
-                        "DownloadAndLoadCogVideoModel + CogVideoSampler (causes prompt "
-                        "validation failure). The option is ignored for Cog models. "
-                        "Use Wan models if LoRA character consistency is needed, or "
-                        "rely on the I2V starting image for identity.",
-                        request.lora_name,
-                    )
-                elif model_node_id and clip_node_id:
-                    new_model, new_clip = self._add_lora_loader(workflow, model_node_id, clip_node_id, request.lora_name, request.lora_strength)
-                    for nid, node in workflow.items():
-                        if node.get("class_type") == "CogVideoSampler":
-                            if node["inputs"].get("model", [None])[0] == model_node_id:
-                                node["inputs"]["model"] = [new_model, 0]
-                        elif "TextEncode" in node.get("class_type", ""):
-                            if node["inputs"].get("clip", [None])[0] == clip_node_id:
-                                node["inputs"]["clip"] = [new_clip, 0]
-                else:
-                    logger.warning(
-                        "LoRA '%s' not applied: backbone=%s has no LoRA hook; "
-                        "identity comes from the init frame.",
-                        request.lora_name, family,
-                    )
+            # A legacy lora_name that is not a catalog LoRA for this model was
+            # left out by _resolve_adapters (CogVideoX has no adapter path at
+            # all). Say so, rather than render as if it applied.
+            if request.lora_name and not (
+                self._model_family(model) != "cogvideox"
+                and self._lora_name_adapter_id(request.lora_name, model)
+            ):
+                logger.warning(
+                    "LoRA '%s' not applied: it is not an installed catalog LoRA for %s. "
+                    "Add it in Manage Video Models and pick it as an adapter.",
+                    request.lora_name, model,
+                )
 
             # Frame-sequence export (Q3): when frames are requested, tee the FINAL
             # frames (post upscale/face-restore/interpolation — the exact frames the
@@ -2824,19 +2983,21 @@ class Wan22I2VGenerator:
     This is the film pipeline's preferred animator (Layer 2 of the film-orchestrator
     plan). Identity rides ENTIRELY in the LoRA-locked storyboard/keyframe image that
     seeds the animation — Wan 2.2 takes a text prompt (motion guidance) plus that
-    init frame. It does NOT apply a LoRA: the Wan GGUF backbone (UnetLoaderGGUF) has
-    no LoRA hook (see _build_workflow's "no LoRA hook" skip), so any lora_name passed
-    here is currently inert — it's threaded through only for forward-compat if a
-    Wan-format LoRA loader is ever added. Lock the character in the keyframe upstream,
-    not here. Per-step progress is surfaced automatically by the Layer-1 ws bridge
+    init frame. The LoRAs passed here are the cast's image-model (SDXL) LoRAs: they
+    do not fit Wan, so generate_video leaves them out (a lora_name is applied only
+    when it names a catalog LoRA made for the video model). Lock the character in
+    the keyframe upstream, not here. Per-step progress is surfaced automatically by the Layer-1 ws bridge
     inside generate_video. Short clips keep identity stable and VRAM in budget on 16 GB.
     """
 
-    def __init__(self, model: str = "wan22-5b", fps: int | None = None):
+    def __init__(self, model: str = "wan22-5b", fps: int | None = None,
+                 canvas: tuple[int, int] | None = None):
         from backend.services.video_model_registry import model_capabilities
         self.model = model
         caps = model_capabilities(model)
         self.fps = int(fps if fps is not None else (caps.get("native_fps") or 24))
+        # (width, height) for every clip; None keeps the request's default.
+        self.canvas = canvas
 
     def i2v_from_image(
         self, *, image_path: str, prompt: str, loras: list[str],
@@ -2864,14 +3025,13 @@ class Wan22I2VGenerator:
             duration_frames=frames,
             fps=self.fps,
             enhance_prompt=False,
+            **({"width": self.canvas[0], "height": self.canvas[1]} if self.canvas
+               else {"width": FILM_I2V_RESOLUTION, "height": FILM_I2V_RESOLUTION}),
             output_dir=out_dir,                      # known base → result path resolves
-            width=FILM_I2V_RESOLUTION,
-            height=FILM_I2V_RESOLUTION,
             num_inference_steps=FILM_I2V_STEPS,
             interpolation_multiplier=FILM_I2V_INTERPOLATION,
-            # NOTE: the Wan GGUF backbone applies NO LoRA (no loader hook — see
-            # _build_workflow). Identity comes from the LoRA-locked init frame, not
-            # from this. lora_name is passed through inert for forward-compat only.
+            # Identity comes from the LoRA-locked init frame. This lora_name is an
+            # image-model LoRA, so generate_video leaves it out and logs that.
             lora_name=(loras[0] if loras else None),
             metadata={"image_path": image_path},
         )

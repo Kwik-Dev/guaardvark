@@ -26,15 +26,29 @@ environmental reasons — the index not yet initialised, a model that would not
 load — that say nothing about the document. Writing ERROR on that removes the row
 from the set this task works from, so a bad half-hour becomes permanent. Failures
 are recorded and the document is left where it is, for a human or an explicit
-reindex to classify.
+reindex to classify. The exception is a file with bytes in it from which no text
+could be read (`no_content_reason`): that is about the file, so it ends ERROR
+with the reason, as it does when indexed from the upload path.
 """
 
 import logging
 import os
+from datetime import datetime, timedelta
 
 from celery import shared_task
 
 logger = logging.getLogger(__name__)
+
+# A row left INDEXING with nothing indexing it never moves on its own: this
+# task works from PENDING and STORED. Rows get there when a worker dies
+# mid-document, and every row saved under the old model default (INDEXING)
+# by a path that queued nothing is there too. reconcile_stuck_indexing runs
+# at startup and resets only rows older than this. The bound is deliberately
+# wide: Bulk Index marks rows INDEXING before queuing, without a job id, and
+# a queued-but-not-started task is invisible to any worker probe, so age is
+# the only safe signal.
+STUCK_INDEXING_AFTER = timedelta(hours=6)
+STUCK_INDEXING_NOTE = "Reset at startup: no indexing task was running this document"
 
 # Small enough that a tick cannot monopolise the GPU, and frequent enough that an
 # interrupted run finishes on its own within hours rather than never.
@@ -110,10 +124,76 @@ def _defer(doc, db, note: str) -> None:
     retried every tick — the starvation the ordering exists to prevent, reached
     without having to declare the document broken.
     """
-    from datetime import datetime
     doc.error_message = note[:500]
     doc.updated_at = datetime.now()
     db.session.commit()
+
+
+def _job_is_live(job_id) -> bool:
+    """Whether the unified progress system still tracks this indexing job as
+    running. Finished jobs drop out of it about a minute after they end."""
+    if not job_id:
+        return False
+    try:
+        from backend.utils.unified_progress_system import get_unified_progress
+        info = get_unified_progress().get_job_status(job_id)
+    except Exception:
+        return False
+    if not info:
+        return False
+    return not info.get("is_complete") and info.get("status") not in ("complete", "error", "cancelled")
+
+
+def _is_indexable(doc, exts: set) -> bool:
+    candidates = {(doc.type or "").lower(), os.path.splitext(doc.path or doc.filename or "")[1].lower()}
+    return bool(candidates & exts)
+
+
+def reconcile_stuck_indexing() -> dict:
+    """Move INDEXING rows that nothing is indexing to where they belong.
+
+    Only rows older than STUCK_INDEXING_AFTER (by updated_at, else
+    uploaded_at) are touched, and a row whose indexing_job_id the progress
+    system still tracks is left alone. A format this task has a loader for
+    becomes PENDING, so resume_pending_tick picks it up; anything else
+    (generated media registered under the old default) becomes NOT_INDEXED,
+    since PENDING would promise an indexing that never comes. Returns the
+    counts. Never raises.
+    """
+    try:
+        from backend.models import db, Document as DBDocument
+        cutoff = datetime.now() - STUCK_INDEXING_AFTER
+        rows = DBDocument.query.filter(DBDocument.index_status == "INDEXING").all()
+        if not rows:
+            return {"pending": 0, "not_indexed": 0}
+        exts = _document_extensions()
+        pending = not_indexed = 0
+        for doc in rows:
+            stamp = doc.updated_at or doc.uploaded_at
+            if not (stamp and stamp < cutoff):
+                continue
+            if _job_is_live(doc.indexing_job_id):
+                continue
+            if _is_indexable(doc, exts):
+                doc.index_status = "PENDING"
+                pending += 1
+            else:
+                doc.index_status = "NOT_INDEXED"
+                not_indexed += 1
+            doc.error_message = STUCK_INDEXING_NOTE
+        if pending or not_indexed:
+            db.session.commit()
+            logger.warning("index reconcile: %d stuck INDEXING row(s) reset: %d to PENDING, %d to NOT_INDEXED",
+                           pending + not_indexed, pending, not_indexed)
+        return {"pending": pending, "not_indexed": not_indexed}
+    except Exception as e:
+        logger.error("index reconcile: could not reset stuck INDEXING rows: %s", e)
+        try:
+            from backend.models import db
+            db.session.rollback()
+        except Exception:
+            pass
+        return {"pending": 0, "not_indexed": 0, "error": str(e)[:200]}
 
 
 @shared_task(name="indexing.resume_pending_tick")
@@ -189,8 +269,11 @@ def resume_pending_tick(limit: int = None) -> dict:
         from backend.config import UPLOAD_DIR
         from datetime import datetime
 
-        indexed = failed = missing = 0
+        indexed = failed = missing = no_text = 0
+        from backend.services import job_arbiter
         for doc in pending:
+            # Job order on: hold between documents while a chat or voice turn runs.
+            job_arbiter.yield_point("indexing", doc.id, label=f"Indexing document {doc.id}")
             rel = getattr(doc, "file_path", None) or doc.path
             path = rel if os.path.isabs(rel) else os.path.join(UPLOAD_DIR, rel)
             if not os.path.exists(path):
@@ -209,6 +292,14 @@ def resume_pending_tick(limit: int = None) -> dict:
                     doc.error_message = None
                     indexed += 1
                 else:
+                    reason = isvc.no_content_reason(doc.id)
+                    if reason:
+                        doc.index_status = "ERROR"
+                        doc.error_message = reason[:500]
+                        doc.updated_at = datetime.now()
+                        db.session.commit()
+                        no_text += 1
+                        continue
                     # A falsy return here is usually the embedding call failing
                     # inside add_file_to_index. Re-check the service rather than
                     # condemning the document: if it went away mid-batch, stop and
@@ -243,9 +334,9 @@ def resume_pending_tick(limit: int = None) -> dict:
         # outcome nobody can see is one nobody can trust. A tick that deferred or
         # skipped documents is saying something needs attention, so it reports at
         # WARNING; a clean tick stays quiet.
-        summary = "index resume tick: %d indexed, %d deferred, %d missing"
-        if failed or missing:
-            logger.warning(summary, indexed, failed, missing)
+        summary = "index resume tick: %d indexed, %d deferred, %d missing, %d with no text (ERROR)"
+        if failed or missing or no_text:
+            logger.warning(summary, indexed, failed, missing, no_text)
         else:
-            logger.info(summary, indexed, failed, missing)
-        return {"indexed": indexed, "failed": failed, "missing": missing}
+            logger.info(summary, indexed, failed, missing, no_text)
+        return {"indexed": indexed, "failed": failed, "missing": missing, "no_text": no_text}

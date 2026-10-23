@@ -122,7 +122,7 @@ const FamilySelfImprovementCard = React.forwardRef(
         onToggleMinimize={onToggleMinimize}
         cardColor={cardColor}
         onCardColorChange={onCardColorChange}
-        title="Family & Self-Improvement"
+        title="Family & Self-improvement"
         titleBarActions={
           <PsychologyIcon fontSize="small" sx={{ color: UNCLE_GOLD, opacity: 0.8 }} />
         }

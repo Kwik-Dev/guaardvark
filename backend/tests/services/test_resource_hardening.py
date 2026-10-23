@@ -76,6 +76,28 @@ def test_sync_registers_resident_sd_under_pinned_id():
     assert "sd:zimage-turbo" not in orch._registry
 
 
+GiB = 1024 ** 3
+
+
+@pytest.mark.parametrize("entry, vram_mb", [
+    ({"size": 8 * GiB, "size_vram": 3 * GiB}, 3072),   # partly on the CPU: only the GPU share
+    ({"size": 6 * GiB, "size_vram": 6 * GiB}, 6144),
+    ({"size": 6 * GiB, "size_vram": 0}, 0),             # wholly on the CPU
+    ({"size": 6 * GiB}, 6144),                          # no size_vram reported
+    ({}, 4000),
+])
+def test_ollama_models_count_their_gpu_share(entry, vram_mb):
+    orch = _bare_orch()
+    orch._ollama_expiry = {}
+    ps = MagicMock()
+    ps.status_code = 200
+    ps.json.return_value = {"models": [{"name": "chat:8b", **entry}]}
+    with patch("backend.services.gpu_memory_orchestrator.requests.get", return_value=ps), \
+         patch("backend.services.offline_image_generator._generator_instance", None):
+        orch._sync_from_hardware()
+    assert orch._registry["ollama:chat:8b"].vram_mb == vram_mb
+
+
 def test_drop_booking_forgets_slot_without_unloading():
     orch = _bare_orch()
     orch._registry["video_render:x"] = _slot("video_render:x", ModelType.VIDEO_PIPELINE, loaded_at=1.0)

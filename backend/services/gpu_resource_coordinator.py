@@ -224,6 +224,30 @@ class GPUResourceCoordinator:
                 "lock_info": lock_info.to_dict()
             }
 
+    def lock_held(self) -> bool:
+        """Whether a live holder has the exclusive GPU lock now.
+
+        The lock is taken by video renders, training and the generic heavy ops
+        (gpu_session), all on the one lock file. A lease past its expiry or a
+        holder that is no longer running reads as not held; the next acquire
+        clears it. A lease time that cannot be read reads as held. Reads the
+        lock file only, with no subprocess, so it is cheap enough to ask
+        before every model question; get_gpu_status also checks Ollama
+        through systemctl.
+        """
+        lock_info = self._read_lock_file()
+        if lock_info is None:
+            return False
+        if lock_info.lease_expires_at:
+            try:
+                if datetime.now() > datetime.fromisoformat(lock_info.lease_expires_at):
+                    return False
+            except (TypeError, ValueError):
+                return True
+        if lock_info.pid and not self._holder_alive(lock_info.pid, lock_info.metadata):
+            return False
+        return True
+
     def _is_ollama_running(self) -> bool:
         """Check if Ollama service is running."""
         try:

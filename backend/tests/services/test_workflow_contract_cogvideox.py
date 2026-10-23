@@ -111,19 +111,33 @@ def test_rendered_canvas_matches_the_resolved_request(comfy, model, ratio):
     wc.assert_valid(wf)
     wc.assert_resolved_canvas(model, req, ratio)
     [(_, w, h, _)] = wc.canvas(wf)
-    assert (w, h, _frames(wf)) == (req.width, req.height, 49)
+    assert (w, h, _frames(wf)) == (req.width, req.height, req.duration_frames)
     assert wc.output_fps(wf) == req.fps
 
 
-@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.xfail(strict=True, reason="CogVideoX never snaps frames to its 8n+1 grid")
-def test_rendered_frames_are_snapped_to_the_grid(comfy, model):
-    result, wf, req = _request(comfy, model, duration_frames=44, width=720, height=480)
-    assert wc.on_frame_grid(model, _frames(wf)) and _frames(wf) <= 44
+def test_rendered_frames_are_snapped_to_the_grid(comfy):
+    result, wf, req = _request(comfy, "cogvideox-5b", duration_frames=44, width=720, height=480)
+    assert wc.on_frame_grid("cogvideox-5b", _frames(wf)) and _frames(wf) <= 44
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.xfail(strict=True, reason="generate_video does not enforce max_frames")
+@pytest.mark.parametrize("asked,rendered", [(33, 81), (49, 81), (81, 81), (120, 81)])
+def test_i2v_renders_the_card_lengths_on_its_canvas(comfy, asked, rendered):
+    """CogVideoX 1.5's card names 5 s clips at a 768 short side: an old
+    720x480, 49-frame request renders 1152x768 and 81 frames."""
+    result, wf, req = _request(comfy, "cogvideox-5b-i2v", duration_frames=asked, width=720, height=480)
+    assert wf is not None, result.error
+    assert _frames(wf) == rendered
+    [(_, w, h, _)] = wc.canvas(wf)
+    assert (w, h) == (1152, 768)
+    # BF16 at the card's sizes does not fit a 16 GB card without it.
+    assert wc.one(wf, "CogVideoXModelLoader")[1]["inputs"]["enable_sequential_cpu_offload"] is True
+
+
+@pytest.mark.parametrize("model", [
+    pytest.param("cogvideox-5b", marks=pytest.mark.xfail(strict=True, reason="generate_video does not enforce max_frames")),
+    "cogvideox-5b-i2v",  # its 80n+1 grid snaps an over-long request down to 81
+])
 def test_rendered_frames_never_exceed_max_frames(comfy, model):
     caps = model_capabilities(model)
     result, wf, req = _request(comfy, model, duration_frames=caps["max_frames"] + 32, width=720, height=480)
@@ -137,8 +151,16 @@ def test_prompt_and_seed_land_in_the_sampler(comfy, model):
     _, sampler = wc.one(wf, "CogVideoSampler")
     assert wc.encoded_text(wf, sampler["inputs"]["positive"]) == "a red fox in snow"
     assert sampler["inputs"]["seed"] == 4242
+    assert result.metadata["seed"] == 4242
     if model == "cogvideox-5b-i2v":
         assert wc.one(wf, "LoadImage")[1]["inputs"]["image"] == comfy.fake.uploads[-1]
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_an_unset_seed_is_recorded_as_the_one_rendered(comfy, model):
+    result, wf, req = _request(comfy, model, width=720, height=480, duration_frames=49)
+    assert wf is not None, result.error
+    assert result.metadata["seed"] == wc.one(wf, "CogVideoSampler")[1]["inputs"]["seed"]
 
 
 @pytest.mark.parametrize("model", MODELS)

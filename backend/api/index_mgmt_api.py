@@ -59,6 +59,25 @@ def get_index_info():
         except Exception as e:
             logger.error(f"Index info: Error reading docstore.json: {e}", exc_info=True)
 
+    # With pgvector the vectors live in the database and docstore.json is never
+    # filled, so it read 0 however much was indexed: count the vector table.
+    summary_count = None
+    document_count = None
+    count_source = "docstore"
+    try:
+        from backend.services.indexing_service import vector_store_stats
+        stats = vector_store_stats()
+        if stats.get("backend") == "pgvector":
+            count_source = "vector_table"
+            chunk_count = int(stats.get("chunks", 0)) if stats.get("exists") else 0
+            summary_count = int(stats.get("summaries", 0)) if stats.get("exists") else 0
+            document_count = int(stats.get("documents", 0)) if stats.get("exists") else 0
+            if stats.get("error"):
+                count_source = "vector_table_unreadable"
+                chunk_count = None
+    except Exception as e:
+        logger.warning(f"Index info: could not count the vector table: {e}")
+
     # ==========================================================================
     # PROTECTED CODE - DO NOT MODIFY WITHOUT EXPLICIT PERMISSION
     # --------------------------------------------------------------------------
@@ -150,6 +169,9 @@ def get_index_info():
         jsonify(
             {
                 "chunk_count": chunk_count,
+                "summary_count": summary_count,
+                "document_count": document_count,
+                "count_source": count_source,
                 "embedding_model": model_name,
                 "last_rebuilt": last_rebuilt,
             }
@@ -161,6 +183,16 @@ def get_index_info():
 @index_mgmt_bp.route("/reset-index", methods=["POST"])
 def reset_index():
     logger.info("API: Received POST /api/meta/reset-index request")
+    return _reset_index_storage(requeue=True)
+
+
+def _reset_index_storage(requeue: bool):
+    """Clear the index and its vectors; (response, status).
+
+    The documents that were indexed lose their vectors, so they are queued to
+    be indexed again (``requeue``) or left PENDING for a caller that indexes
+    them itself. No other row changes status: generated media stay STORED.
+    """
     if not (
         llama_index_available
         and SimpleDocumentStore
@@ -212,9 +244,18 @@ def reset_index():
         # dimension -- so after that change the derived name points at the new
         # table and the old vectors would survive a reset that said it cleared
         # everything. Per-project and per-profile tables are the same story.
+        #
+        # The active width's tables are emptied rather than dropped: a Celery
+        # worker that already set its store up on one keeps inserting into it,
+        # where a dropped table fails every insert until the worker restarts.
         try:
-            from backend.services.indexing_service import drop_all_vector_stores
-            vs_result = drop_all_vector_stores()
+            from backend.services.indexing_service import (
+                _active_embed_dim, drop_all_vector_stores, empty_vector_tables,
+            )
+            active_dim = _active_embed_dim()
+            if active_dim:
+                deleted_files.extend(empty_vector_tables(active_dim).get("emptied") or [])
+            vs_result = drop_all_vector_stores(keep_width=active_dim)
             _dropped = vs_result.get("dropped") or []
             if _dropped:
                 deleted_files.extend(_dropped)
@@ -297,22 +338,24 @@ def reset_index():
             "Reset Index: LlamaIndex components re-initialized in app.config with an empty index."
         )
 
+        status_note = "Document statuses reset."
         if db and Document:
             try:
-                logger.info(
-                    "Reset Index: Resetting document statuses in database to 'INDEXING'..."
-                )
-                updated_count = db.session.query(Document).update(
-                    {
-                        "index_status": "INDEXING",
-                        "indexed_at": None,
-                        "error_message": None,
-                    }
-                )
-                db.session.commit()
-                logger.info(
-                    f"Reset Index: Updated status for {updated_count} documents."
-                )
+                if requeue:
+                    from backend.api.indexing_api import requeue_indexed_documents
+                    requeued = requeue_indexed_documents()
+                    status_note = f"{requeued['queued']} document(s) queued to be indexed again."
+                    if requeued["pending"]:
+                        status_note += f" {requeued['pending']} left pending."
+                else:
+                    updated_count = (
+                        Document.query.filter(Document.index_status == "INDEXED")
+                        .update({"index_status": "PENDING", "indexed_at": None, "error_message": None},
+                                synchronize_session=False)
+                    )
+                    db.session.commit()
+                    status_note = f"{updated_count} document(s) to index again."
+                logger.info(f"Reset Index: {status_note}")
             except Exception as e:
                 db.session.rollback()
                 logger.error(
@@ -326,7 +369,7 @@ def reset_index():
         return (
             jsonify(
                 {
-                    "message": "Index storage cleared and re-initialized successfully. Document statuses reset."
+                    "message": f"Index storage cleared and re-initialized. {status_note}"
                 }
             ),
             200,
@@ -513,6 +556,60 @@ def index_errors():
         return jsonify({"error": str(e)}), 500
 
 
+def _rebuild_candidates(document_ids=None):
+    """Rows a rebuild re-indexes: those the ingest pipeline has a text loader
+    for (the set resume_pending_tick uses), not already queued, and among
+    ``document_ids`` when given (a rebuild passes the ones indexed before it
+    reset the index, so it restores what was searchable). Generated
+    media (images, audio, video) are registered as documents too; pushing
+    them through here would run vision or a missing transcriber on each and
+    leave them PENDING for good."""
+    from sqlalchemy import func, or_
+    from backend.tasks.index_resume_tasks import _document_extensions
+
+    exts = sorted(_document_extensions())
+    match = [func.lower(Document.type).in_(exts)]
+    match += [Document.path.ilike("%" + e) for e in exts]
+    query = Document.query.filter(Document.index_status != "INDEXING").filter(or_(*match))
+    if document_ids is not None:
+        query = query.filter(Document.id.in_(list(document_ids)))
+    return query.order_by(Document.id).all()
+
+
+def _reindex_documents(add_file_to_index, docs, upload_folder_abs):
+    """Run each document through add_file_to_index; (indexed, errors).
+
+    add_file_to_index(file_path, db_document, progress_callback=None) reads
+    the project from the row itself. The old call passed db_doc.project_id
+    as the third positional argument, so the first document with a project
+    raised TypeError (an int is not callable) after the index had already
+    been reset."""
+    indexed_count, error_count = 0, 0
+    for db_doc in docs:
+        full_doc_path = (
+            db_doc.path
+            if os.path.isabs(db_doc.path or "")
+            else os.path.join(upload_folder_abs, db_doc.path or "")
+        )
+        if not db_doc.path or not os.path.exists(full_doc_path):
+            logger.warning(
+                f"Rebuild Index: Skipping doc ID {db_doc.id} ('{db_doc.filename}'), path invalid: {full_doc_path}"
+            )
+            db_doc.index_status, db_doc.error_message = (
+                "ERROR",
+                f"File not found: {full_doc_path}",
+            )
+            error_count += 1
+            continue
+        db_doc.index_status = "PENDING"
+        db.session.commit()
+        if add_file_to_index(full_doc_path, db_doc):
+            indexed_count += 1
+        else:
+            error_count += 1
+    return indexed_count, error_count
+
+
 @index_mgmt_bp.route("/rebuild-index", methods=["POST"])
 def rebuild_index():
     logger.info("API: Received POST /api/meta/rebuild-index request")
@@ -525,14 +622,11 @@ def rebuild_index():
     if not (llama_index_available and db and Document):
         return jsonify({"error": "Core components unavailable for index rebuild."}), 503
 
+    indexed_ids = [d.id for d in Document.query.filter(Document.index_status == "INDEXED").all()]
     logger.info("Rebuild Index: Performing a full index reset first...")
-    reset_response_obj = reset_index()
-    if reset_response_obj.status_code != 200:
-        reset_data = (
-            json.loads(reset_response_obj.get_data(as_text=True))
-            if reset_response_obj.is_json
-            else {"error": "Unknown error during reset"}
-        )
+    reset_response_obj, reset_status = _reset_index_storage(requeue=False)
+    if reset_status != 200:
+        reset_data = reset_response_obj.get_json(silent=True) or {"error": "Unknown error during reset"}
         logger.error(
             f"Rebuild Index: Failed reset phase. Error: {reset_data.get('error')}"
         )
@@ -540,7 +634,7 @@ def rebuild_index():
             jsonify(
                 {"error": f"Rebuild failed during reset: {reset_data.get('error')}"}
             ),
-            reset_response_obj.status_code,
+            reset_status,
         )
 
     logger.info("Rebuild Index: Initial reset successful. Re-indexing documents.")
@@ -548,39 +642,15 @@ def rebuild_index():
         return jsonify({"error": "LlamaIndex index unavailable after reset."}), 500
 
     try:
-        docs_to_reindex = Document.query.filter(
-            Document.index_status != "INDEXING"
-        ).all()
+        docs_to_reindex = _rebuild_candidates(indexed_ids)
         logger.info(
             f"Rebuild Index: Found {len(docs_to_reindex)} documents to re-index."
         )
-        indexed_count, error_count = 0, 0
         upload_folder_abs = current_app.config.get("UPLOAD_FOLDER")
         if not upload_folder_abs:
             return jsonify({"error": "Upload folder not set."}), 500
 
-        for db_doc in docs_to_reindex:
-            full_doc_path = (
-                db_doc.path
-                if os.path.isabs(db_doc.path)
-                else os.path.join(upload_folder_abs, db_doc.path)
-            )
-            if not db_doc.path or not os.path.exists(full_doc_path):
-                logger.warning(
-                    f"Rebuild Index: Skipping doc ID {db_doc.id} ('{db_doc.filename}'), path invalid: {full_doc_path}"
-                )
-                db_doc.index_status, db_doc.error_message = (
-                    "ERROR",
-                    f"File not found: {full_doc_path}",
-                )
-                error_count += 1
-                continue
-            db_doc.index_status = "PENDING"
-            db.session.commit()
-            if add_file_to_index(full_doc_path, db_doc, db_doc.project_id):
-                indexed_count += 1
-            else:
-                error_count += 1
+        indexed_count, error_count = _reindex_documents(add_file_to_index, docs_to_reindex, upload_folder_abs)
         db.session.commit()
         msg = f"Index rebuild attempt: {len(docs_to_reindex)}. Indexed: {indexed_count}, Errors/Skipped: {error_count}."
         logger.info(f"Rebuild Index: {msg}")
@@ -761,3 +831,39 @@ def reranker_install():
     """Download the reranker's weights (Settings > Knowledge > Install). Searches never do."""
     from backend.utils import reranker
     return jsonify(reranker.start_install()), 202
+
+
+@index_mgmt_bp.route("/reranker/score", methods=["POST"])
+def reranker_score():
+    """Score passages against a query with chat's reranker, on the GPU only.
+
+    Called by Celery workers, which cannot see the GPU (reranker.rerank).
+    Body: {"query": str, "passages": [str, ...], "model": str (optional)}.
+    Answers 200 with {"applied": true, "scores": [one per passage, in order],
+    "model", "device"}, or {"applied": false, "reason"} when the reranker here
+    is off, is another model, or cannot run on the GPU now; the worker then
+    scores on its own CPU. It reads only the text it is sent and stores
+    nothing. Like every POST under /api/meta it answers this machine, the API
+    key, and the local network while Network access is on
+    (backend/utils/auth_guard.py).
+
+    It does not wait for a chat turn (job_arbiter): a pass takes well under a
+    second on the model chat itself holds, and background callers such as a
+    research run already pause between units of work while chat runs.
+    """
+    from backend.utils import reranker
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "expected a JSON object"}), 400
+    query, passages, model = body.get("query"), body.get("passages"), body.get("model")
+    if not isinstance(query, str) or len(query) > reranker.MAX_REMOTE_QUERY_CHARS:
+        return jsonify({"error": f"query must be a string of at most "
+                                 f"{reranker.MAX_REMOTE_QUERY_CHARS} characters"}), 400
+    if (not isinstance(passages, list) or len(passages) > reranker.MAX_REMOTE_PASSAGES
+            or not all(isinstance(p, str) for p in passages)):
+        return jsonify({"error": f"passages must be a list of at most "
+                                 f"{reranker.MAX_REMOTE_PASSAGES} strings"}), 400
+    if model is not None and not isinstance(model, str):
+        return jsonify({"error": "model must be a string"}), 400
+    return jsonify(reranker.score_on_gpu(query, passages, model=model)), 200

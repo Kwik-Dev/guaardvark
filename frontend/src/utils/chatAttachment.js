@@ -47,6 +47,25 @@ export function refuseAttachmentMessage(byteLength, maxBytes = CHAT_ATTACHMENT_M
   return `This image is ${formatAttachmentSize(byteLength)} after resize; the limit is ${formatAttachmentSize(maxBytes)}. Choose a smaller image.`;
 }
 
+// Several pictures on one turn share the limit (the server counts them
+// together), so the refusal names the total, not one picture.
+export function refuseAttachmentsTotalMessage(count, totalBytes, maxBytes = CHAT_ATTACHMENT_MAX_BYTES_FALLBACK) {
+  if (!(count > 1)) return refuseAttachmentMessage(totalBytes, maxBytes);
+  return `These ${count} images total ${formatAttachmentSize(totalBytes)} after resize; the limit is ${formatAttachmentSize(maxBytes)}. Remove one or choose smaller images.`;
+}
+
+// What the send path hands unifiedChatService for the pictures of a turn:
+// an array when several were attached (primary first), the single base64
+// string when one was, null when none.
+export function attachedPictures(sendOptions) {
+  const many = Array.isArray(sendOptions?.imagesBase64)
+    ? sendOptions.imagesBase64.filter((b) => typeof b === "string" && b)
+    : [];
+  if (many.length > 1) return many;
+  if (many.length === 1) return many[0];
+  return sendOptions?.imageBase64 || null;
+}
+
 export function chatErrorMessage(payload) {
   if (payload == null) return "Chat error";
   if (typeof payload === "string" && payload.trim()) return payload;

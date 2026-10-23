@@ -51,6 +51,7 @@ def project_to_dict(project, counts=None):
         task_count = counts.get("tasks", {}).get(project.id, 0)
         rule_count = counts.get("linked_rules", {}).get(project.id, 0)
         primary_rule_count = counts.get("primary_rules", {}).get(project.id, 0)
+        video_count = counts.get("videos", {}).get(project.id, 0)
     else:
         # Fallback for single-project endpoints (detail view)
         try:
@@ -82,6 +83,12 @@ def project_to_dict(project, counts=None):
         primary_rule_count = (
             project.primary_rules.count() if hasattr(project, "primary_rules") else 0
         )
+        try:
+            from backend.services.video_project_registry import count_by_project
+            video_count = count_by_project(db.session).get(project.id, 0)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not count videos for project {project.id}: {e}")
+            video_count = 0
 
     data = {
         "id": project.id,
@@ -94,6 +101,7 @@ def project_to_dict(project, counts=None):
         "task_count": task_count,
         "rule_count": rule_count,
         "primary_rule_count": primary_rule_count,
+        "video_count": video_count,
         "created_at": project.created_at.isoformat() if project.created_at else None,
         "updated_at": project.updated_at.isoformat() if project.updated_at else None,
     }
@@ -141,6 +149,13 @@ def get_projects_route():
             .filter(Rule.project_id.isnot(None))
             .group_by(Rule.project_id).all()
         )
+
+        try:
+            from backend.services.video_project_registry import count_by_project
+            counts["videos"] = count_by_project(db.session)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not count video projects: {e}")
+            counts["videos"] = {}
 
         projects_list = [project_to_dict(project, counts=counts) for project in projects]
         logger.info(f"API: Found {len(projects_list)} projects.")
@@ -370,6 +385,12 @@ def delete_project_route(project_id):
         logger.info(
             f"Staging project {project_id} ('{project_name}') for deletion. Associated items will be handled by DB cascade/SET NULL rules."
         )
+        # Rendered music videos / films filed under this project are kept:
+        # un-file them first, or the documents delete-orphan cascade removes them.
+        from backend.services.video_project_registry import detach_project_media
+        detached = detach_project_media(db.session, project_id)
+        if detached:
+            logger.info(f"Kept {detached} rendered video document(s) from project {project_id}")
         db.session.delete(project)
         db.session.commit()
         logger.info(f"API: Deleted project ID: {project_id} (Name: '{project_name}')")
@@ -399,6 +420,31 @@ def delete_project_route(project_id):
         db.session.rollback()
         logger.error(f"API Error (DELETE /projects/{project_id}): {e}", exc_info=True)
         return jsonify({"error": "Failed to delete project."}), 500
+
+
+@projects_bp.route("/<int:project_id>/videos", methods=["GET"])
+def get_project_videos_route(project_id):
+    """Every video project (music video, Film Crew) filed under this Project."""
+    if db.session.get(Project, project_id) is None:
+        return jsonify({"error": "Project not found"}), 404
+    from backend.services.video_project_registry import list_all
+    rows = list_all(db.session, project_id=project_id)
+    try:
+        from backend.api.music_video_api import _progress_for
+        from backend.models import MusicVideo
+        mvs = {m.id: m for m in MusicVideo.query.filter_by(project_id=project_id).all()}
+        for r in rows:
+            m = mvs.get(r["id"]) if r["kind"] == MusicVideo.KIND else None
+            if m is not None:
+                p = _progress_for(m)
+                r["overall_pct"] = p.get("overall_pct")
+                r["output_document_id"] = m.output_document_id
+                r["cut_count"] = len(m.cut_plan or [])
+                thumb = next((c.get("index") for c in (m.clips or []) if c.get("storyboard_path")), None)
+                r["thumbnail_url"] = (f"/api/music-video/{m.id}/storyboard/{thumb}" if thumb is not None else None)
+    except Exception as e:  # noqa: BLE001 — extras only
+        logger.warning(f"Video extras for project {project_id} unavailable: {e}")
+    return jsonify({"videos": rows}), 200
 
 
 @projects_bp.route("/<int:project_id>/rules/<int:rule_id>/link", methods=["POST"])

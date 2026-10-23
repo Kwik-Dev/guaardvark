@@ -5,9 +5,18 @@ from flask import Blueprint, jsonify, request
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from backend.models import Project, Rule, db
+from backend.rule_utils import PROMPT_SLOT_LEVEL, PROMPT_SLOT_RULE_NAMES
+from backend.services.brain_state import refresh_chat_prompts
 from backend.utils.response_utils import success_response, error_response
 
 rules_bp = Blueprint("rules_api", __name__, url_prefix="/api/rules")
+
+
+def _stored_level(name, level):
+    """The level a rule is stored at: prompt-slot names always PROMPT_SLOT_LEVEL."""
+    if name and name.strip() in PROMPT_SLOT_RULE_NAMES:
+        return PROMPT_SLOT_LEVEL
+    return level
 
 
 @rules_bp.route("", methods=["GET"])
@@ -23,7 +32,10 @@ def get_rules():
         per_page: Optional page size capped at 100, defaulting to 50.
 
     Returns:
-        A JSON array of rule objects ordered by most recent update.
+        A JSON array of rule objects ordered by most recent update, one page
+        of them. The real count of matching rows is in the X-Total-Count
+        header, with X-Page and X-Per-Page, so a caller can tell a full list
+        from a first page without changing the array body other callers read.
     """
     try:
         project_id_filter = request.args.get("project_id", type=int)
@@ -56,7 +68,11 @@ def get_rules():
             page=page, per_page=per_page, error_out=False
         )
         items = [rule.to_dict() for rule in rules.items]
-        return jsonify(items), 200
+        response = jsonify(items)
+        response.headers["X-Total-Count"] = str(rules.total)
+        response.headers["X-Page"] = str(page)
+        response.headers["X-Per-Page"] = str(per_page)
+        return response, 200
     except SQLAlchemyError as e:
         db.session.rollback()
         return error_response(str(e), 500, "DATABASE_ERROR")
@@ -131,7 +147,7 @@ def create_rule():
     try:
         rule = Rule(
             name=name.strip(),
-            level=level,
+            level=_stored_level(name, level),
             type=data.get("type", "PROMPT_TEMPLATE"),
             command_label=command_label,
             reference_id=data.get("reference_id"),
@@ -145,6 +161,7 @@ def create_rule():
         )
         db.session.add(rule)
         db.session.commit()
+        refresh_chat_prompts()
         return success_response({"id": rule.id}, "Rule created", 201)
     except IntegrityError as e:
         db.session.rollback()
@@ -210,7 +227,9 @@ def update_rule(rule_id):
         ]:
             if field in data:
                 setattr(rule, field, data[field])
+        rule.level = _stored_level(rule.name, rule.level)
         db.session.commit()
+        refresh_chat_prompts()
         return success_response(message="Rule updated.")
     except IntegrityError as e:
         db.session.rollback()
@@ -237,6 +256,7 @@ def delete_rule(rule_id):
     try:
         db.session.delete(rule)
         db.session.commit()
+        refresh_chat_prompts()
         return success_response(message="Rule deleted.")
     except SQLAlchemyError as e:
         db.session.rollback()
@@ -249,6 +269,7 @@ def purge_learned_rules():
     try:
         count = db.session.query(Rule).filter(Rule.level == "LEARNED").delete()
         db.session.commit()
+        refresh_chat_prompts()
         return success_response(message=f"Deleted {count} learned rules.")
     except SQLAlchemyError as e:
         db.session.rollback()

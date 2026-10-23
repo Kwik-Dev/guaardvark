@@ -5,7 +5,7 @@ import os
 import re
 import uuid
 import time
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Callable
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
@@ -196,6 +196,10 @@ class ImageGenerationRequest:
     # product sets it: the Studio, chat, agents, MCP and edits all refuse a
     # missing model with where to install it, and Install fetches it.
     allow_model_download: bool = False
+    # Asked before the model loads, after it loads and on every denoise step;
+    # True ends the render without decoding or saving, and the result carries
+    # metadata {"stopped": True}. Chat passes its turn's Stop check here.
+    should_stop: Optional[Callable[[], bool]] = None
 
 @dataclass
 class ImageGenerationResult:
@@ -353,6 +357,8 @@ class OfflineImageGenerator:
             # FLUX.1-dev — max-quality stills via ComfyUI (not offline Diffusers).
             # Value is a sentinel; batch routes to Comfy when model=flux-dev.
             "flux-dev": "comfy:flux-dev",
+            # Qwen-Image 2.1 — text-to-image via ComfyUI 0.37+; same sentinel shape.
+            "qwen-image-21": "comfy:qwen-image-21",
             # ComfyUI generic backend — chat/batch route to the reachable ComfyUI
             # and pick whichever image engine is installed (Z-Image / FLUX).
             "comfyui": "comfy:comfyui",
@@ -370,7 +376,7 @@ class OfflineImageGenerator:
         # get_available_models() and model_recommender still honour it.
         self.hidden_models: set[str] = set()
         # Offline Diffusers cannot load these — batch/API must route to ComfyUI.
-        self.comfy_only_models = {"flux-dev", "comfyui"}
+        self.comfy_only_models = {"flux-dev", "qwen-image-21", "comfyui"}
         # User-added entries (backend/services/user_image_models.py): family by id
         # or repo, file-kind entries keyed by their "user:<id>" sentinel, and the
         # catalog rows themselves. Filled by load_user_catalog() below.
@@ -382,6 +388,7 @@ class OfflineImageGenerator:
         self.model_meta = {
             "zimage-turbo": {"label": "Z-Image Turbo (Best daily)", "description": "Strong prompt adherence + text, fast (~9 steps / CFG 0). Default daily driver.", "recommended": True, "order": 0},
             "flux-dev": {"label": "FLUX.1 Dev (Max quality)", "description": "Highest ceiling stills via ComfyUI (~28 steps, FluxGuidance). Slower; needs Comfy + flux1-dev weights.", "recommended": False, "order": 1, "engine": "comfy"},
+            "qwen-image-21": {"label": "Qwen-Image 2.1 (ComfyUI)", "description": "Prose prompts, native 2K, transparent renders; 25 steps, cfg 1 (official template). Needs ComfyUI 0.37+. Qwen Research License: non-commercial research and evaluation only.", "recommended": False, "order": 1, "engine": "comfy"},
             "comfyui": {"label": "ComfyUI (auto backend)", "description": "Routes image generation to the running ComfyUI plugin and picks the installed engine (Z-Image or FLUX).", "recommended": False, "order": 1, "engine": "comfy"},
             "krea2-turbo": {"label": "Krea 2 Turbo", "description": "12B aesthetic-first model, native 2K, 8 steps CFG-free. Fast inference.", "recommended": False, "order": 2},
             "krea2-raw": {"label": "Krea 2 Raw", "description": "Base 12B checkpoint — less post-trained than Turbo (~52 steps, CFG 3.5). Use for mature/creative prompts or LoRA base.", "recommended": False, "order": 3},
@@ -553,26 +560,27 @@ class OfflineImageGenerator:
 
     def _is_model_downloaded(self, model_id: str) -> bool:
         if self._user_file_entry(model_id) is not None:
-            from backend.services.user_image_models import user_files_present, user_sentinel
+            from backend.services.user_image_models import user_model_ready, user_sentinel
             sentinel = model_id if model_id in self.user_files else self.available_models.get(model_id, user_sentinel(model_id))
-            return user_files_present(self, sentinel)
+            return user_model_ready(self, sentinel)
         # Sentinel ids — the generic ComfyUI backend has no HF snapshot; its
         # assets are the running ComfyUI's.
         mid = (model_id or "").lower()
         if mid in ("comfyui", "comfy:comfyui"):
             return self._comfyui_assets_present()
         # Comfy-only catalog keys: the video-registry install plan is the source of
-        # truth (flux-dev, qwen-image-edit, …), not a diffusers snapshot.
+        # truth (flux-dev, qwen-image-21, …), not a diffusers snapshot. Ready means
+        # the model and every companion its entry requires are on disk.
         catalog_key = mid.split(":", 1)[1] if mid.startswith("comfy:") else None
         if catalog_key or mid in getattr(self, "comfy_only_models", set()) or mid == "flux-dev" or mid.endswith("flux-dev") or "flux1-dev" in mid:
             try:
-                from backend.services.video_model_registry import is_model_installed
+                from backend.services.video_model_registry import is_plan_installed
                 key = catalog_key or (
                     "flux-dev" if (mid == "flux-dev" or mid.endswith("flux-dev") or "flux1-dev" in mid)
                     else (model_id if model_id in getattr(self, "comfy_only_models", set()) else None)
                 )
                 if key:
-                    return bool(is_model_installed(key))
+                    return bool(is_plan_installed(key))
             except Exception:
                 pass
             if mid == "flux-dev" or "flux1-dev" in mid or (catalog_key == "flux-dev"):
@@ -706,6 +714,26 @@ class OfflineImageGenerator:
             return True
         return key.startswith("user-flux")
 
+    def missing_files_for(self, model_key: str) -> List[str]:
+        """``"<entry>:<file>"`` for what a ComfyUI model still lacks on disk: the
+        model's own file and the companions its registry entry (or, for a user
+        model, its family's shipped ``like``) requires. Empty for offline models,
+        whose readiness is the snapshot check."""
+        if not self.is_comfy_only_model(model_key):
+            return []
+        try:
+            if self._user_file_entry(model_key) is not None:
+                from backend.services.user_image_models import user_missing_files
+                return user_missing_files(self, model_key)
+            mid = str(self.available_models.get(model_key) or model_key)
+            catalog_key = mid.split(":", 1)[1] if mid.startswith("comfy:") else model_key
+            from backend.services.video_model_registry import VIDEO_MODEL_REGISTRY, missing_plan_files
+            if catalog_key in VIDEO_MODEL_REGISTRY:
+                return missing_plan_files(catalog_key)
+        except Exception as e:  # noqa: BLE001 — a listing must not fail on one row
+            logger.debug("missing_files_for(%s) failed: %s", model_key, e)
+        return []
+
     # How long a repo-access verdict stays good. The menu asks per model, so without
     # a cache every dropdown open would fan out HTTP requests.
     _REPO_ACCESS_TTL_SECONDS = 300
@@ -824,6 +852,15 @@ class OfflineImageGenerator:
                 "Install the FLUX dev unet/clip/vae assets, then retry."
             )
         if getattr(self, "_install_needed", None) == model_id:
+            from backend.services.user_image_models import single_file_config_missing
+            if single_file_config_missing(self, model_id):
+                return (
+                    f"'{model_key}' is missing the base pipeline config its checkpoint "
+                    "loads with (a few MB of configs and tokenizer files). Click Install "
+                    "on it in Manage models on the Images page or Settings > Model "
+                    "libraries > Image; the checkpoint already on disk is kept. "
+                    "Generating never downloads a model on its own."
+                )
             return (
                 f"'{model_key}' is not installed ({model_id}). Install it from Manage models "
                 "on the Images page or Settings > Model libraries > Image, or pick an "
@@ -929,6 +966,8 @@ class OfflineImageGenerator:
             return "krea2"
         if "z-image" in mid or "zimage" in mid or key.startswith("zimage"):
             return "zimage"
+        if "qwen-image-21" in mid or key.startswith("qwen-image-21"):
+            return "qwen-image-21"
         if "flux" in mid or key.startswith("flux"):
             return "flux"
         if "sana" in mid or key.startswith("sana"):
@@ -1074,8 +1113,9 @@ class OfflineImageGenerator:
                 family, base = "zimage", self._OFFLOAD_TURBO_VRAM_MB
         else:
             family = self._model_family(model_id)
-            if family == "flux":
-                base = int(_image_limits_for("flux")["vram_mb"])
+            if _image_limits_for(family).get("engine") == "comfy":
+                # ComfyUI families (FLUX, Qwen-Image 2.1) are priced flat by their row.
+                base = int(_image_limits_for(family)["vram_mb"])
             elif family == "krea2" and self._will_use_sequential_for_krea2():
                 base = self._KREA2_SEQUENTIAL_VRAM_MB
             elif family == "sdxl" and self._sdxl_offloads():
@@ -1100,8 +1140,8 @@ class OfflineImageGenerator:
             family, base = "zimage", self._FAMILY_RAM_GB["zimage"]
         else:
             family = self._model_family(model_id)
-            if family == "flux":
-                base = float(_image_limits_for("flux")["ram_gb"])
+            if _image_limits_for(family).get("engine") == "comfy":
+                base = float(_image_limits_for(family)["ram_gb"])
             elif self._limits_row(model_id).get("ram_gb"):
                 base = float(self._limits_row(model_id)["ram_gb"])
             else:
@@ -1126,7 +1166,12 @@ class OfflineImageGenerator:
         so the booking prices >1MP canvases (2026-08-04).
         """
         if self._pipeline is not None and self._current_model == model_id:
-            return  # already resident — its VRAM is already spent
+            # Already resident and booked, but the card can have filled since it
+            # loaded: a batch's Media Director rewrite, or a chat turn during the
+            # batch, puts the chat model back on it. No re-booking; evict Ollama
+            # when what the pipeline still needs no longer fits.
+            self._evict_ollama_if_card_filled(model_id, width, height)
+            return
         fault = self.gpu_fault_message()
         if fault:
             raise RuntimeError(fault)
@@ -1167,6 +1212,31 @@ class OfflineImageGenerator:
             hard_fit=True,
         )
 
+    def _evict_ollama_if_card_filled(
+        self, model_id: str, width: Optional[int] = None, height: Optional[int] = None
+    ) -> None:
+        """For a resident pipeline: evict Ollama when the pipeline's estimate,
+        less what this process already holds, no longer fits in the free VRAM
+        with the admission margin. Best-effort; never raises."""
+        try:
+            if self._device != "cuda" or not torch.cuda.is_available():
+                return
+            estimate_mb = self._vram_estimate_mb(model_id, width, height)
+            held_mb = torch.cuda.memory_allocated() // (1024 * 1024)
+            free_b, total_b = torch.cuda.mem_get_info()
+            free_mb, total_mb = free_b // (1024 * 1024), total_b // (1024 * 1024)
+            margin_mb = max(1024, int(total_mb * 0.10))
+            need_mb = max(0, estimate_mb - held_mb)
+            if free_mb - margin_mb < need_mb:
+                from backend.services.gpu_resource_policy import evict_ollama_models
+                logger.info(
+                    f"VRAM check (resident {model_id}): {free_mb}MB free won't fit the "
+                    f"{need_mb}MB it still needs (+{margin_mb}MB margin) — evicting Ollama models"
+                )
+                evict_ollama_models()
+        except Exception as probe_err:  # noqa: BLE001
+            logger.warning(f"VRAM check for resident pipeline failed (continuing): {probe_err}")
+
     def _ram_watchdog_callback(self):
         """Per-step denoise callback: abort before RAM exhaustion kills the box.
 
@@ -1200,6 +1270,26 @@ class OfflineImageGenerator:
                     "to protect the machine — close other applications or reduce "
                     "resolution."
                 )
+            return callback_kwargs
+
+        return _cb
+
+    def _denoise_callback(self, should_stop: Optional[Callable[[], bool]] = None):
+        """Per-step denoise callback: the RAM watchdog, plus the caller's stop
+        check when one is given. None when there is neither.
+
+        A stop raises RenderStopped for the same reason the watchdog raises:
+        pipeline._interrupt would still run the VAE decode and hand back an image.
+        """
+        watchdog = self._ram_watchdog_callback()
+        if should_stop is None:
+            return watchdog
+        from backend.services.gpu_resource_policy import raise_if_stopped
+
+        def _cb(pipe, step, timestep, callback_kwargs):
+            raise_if_stopped(should_stop, f"at denoise step {step}")
+            if watchdog is not None:
+                return watchdog(pipe, step, timestep, callback_kwargs)
             return callback_kwargs
 
         return _cb
@@ -1297,13 +1387,73 @@ class OfflineImageGenerator:
         """Krea2 is aesthetic-first but ~14GB peak; only auto-lead on roomy GPUs."""
         return self._cuda_total_vram_gb() >= 20.0
 
+    def configured_default_for_auto(self) -> Optional[str]:
+        """The Stills model chosen in Settings > Generation, as a catalog key, when
+        an Auto pick can honour it: None when nothing was chosen, or when the chosen
+        model is not installed or will not fit this card (each logged, so a fallback
+        to the per-card routing says why).
+
+        Every surface that renders a picture with the model left on Auto asks this
+        first (stills façade, batch intake, the offline router), so the Settings
+        choice is the default everywhere, as Settings says it is.
+        """
+        try:
+            from backend.services.media_model_registry import (
+                configured_stills_default,
+                stills_default_catalog_key,
+            )
+            chosen = configured_stills_default()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Stills default unreadable, Auto picks by card size: %s", e)
+            return None
+        if not chosen:
+            return None
+        key = stills_default_catalog_key(chosen)
+        model_id = self.available_models.get(key)
+        if not model_id:
+            logger.warning(
+                "Auto: the Stills default %r is not in the image catalog; picking by card size",
+                chosen,
+            )
+            return None
+        if not self._is_model_downloaded(model_id):
+            logger.warning(
+                "Auto: the Stills default %r is not installed; picking by card size", key
+            )
+            return None
+        total_gb = self._cuda_total_vram_gb()
+        if total_gb > 0 and not self.is_comfy_only_model(key):
+            need_mb = self._vram_estimate_mb(model_id)
+            if need_mb > total_gb * 1024:
+                logger.warning(
+                    "Auto: the Stills default %r needs ~%d MB VRAM, this card has %.0f GB; "
+                    "picking by card size",
+                    key, need_mb, total_gb,
+                )
+                return None
+        return key
+
     def _auto_select_model(self, prompt: str, style: str = "realistic") -> str:
         """Pick the best DOWNLOADED model for this prompt (chat auto-router).
 
-        Intent-ordered preferences, best first; always falls through to a model
-        that actually exists on disk. Z-Image-Turbo leads on ≤16–18GB cards —
-        strongest prompt adherence per VRAM. Krea2 leads only on ≥20GB GPUs.
+        A Stills model chosen in Settings comes first (configured_default_for_auto);
+        with none chosen, intent-ordered preferences, best first, always falling
+        through to a model that actually exists on disk. Z-Image-Turbo leads on
+        ≤16–18GB cards — strongest prompt adherence per VRAM. Krea2 leads only on
+        ≥20GB GPUs.
         """
+        preferred = self.configured_default_for_auto()
+        if preferred:
+            if self.is_comfy_only_model(preferred):
+                # The offline router cannot render a ComfyUI model; the façade and
+                # batch intake route that default to ComfyUI before reaching here.
+                logger.info(
+                    "Auto: the Stills default %r renders through ComfyUI; the offline "
+                    "router picks by card size", preferred,
+                )
+            else:
+                logger.info("Auto: using the Stills default %r from Settings", preferred)
+                return preferred
         detection = self.detect_content_type(prompt)
         p = prompt.lower()
         lead = "krea2-turbo" if self._prefer_krea2_for_auto() else "zimage-turbo"
@@ -1760,10 +1910,28 @@ class OfflineImageGenerator:
             user_file = self._user_file_entry(model_id)
             if user_file and user_file.get("kind") == "single_file":
                 # A merged checkpoint (SD / SDXL): diffusers rebuilds the pipeline
-                # from the one file instead of a component tree.
+                # from the one file and the base config Install put beside it.
+                # Given a folder as config, from_single_file reads configs and
+                # tokenizers from it; without one it asks the hub.
+                from backend.services.user_image_models import (
+                    single_file_config_dir, single_file_config_present,
+                )
                 checkpoint = model_path / user_file["files"][0]["dst"]
+                if not single_file_config_present(self, model_id):
+                    self._install_needed = model_id
+                    logger.warning(
+                        "Base config for %s is not installed; not downloading it from a generate call",
+                        model_id,
+                    )
+                    return False
+                config_dir = single_file_config_dir(self, model_id)
                 logger.info(f"Loading single-file checkpoint {checkpoint.name} (family: {family})")
-                self._pipeline = pipeline_class.from_single_file(str(checkpoint), **load_kwargs)
+                self._pipeline = pipeline_class.from_single_file(
+                    str(checkpoint),
+                    config=str(config_dir),
+                    local_files_only=True,
+                    **load_kwargs,
+                )
             else:
                 self._pipeline = pipeline_class.from_pretrained(
                     model_path,
@@ -2240,14 +2408,15 @@ class OfflineImageGenerator:
 
         enhanced_prompt = f"{prompt}, {', '.join(unique_enhancements)}"
 
-        # Long-context encoders (Krea2/Z-Image) hard-cap at 512 tokens and the
-        # tokenizer truncates SILENTLY — on long user prompts the tail that fell
-        # off was exactly the coherence/subject guards appended above. Re-fit so
-        # the user's prompt always survives intact and suffixes are kept in
-        # priority order only while they still fit.
-        if (family or "").lower() in self._LONG_CONTEXT_FAMILIES:
+        # Long-context encoders (Krea2/Z-Image) encode a fixed number of tokens
+        # and the tokenizer truncates SILENTLY — on long user prompts the tail
+        # that fell off was exactly the coherence/subject guards appended above.
+        # Re-fit so the user's prompt always survives intact and suffixes are
+        # kept in priority order only while they still fit.
+        fam = (family or "").lower()
+        if self._prompt_token_limit(fam):
             enhanced_prompt = self._fit_enhancements_to_token_budget(
-                prompt, enhancements, enhanced_prompt
+                prompt, enhancements, enhanced_prompt, fam
             )
         logger.debug(
             f"Image prompt enhancement complete (enhanced_prompt_len={len(enhanced_prompt)})"
@@ -2306,28 +2475,32 @@ class OfflineImageGenerator:
         style_config = self.style_configs.get(style, self.style_configs.get("realistic", {}))
         return prompt, style_config.get("negative_prompt", "") or ""
 
-    # Krea2Pipeline / Z-Image default max_sequence_length. Their tokenizers
-    # truncate anything past this without a warning.
-    _LONG_CONTEXT_FAMILIES = ("krea2", "zimage")
-    _LONG_CONTEXT_TOKEN_LIMIT = 512
+    @staticmethod
+    def _prompt_token_limit(family: Optional[str]) -> Optional[int]:
+        """Tokens the family's offline pipeline encodes (``max_prompt_tokens`` on
+        its registry row); its tokenizer drops anything past it without a
+        warning. None for families with no declared cap."""
+        from backend.services.prompt_token_budget import max_prompt_tokens
+        return max_prompt_tokens(family) if family else None
 
-    def _count_prompt_tokens(self, text: str) -> int:
+    def _count_prompt_tokens(self, text: str, family: str = "") -> int:
         """Token count via the loaded pipeline's tokenizer when available;
-        conservative prose estimate otherwise (~1.5 tokens/word — measured 1.34
-        on real long prompts, so the estimate errs toward trimming earlier)."""
+        conservative prose estimate otherwise."""
+        from backend.services.prompt_token_budget import count_prompt_tokens, estimate_prompt_tokens
         tokenizer = getattr(getattr(self, "_pipeline", None), "tokenizer", None)
         if tokenizer is not None:
             try:
-                return len(tokenizer(text).input_ids)
+                return count_prompt_tokens(family, text, tokenizer)
             except Exception:
                 pass
-        return int(len(text.split()) * 1.5) + 1
+        return estimate_prompt_tokens(text)
 
     def _fit_enhancements_to_token_budget(
         self,
         prompt: str,
         prioritized_enhancements: List[Tuple[int, str]],
         fused_prompt: str,
+        family: str,
     ) -> str:
         """Keep prompt + suffixes within the long-context encoder budget.
 
@@ -2335,11 +2508,11 @@ class OfflineImageGenerator:
         greedily in priority order (subject/coherence guards first, style
         boilerplate last) while the total still fits.
         """
-        budget = self._LONG_CONTEXT_TOKEN_LIMIT
-        if self._count_prompt_tokens(fused_prompt) <= budget:
+        budget = self._prompt_token_limit(family)
+        if self._count_prompt_tokens(fused_prompt, family) <= budget:
             return fused_prompt
 
-        if self._count_prompt_tokens(prompt) >= budget:
+        if self._count_prompt_tokens(prompt, family) >= budget:
             logger.warning(
                 "User prompt alone is at/over the %d-token encoder limit "
                 "(%d words) — enhancement suffixes skipped and the prompt tail "
@@ -2357,7 +2530,7 @@ class OfflineImageGenerator:
                 if not p_clean or p_clean.lower() in seen:
                     continue
                 candidate = f"{prompt}, {', '.join(kept + [p_clean])}"
-                if self._count_prompt_tokens(candidate) > budget:
+                if self._count_prompt_tokens(candidate, family) > budget:
                     continue
                 seen.add(p_clean.lower())
                 kept.append(p_clean)
@@ -2533,7 +2706,7 @@ Negative Prompt: {negative_prompt}""",
             # Central gpu_session for *all* direct calls (chat tool, batch, API, edits via img2img).
             # Provides GPU lease + evict + GlobalLoadGate RAM/swap admission using our real estimates.
             # Reentrant-safe; chat tool may outer-wrap.
-            from backend.services.gpu_resource_policy import gpu_session
+            from backend.services.gpu_resource_policy import RenderStopped, gpu_session, raise_if_stopped
             from backend.services.job_operation_gate import GpuBusyError
             from backend.services.job_types import JobKind
             import uuid as _uuid_local
@@ -2681,6 +2854,10 @@ Negative Prompt: {negative_prompt}""",
 
                 # (Resolution clamp moved ABOVE the estimates — 2026-08-04.)
 
+                # A stop while the GPU was being claimed ends here, before any
+                # eviction or load.
+                raise_if_stopped(request.should_stop, "before the model loaded")
+
                 # Make room BEFORE loading — family-aware estimate + Ollama eviction
                 # when the card is too full. Runs after ALL model rerouting so the
                 # estimate matches the model we actually load.
@@ -2696,6 +2873,9 @@ Negative Prompt: {negative_prompt}""",
                         f"Model {request.model} ({model_id}) failed to load: {result.error}"
                     )
                     return result
+
+                # A load takes seconds to tens of seconds; a stop during it ends here.
+                raise_if_stopped(request.should_stop, "after the model loaded")
 
                 # Pin sd:pipeline for the duration of this forward so idle eviction
                 # cannot null scheduler mid-denoise (300s default timeout).
@@ -2878,7 +3058,8 @@ Negative Prompt: {negative_prompt}""",
 
                 # Mid-denoise RAM floor (2026-08-04): admission can't guard a
                 # minutes-long forward; the watchdog aborts per-step on breach.
-                _watchdog = self._ram_watchdog_callback()
+                # The same callback ends the forward when the caller stops.
+                _watchdog = self._denoise_callback(request.should_stop)
                 _watchdog_kwargs = (
                     {"callback_on_step_end": _watchdog} if _watchdog else {}
                 )
@@ -2916,6 +3097,7 @@ Negative Prompt: {negative_prompt}""",
                             num_inference_steps=request.num_inference_steps,
                             guidance_scale=request.guidance_scale,
                             generator=generator,
+                            max_sequence_length=self._prompt_token_limit(family),
                             **_watchdog_kwargs,
                         )
                     if self._device == "cuda":
@@ -3031,10 +3213,24 @@ Negative Prompt: {negative_prompt}""",
                         except Exception:
                             pass
                         self._unload_pipeline()
+                        # Set when evicting Ollama is what freed the card: the
+                        # chat model, not this render, was short of room.
+                        evicted_chat = False
                         try:
                             if torch.cuda.is_available():
                                 free_b, _ = torch.cuda.mem_get_info()
                                 free_mb = free_b // (1024 * 1024)
+                                if free_mb < 4000:
+                                    # The usual other tenant is the chat model,
+                                    # loaded mid-job by a prompt rewrite or a
+                                    # chat turn; it reloads on its next request.
+                                    from backend.services.gpu_resource_policy import evict_ollama_models
+                                    if evict_ollama_models():
+                                        free_mb = torch.cuda.mem_get_info()[0] // (1024 * 1024)
+                                        evicted_chat = free_mb >= 4000
+                                        logger.warning(
+                                            "After OOM unload and Ollama eviction %sMB free", free_mb
+                                        )
                                 if free_mb < 4000:
                                     logger.error(
                                         "After OOM unload only %sMB free — refusing "
@@ -3050,13 +3246,49 @@ Negative Prompt: {negative_prompt}""",
                         except Exception:
                             pass
 
+                        output = None
+                        # Attempt 0: the card was full of the chat model. Reload the
+                        # same model the same way and retry once, keeping the seed.
+                        if evicted_chat:
+                            try:
+                                self._ensure_vram_for_pipeline(model_id, request.width, request.height)
+                                if self._load_pipeline(model_id, force_sequential=(prior_offload == "sequential"),
+                                                       allow_download=request.allow_model_download):
+                                    if request.seed is not None:
+                                        generator = self._seed_generator(request.seed)
+                                    else:
+                                        seed = result.seed_used or torch.randint(0, 2**32, (1,)).item()
+                                        generator = self._seed_generator(seed)
+                                        result.seed_used = seed
+                                    output = _call_pipeline(enhanced_prompt, neg)
+                                    logger.info(
+                                        f"{failed_label} retry succeeded after evicting Ollama"
+                                    )
+                            except Exception as retry_err:
+                                if is_fatal_cuda_error(retry_err):
+                                    raise
+                                if not (self._is_cuda_oom(retry_err) or isinstance(retry_err, RuntimeError)):
+                                    raise
+                                logger.warning(
+                                    f"Retry after evicting Ollama failed for {failed_label}: {retry_err}"
+                                )
+                                _detach_exception(retry_err)
+                                _gc.collect()
+                                self._unload_pipeline()
+                                try:
+                                    if torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                                except Exception:
+                                    pass
+                                output = None
+
                         # Large-canvas OOM: reload ladder DISABLED by design
                         # (2026-08-04). With tiling active, a >1MP OOM means genuinely
                         # insufficient memory — a sequential reload retries the same
                         # doomed forward with a second ~24GB host-resident pipeline,
                         # and the old ladder stacked three of them until the desktop
                         # died. Fail the item loudly instead.
-                        if request.width * request.height > 1024 * 1024:
+                        if output is None and request.width * request.height > 1024 * 1024:
                             result.error = (
                                 f"CUDA out of memory at {request.width}x{request.height} "
                                 f"with {failed_label} ({oom_summary}). Large-canvas OOM "
@@ -3066,9 +3298,8 @@ Negative Prompt: {negative_prompt}""",
                             result.generation_time = time.time() - start_time
                             return result
 
-                        output = None
                         # Attempt 1: same model with sequential offload if not already.
-                        if family in ('krea2', 'zimage') and prior_offload != "sequential":
+                        if output is None and family in ('krea2', 'zimage') and prior_offload != "sequential":
                             logger.warning(
                                 f"{family} OOM → retrying with sequential CPU offload"
                             )
@@ -3272,6 +3503,14 @@ Negative Prompt: {negative_prompt}""",
                 except Exception:
                     pass
 
+            except RenderStopped as stopped:
+                # The finally below unloads the pipeline and releases the GPU
+                # session; detach first so the forward's frames do not pin it.
+                logger.info("Image generation %s", stopped)
+                _detach_exception(stopped)
+                result.error = "Stopped before the image finished; nothing was saved."
+                result.metadata = {"stopped": True}
+                result.generation_time = time.time() - start_time
             except Exception as e:
                 logger.error(f"Image generation failed: {type(e).__name__}: {e}", exc_info=True)
                 if is_fatal_cuda_error(e):
@@ -3802,6 +4041,7 @@ Negative Prompt: {negative_prompt}""",
                     if family == 'zimage':
                         # Z-Image is bf16 flow-matching — no autocast; CFG distilled out.
                         call_kwargs["negative_prompt"] = None
+                        call_kwargs["max_sequence_length"] = self._prompt_token_limit(family)
                         output = self._img2img_pipeline(**call_kwargs)
                     elif self._device == "cuda":
                         _ac_dtype = (
@@ -3937,9 +4177,13 @@ Negative Prompt: {negative_prompt}""",
                 "selectable": availability in ("ready", "downloadable"),
                 "gated": gated,
                 "current": model_id == self._current_model,
+                # ComfyUI rows say which files are still missing (model + companions),
+                # the way the editing packs do; offline rows have no file list.
+                "missing_files": [] if downloaded else self.missing_files_for(model_key),
                 "size_estimate": (
                     "28-36GB" if "krea" in model_id.lower()
                     else "23GB+Comfy" if "flux" in model_key or "flux" in model_id.lower()
+                    else "17GB+Comfy" if "qwen-image-21" in model_key
                     else "16GB" if "z-image" in model_id.lower() or "zimage" in model_key
                     else "Comfy backend" if model_key == "comfyui"
                     else "12-15GB" if "xl" in model_id.lower()

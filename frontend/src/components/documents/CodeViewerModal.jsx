@@ -24,11 +24,14 @@ import {
   Save as SaveIcon,
   Visibility as ViewIcon,
 } from "@mui/icons-material";
-import Editor from "@monaco-editor/react";
+import Editor from "../../utils/monaco";
 import { getDocumentContent, getRepoFileContent, updateDocument } from "../../api/documentService";
 import { getLanguageFromFilename } from "../../utils/languageDetector";
+import copyText from "../../utils/copyText";
 
-const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
+// startEditing opens straight into edit mode (the Files page's Edit action);
+// a live-repo file stays in view mode, as its toggle is disabled.
+const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor, startEditing = false }) => {
   const [content, setContent] = useState(null);
   const [originalContent, setOriginalContent] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -49,7 +52,7 @@ const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
     setError(null);
     setContent(null);
     setOriginalContent(null);
-    setEditing(false);
+    setEditing(Boolean(startEditing) && !isLiveRepoFile);
 
     const loader = isLiveRepoFile
       ? getRepoFileContent(file.relative_path || "")
@@ -64,13 +67,15 @@ const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
       }
       setLoading(false);
     });
-  }, [open, file?.id, file?.relative_path, isLiveRepoFile]);
+  }, [open, file?.id, file?.relative_path, isLiveRepoFile, startEditing]);
 
   const handleCopy = async () => {
     if (!content) return;
-    await navigator.clipboard.writeText(content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    // copyText falls back to execCommand: navigator.clipboard is absent over plain http on the LAN.
+    if (await copyText(content)) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   const handleOpenInEditor = () => {
@@ -152,19 +157,25 @@ const CodeViewerModal = ({ open, onClose, file, onOpenInCodeEditor }) => {
         </Box>
         <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
           <Tooltip title={editing ? "View mode" : "Edit mode"}>
-            <IconButton size="small" onClick={handleToggleEdit} disabled={loading || !!error || isLiveRepoFile}>
-              {editing ? <ViewIcon fontSize="small" /> : <EditIcon fontSize="small" />}
-            </IconButton>
+            <span>
+              <IconButton size="small" onClick={handleToggleEdit} disabled={loading || !!error || isLiveRepoFile}>
+                {editing ? <ViewIcon fontSize="small" /> : <EditIcon fontSize="small" />}
+              </IconButton>
+            </span>
           </Tooltip>
           <Tooltip title="Open in Code Editor">
-            <IconButton size="small" onClick={handleOpenInEditor} disabled={loading || !!error}>
-              <CodeIcon fontSize="small" />
-            </IconButton>
+            <span>
+              <IconButton size="small" onClick={handleOpenInEditor} disabled={loading || !!error}>
+                <CodeIcon fontSize="small" />
+              </IconButton>
+            </span>
           </Tooltip>
           <Tooltip title="Copy to clipboard">
-            <IconButton size="small" onClick={handleCopy} disabled={!content}>
-              {copied ? <CheckIcon fontSize="small" color="success" /> : <CopyIcon fontSize="small" />}
-            </IconButton>
+            <span>
+              <IconButton size="small" onClick={handleCopy} disabled={!content}>
+                {copied ? <CheckIcon fontSize="small" color="success" /> : <CopyIcon fontSize="small" />}
+              </IconButton>
+            </span>
           </Tooltip>
           <IconButton size="small" onClick={handleClose}>
             <CloseIcon fontSize="small" />

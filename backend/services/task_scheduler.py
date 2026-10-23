@@ -64,65 +64,11 @@ def _execute_task(app, task_id: int) -> None:
                 # Continue without progress tracking if it fails
 
             try:
-                # Get the model to use (task-specific or default)
-                model_name = task.model_name
-                if not model_name:
-                    # Try to get default task model from settings
-                    try:
-                        from backend.api.tasks_api import get_default_task_model
-                        default_model = get_default_task_model()
-                        if default_model:
-                            model_name = default_model
-                    except Exception as e:
-                        logger.warning(f"Could not get default task model: {e}")
-
-                if not model_name:
-                    # Try the active model
-                    try:
-                        from backend.models import get_active_model_name
-                        model_name = get_active_model_name()
-                    except Exception:
-                        pass
-
-                if not model_name:
-                    # Query Ollama directly for any available model
-                    try:
-                        import requests as _requests
-                        ollama_base_url = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434')
-                        resp = _requests.get(f"{ollama_base_url}/api/tags", timeout=5)
-                        if resp.ok:
-                            models = resp.json().get('models', [])
-                            if models:
-                                model_name = models[0]['name']
-                                logger.info(f"Using first available Ollama model: {model_name}")
-                    except Exception as e:
-                        logger.warning(f"Could not query Ollama for models: {e}")
-
-                if not model_name:
-                    raise ValueError("No LLM model available. Pull a model with 'ollama pull <model>' or set DEFAULT_LLM_MODEL env var.")
-
-                # Validate model name with single database query
-                if model_name and model_name != "default":
-                    try:
-                        from backend.models import Model
-                        # Single query to check if model exists and get fallback
-                        models = db.session.query(Model).all()
-                        model_names = [m.name for m in models]
-
-                        if model_name not in model_names:
-                            if model_names:
-                                fallback_model = model_names[0]
-                                logger.warning(f"Model '{model_name}' not found, using '{fallback_model}'")
-                                model_name = fallback_model
-                            else:
-                                logger.warning("No models found in database, using 'default'")
-                                model_name = "default"
-                        else:
-                            logger.info(f"Using validated model: {model_name}")
-
-                    except Exception as e:
-                        logger.warning(f"Could not validate model '{model_name}': {e}, using 'default'")
-                        model_name = "default"
+                model_name, model_note = _resolve_task_model(task)
+                if model_note:
+                    logger.warning("Task %s: %s", task_id, model_note)
+                else:
+                    logger.info("Task %s uses model %s", task_id, model_name)
 
                 prompt = task.prompt_text or task.name
 
@@ -165,9 +111,10 @@ def _execute_task(app, task_id: int) -> None:
 
                 # Validate output content
                 if output is None or not str(output).strip():
-                    logger.warning("LLM produced no output for task %s", task_id)
+                    logger.warning("LLM produced no output for task %s (model %s)", task_id, model_name)
                     task.status = "failed"
-                    task.error_message = "LLM generated empty or invalid content"
+                    task.error_message = " ".join(filter(None, (
+                        f"LLM generated empty or invalid content (model {model_name}).", model_note)))
                     task.updated_at = datetime.datetime.now(datetime.timezone.utc)
                     db.session.commit()
 
@@ -218,6 +165,7 @@ def _execute_task(app, task_id: int) -> None:
             except Exception as e:
                 logger.error("Task execution failed: %s", e, exc_info=True)
                 task.status = "failed"
+                task.error_message = str(e)[:1000]
                 task.updated_at = datetime.datetime.now(datetime.timezone.utc)
                 db.session.commit()
 
@@ -232,6 +180,62 @@ def _execute_task(app, task_id: int) -> None:
                         logger.warning(f"Failed to update error progress for task {task_id}: {progress_error}")
         finally:
             db.session.remove()
+
+
+def _installed_ollama_models() -> Optional[list]:
+    """Model tags Ollama has installed, or None when Ollama cannot be asked."""
+    import requests as _requests
+    base_url = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434')
+    try:
+        resp = _requests.get(f"{base_url}/api/tags", timeout=5)
+        resp.raise_for_status()
+        return [m['name'] for m in resp.json().get('models', []) if m.get('name')]
+    except Exception as e:
+        logger.warning(f"Could not query Ollama for models: {e}")
+        return None
+
+
+def _resolve_task_model(task) -> tuple:
+    """(model, note) for a task: its own model, else the default task model,
+    else the active model, checked against what Ollama has installed. Falls
+    back only when none is chosen or the chosen one is not installed: to the
+    default task or active model if installed, else the first installed model
+    that is not an embedding model; the note then says which and why. When
+    Ollama cannot be asked, a chosen model is kept as is."""
+    default_model = active_model = None
+    try:
+        from backend.api.tasks_api import get_default_task_model
+        default_model = get_default_task_model()
+    except Exception as e:
+        logger.warning(f"Could not get default task model: {e}")
+    try:
+        from backend.models import get_active_model_name
+        active_model = get_active_model_name()
+    except Exception:
+        pass
+    if active_model == "default_model_name":  # get_active_model_name's "nothing set"
+        active_model = None
+    chosen = task.model_name or default_model or active_model
+
+    installed = _installed_ollama_models()
+    if installed is None:
+        if chosen:
+            return chosen, None
+        raise ValueError("No model chosen for the task and Ollama could not be asked which are installed.")
+
+    def usable(name):
+        return bool(name) and (name in installed or f"{name}:latest" in installed)
+
+    if usable(chosen):
+        return chosen, None
+    candidates = [m for m in (default_model, active_model) if usable(m)]
+    candidates += [m for m in installed if "embed" not in m.lower()]
+    if not candidates:
+        raise ValueError("No LLM model available. Pull a model with 'ollama pull <model>' or set DEFAULT_LLM_MODEL env var.")
+    fallback = candidates[0]
+    if chosen:
+        return fallback, f"Model {chosen} is not installed in Ollama; used {fallback} instead."
+    return fallback, f"No model was chosen for the task; used {fallback}."
 
 
 def _write_output(app, filename: str, content: str) -> None:
@@ -258,6 +262,10 @@ def _write_output(app, filename: str, content: str) -> None:
 
 def process_pending_tasks(app) -> None:
     """Process all tasks in the pending state that are due."""
+    # Job order on: while a chat or voice turn runs, due rows wait for a later pass.
+    from backend.services import job_arbiter
+    if job_arbiter.should_yield("scheduled_task"):
+        return
     with app.app_context():
         try:
             now = datetime.datetime.now(datetime.timezone.utc)

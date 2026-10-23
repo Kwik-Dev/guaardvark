@@ -71,6 +71,17 @@ def test_mode_resolution(sandbox):
     assert "MODE=keep" in out
 
 
+def test_flags_accept_the_backend_set(sandbox):
+    """Settings writes "1"; a hand-edited .env may say true/yes/on, which the
+    backend (ollama_is_external) accepts, so the scripts do too."""
+    for value in ("true", "YES", "on", "1"):
+        out, _ = run(sandbox, "", extra_env={"GUAARDVARK_OLLAMA_KEEP_RUNNING": value}, flags=("1", "0"))
+        assert "MODE=keep" in out, value
+    for value in ("0", "false", "", "off"):
+        out, _ = run(sandbox, "", extra_env={"GUAARDVARK_OLLAMA_KEEP_RUNNING": value}, flags=("1", "0"))
+        assert "MODE=all" in out, value
+
+
 def test_owned_mode_stops_only_the_pid_file_instance(sandbox):
     tmp_path, _, _ = sandbox
     pid_file = tmp_path / "ollama.pid"

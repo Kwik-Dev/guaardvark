@@ -21,6 +21,8 @@ os.environ.setdefault("NLTK_DISABLE_IMPORT_SECURITY", "1")
 import backend.utils.llama_index_local_config
 
 import logging
+
+logger = logging.getLogger(__name__)
 import threading
 import re
 import hashlib
@@ -58,7 +60,64 @@ from llama_index.core.node_parser import (
 from llama_index.core.schema import BaseNode, TextNode, NodeRelationship, RelatedNodeInfo
 from llama_index.core.text_splitter import TokenTextSplitter
 
-logger = logging.getLogger(__name__)
+
+# File types decided without reading the text (_detect_best_chunking_strategy).
+CODE_CHUNK_EXTENSIONS = frozenset({
+    '.py', '.js', '.jsx', '.ts', '.tsx', '.html', '.htm', '.css',
+    '.php', '.java', '.c', '.cpp', '.h', '.hpp', '.go', '.rs',
+    '.rb', '.sql', '.json', '.xml', '.yml', '.yaml',
+})
+PROSE_EXTENSIONS = frozenset({
+    '.md', '.markdown', '.txt', '.text', '.rst', '.adoc', '.org', '.tex',
+    '.pdf', '.docx', '.doc', '.pptx', '.ppt', '.odt', '.rtf', '.epub',
+    '.eml', '.msg', '.csv', '.tsv', '.xlsx', '.xls', '.log',
+})
+
+# A line that only source code starts this way: a keyword followed by a name or
+# a bracket, an include, a shebang. Prose ("let us return to {x}") does not.
+_CODE_LINE = re.compile(
+    r"^\s*(?:"
+    r"(?:def|class|func|fn)\s+[A-Za-z_]\w*\s*[\(:<\[{]"
+    r"|(?:async\s+)?function\s*[A-Za-z_$]?[\w$]*\s*\("
+    r"|(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*(?::[^=]+)?="
+    r"|import\s+[\w.{*]+.*(?:from\s+['\"]|;|$)"
+    r"|from\s+[\w.]+\s+import\s+"
+    r"|#include\s*[<\"]"
+    r"|package\s+[\w.]+;?\s*$"
+    r"|(?:public|private|protected)\s+(?:static\s+)?[\w<>\[\]]+\s+\w+\s*\("
+    r"|return\s+[^.!?]*;\s*$"
+    r"|[}\])];?\s*$"
+    r"|(?:if|for|while)\s*\(.*\)\s*\{\s*$"
+    r")"
+)
+
+
+def _looks_like_code(text: str) -> bool:
+    """Source code by its lines: a shebang, or at least 5 lines that only code
+    has making up at least 30% of the non-blank lines (of the first 400)."""
+    lines = [ln for ln in text.splitlines()[:400] if ln.strip()]
+    if not lines:
+        return False
+    if lines[0].startswith("#!"):
+        return True
+    code_lines = sum(1 for ln in lines if _CODE_LINE.match(ln))
+    return code_lines >= 5 and code_lines / len(lines) >= 0.3
+
+
+def _document_extension(metadata: Dict[str, Any]) -> str:
+    """The file's extension from what the loaders record: file_extension, else
+    the name or path of the source file. "" when none of them has one."""
+    ext = str(metadata.get('file_extension') or '').lower()
+    if ext:
+        return ext if ext.startswith('.') else f'.{ext}'
+    for key in ('source_filename', 'file_name', 'file_path'):
+        name = metadata.get(key)
+        if name:
+            ext = os.path.splitext(str(name))[1].lower()
+            if ext:
+                return ext
+    return ''
+
 
 @dataclass
 class ChunkMetadata:
@@ -1547,40 +1606,22 @@ class EnhancedRAGChunker:
         }
     
     def _detect_best_chunking_strategy(self, document: LlamaDocument) -> str:
-        """Automatically detect the best chunking strategy for a document"""
+        """The chunking strategy for a document: from its file type first; the
+        text is examined only when the type is unknown, and only lines that are
+        unmistakably code count."""
         metadata = document.metadata or {}
-        file_extension = metadata.get('file_extension', '').lower()
+        file_extension = _document_extension(metadata)
 
-        # Code file extensions that should use the code chunker
-        code_extensions = {
-            '.py', '.js', '.jsx', '.ts', '.tsx', '.html', '.htm', '.css',
-            '.php', '.java', '.c', '.cpp', '.h', '.hpp', '.go', '.rs',
-            '.rb', '.sql', '.json', '.xml', '.yml', '.yaml'
-        }
-
-        if file_extension in code_extensions:
+        if file_extension in CODE_CHUNK_EXTENSIONS:
             return 'code'
+        if file_extension in PROSE_EXTENSIONS:
+            return 'adaptive'
 
-        # Fallback: analyze content for code patterns if no file extension
-        if not file_extension:
-            content = document.get_content()
-            if content:
-                content_lower = content.lower()
-                # Check for common code patterns
-                code_patterns = [
-                    'def ', 'class ', 'function ', 'import ', 'require(',
-                    '<?php', '<html', '#!/', 'package ', 'public class',
-                    'const ', 'let ', 'var ', '=>', 'function(', 'return',
-                    '{', '}', '#include', 'SELECT ', 'CREATE TABLE'
-                ]
-
-                # If content has multiple code indicators, likely a code file
-                code_indicator_count = sum(1 for pattern in code_patterns if pattern in content_lower)
-                if code_indicator_count >= 3:  # Threshold for code detection
-                    logger.info(f"Content-based code detection: {code_indicator_count} patterns found")
-                    return 'code'
-
-        # Use adaptive for other files
+        # Unknown type (no extension, or one not listed): look at the text.
+        if _looks_like_code(document.get_content() or ""):
+            logger.info("Content-based code detection: %s reads as source code",
+                        metadata.get('source_filename') or metadata.get('file_name') or "document")
+            return 'code'
         return 'adaptive'
 
     def _reduce_to_leaf_nodes(self, nodes: List[BaseNode]) -> List[BaseNode]:
@@ -1619,8 +1660,14 @@ class EnhancedRAGChunker:
         return leaves
 
     def chunk_documents(self, documents: List[LlamaDocument],
-                       strategy_name: str = 'auto') -> List[BaseNode]:
-        """Chunk multiple documents using specified strategy"""
+                       strategy_name: str = 'auto',
+                       errors: Optional[List[str]] = None) -> List[BaseNode]:
+        """Chunk multiple documents using specified strategy.
+
+        A document that cannot be chunked is skipped and logged; pass ``errors``
+        (a list) to be told about it, one message per document, so the caller
+        can fail the ingest instead of indexing the file with a part missing.
+        """
         all_nodes = []
 
         for document in documents:
@@ -1711,6 +1758,8 @@ class EnhancedRAGChunker:
             except Exception as e:
                 logger.error(f"Error chunking document {document.doc_id}: {e}")
                 self.chunking_stats['chunking_errors'] += 1
+                if errors is not None:
+                    errors.append(f"{e.__class__.__name__}: {e}")
 
         all_nodes = self._reduce_to_leaf_nodes(all_nodes)
 

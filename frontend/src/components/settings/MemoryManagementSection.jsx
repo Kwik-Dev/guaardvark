@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Box,
   Typography,
@@ -22,6 +22,8 @@ import {
 } from "@mui/material";
 import CollapsibleAlert from "../common/CollapsibleAlert";
 import CloseIcon from "@mui/icons-material/Close";
+import BlockIcon from "@mui/icons-material/Block";
+import ArchiveOutlinedIcon from "@mui/icons-material/ArchiveOutlined";
 import AddIcon from "@mui/icons-material/Add";
 import SearchIcon from "@mui/icons-material/Search";
 import MemoryIcon from "@mui/icons-material/Memory";
@@ -31,6 +33,8 @@ import { ActionButton, ChoiceChips, ConfirmActionDialog, Hint } from "./ui";
 import EntityContextMenu from "../common/EntityContextMenu";
 import useContextMenu from "../../hooks/useContextMenu";
 import copyText from "../../utils/copyText";
+import { handleResponse } from "../../api/apiClient";
+import { formatUiError } from "../../utils/uiError";
 
 // Compact spreadsheet-style timestamp: "MM/DD HH:MM:SS". Full ISO available
 // on hover via title attribute for forensic detail.
@@ -53,6 +57,20 @@ const formatTimestamp = (iso) => {
 // silently broke every memory save when the backend happened to land on :5000.
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 
+// A memory API call's JSON body. An error status (or an offline backend)
+// throws with the server's reason through apiClient.handleResponse instead
+// of being read as a body without `success`.
+const requestJson = async (url, init) => {
+  const res = await fetch(url, init);
+  if (res.ok === false) return handleResponse(res, { quiet: true });
+  return res.json();
+};
+
+// Rows per request. The API answers one page and the real count of matching
+// rows (total); the footer shows that count with a Load more button while
+// rows remain.
+const PAGE_SIZE = 100;
+
 // Parse a lesson_summary memory's JSON content. Returns null if the content
 // isn't valid JSON — caller falls back to generic rendering so malformed
 // lessons are still visible (and editable via the plain text dialog).
@@ -71,11 +89,56 @@ const parseLesson = (memory) => {
   }
 };
 
+// Words too common to tell two memories apart.
+const COMMON_WORDS = new Set([
+  "the", "and", "for", "with", "that", "this", "are", "was", "were", "has", "have", "had",
+  "not", "but", "you", "your", "user", "users", "from", "into", "when", "then", "than",
+  "its", "his", "her", "their", "they", "them", "our", "use", "uses", "used", "should",
+]);
+
+// Share of the shorter memory's words the other must hold, and the fewest
+// shared words, before the two count as saying the same thing. Two words
+// minimum keeps one common term ("docker") from pairing unrelated memories.
+const SIMILAR_SHARE = 0.75;
+const SIMILAR_MIN_SHARED = 2;
+
+const memoryWords = (text) =>
+  new Set(
+    ((text || "").toLowerCase().match(/[a-z0-9]+/g) || []).filter((w) => w.length > 2 && !COMMON_WORDS.has(w)),
+  );
+
+/**
+ * Loaded memories that read like `memory`, the ones Merge Duplicate offers.
+ * Lesson summaries hold JSON steps, so they are never merged into.
+ */
+const similarMemories = (memory, memories) => {
+  const words = memoryWords(memory?.content);
+  if (!memory || words.size === 0) return [];
+  return memories.filter((m) => {
+    if (String(m.id) === String(memory.id) || m.source === "lesson_summary") return false;
+    const other = memoryWords(m.content);
+    let shared = 0;
+    for (const w of words) if (other.has(w)) shared += 1;
+    const smaller = Math.min(words.size, other.size);
+    if (smaller === 0) return false;
+    // The same words (a one-word memory and its copy too), or most of them.
+    if (shared === words.size && shared === other.size) return true;
+    return shared >= SIMILAR_MIN_SHARED && shared / smaller >= SIMILAR_SHARE;
+  });
+};
+
 // `title`/`icon` default to the section heading the Settings page expects.
 // AgentMemoryPage renders this under a PageLayout header that already says
 // "Agent Memory", and passes title={null} so the name isn't printed twice.
 const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon /> }) => {
   const [memories, setMemories] = useState([]);
+  // The API's count of matching rows; null until the first page answers.
+  const [total, setTotal] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // The search, filters and sort the list on screen was fetched with. Load
+  // more reuses these, not the controls' current values, which only Apply
+  // Filters or Search put into effect.
+  const appliedRef = useRef(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -90,6 +153,13 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
   const [newTags, setNewTags] = useState("");
   const [newType, setNewType] = useState("fact");
   const [adding, setAdding] = useState(false);
+  // Set when Add found its text already saved: the API answers with that
+  // memory instead of writing a second copy.
+  const [notice, setNotice] = useState(null);
+  // A failed edit, delete, merge, clear or add; said above the table.
+  const [actionError, setActionError] = useState(null);
+  // Deletes wait for ConfirmActionDialog: one memory's id, or "all".
+  const [pendingDelete, setPendingDelete] = useState(null);
 
   // Type-aware placeholder. Preference reads naturally in first person (it's
   // *about* the user). Everything else gets imperative/observational phrasing
@@ -139,51 +209,83 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     if (!content) return;
     setSavingEdit(true);
     try {
-      const res = await fetch(`${BASE_URL}/memory/${editTarget.id}`, {
+      const data = await requestJson(`${BASE_URL}/memory/${editTarget.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content }),
       });
-      const data = await res.json();
       if (data.success) {
         setMemories((prev) => prev.map((m) => (m.id === editTarget.id ? data.memory : m)));
         setEditTarget(null);
       } else {
-        alert(data.error || "Failed to update memory");
+        setActionError(formatUiError(data.error || "Failed to update memory") || "The memory request failed");
       }
     } catch (err) {
-      alert(err.message);
+      setActionError(formatUiError(err.message) || "The memory request failed");
     } finally {
       setSavingEdit(false);
     }
   };
 
-  const fetchMemories = async (query = "") => {
-    setLoading(true);
+  const memoryUrl = (applied, limit) => {
+    const url = new URL(`${BASE_URL}/memory`, window.location.origin);
+    if (applied.search) url.searchParams.append("search", applied.search);
+    if (applied.type) url.searchParams.append("type", applied.type);
+    if (applied.source) url.searchParams.append("source", applied.source);
+    // "all" asks for every status; without it the API leaves out rows
+    // marked wrong.
+    if (applied.status) url.searchParams.append("status", applied.status);
+    if (applied.sort) url.searchParams.append("sort", applied.sort);
+    url.searchParams.append("limit", limit);
+    return url;
+  };
+
+  // Always from the top, `rows` rows at most (rounded up to whole pages).
+  // Fetching the whole shown range again, rather than the next offset, is
+  // what keeps a page from skipping a row: an Archive or Wrong click keeps
+  // its row on screen while the server's status filter no longer returns
+  // it, so an offset of the on-screen count would start one row late.
+  const loadRows = async (applied, rows, { quiet = false } = {}) => {
+    if (quiet) setLoadingMore(true);
+    else setLoading(true);
     setError(null);
     try {
-      const url = new URL(`${BASE_URL}/memory`, window.location.origin);
-      if (query) url.searchParams.append("search", query);
-      if (filterType) url.searchParams.append("type", filterType);
-      if (filterSource) url.searchParams.append("source", filterSource);
-      if (filterStatus) url.searchParams.append("status", filterStatus);
-      if (sortMode) url.searchParams.append("sort", sortMode);
-      url.searchParams.append("limit", 100);
-      
-      const res = await fetch(url);
-      const data = await res.json();
-      
+      const limit = Math.max(PAGE_SIZE, Math.ceil(rows / PAGE_SIZE) * PAGE_SIZE);
+      const data = await requestJson(memoryUrl(applied, limit));
+
       if (data.success) {
+        appliedRef.current = applied;
         setMemories(data.memories);
+        setTotal(typeof data.total === "number" ? data.total : data.memories.length);
       } else {
         setError(data.error || "Failed to load memories");
       }
     } catch (err) {
       setError(err.message);
     } finally {
-      setLoading(false);
+      if (quiet) setLoadingMore(false);
+      else setLoading(false);
     }
   };
+
+  // Put the controls' values into effect (Search, Apply Filters, mount), and
+  // reload: `keep` rows at least, so a save after Load more does not drop the
+  // rows the person scrolled to.
+  const fetchMemories = (query = "", keep = 0) =>
+    loadRows(
+      { search: query, type: filterType, source: filterSource, status: filterStatus, sort: sortMode },
+      keep,
+    );
+
+  const applied = () =>
+    appliedRef.current || { search: "", type: "", source: "", status: filterStatus, sort: sortMode };
+
+  // One page more than is on screen, with what the list was fetched with.
+  const loadMore = () => loadRows(applied(), memories.length + PAGE_SIZE, { quiet: true });
+
+  // After a save: the shown range again (`extra` rows more), same query, so
+  // the total is current and a new row has a place to appear.
+  const reload = (extra = 0) => loadRows(applied(), memories.length + extra);
 
   useEffect(() => {
     fetchMemories();
@@ -201,40 +303,40 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     fetchMemories(searchQuery);
   };
 
-  const handleDelete = async (id) => {
-    if (!window.confirm("Are you sure you want to delete this memory?")) return;
-    
+  const handleDelete = (id) => setPendingDelete(id);
+
+  const deleteMemory = async (id) => {
+    setActionError(null);
     try {
-      const res = await fetch(`${BASE_URL}/memory/${id}`, {
+      const data = await requestJson(`${BASE_URL}/memory/${id}`, {
         method: "DELETE",
       });
-      const data = await res.json();
       
       if (data.success) {
         setMemories(memories.filter((m) => m.id !== id));
+        setTotal((prev) => (prev == null ? prev : Math.max(0, prev - 1)));
       } else {
-        alert(data.error || "Failed to delete memory");
+        setActionError(formatUiError(data.error || "Failed to delete memory") || "The memory request failed");
       }
     } catch (err) {
-      alert(err.message);
+      setActionError(formatUiError(err.message) || "The memory request failed");
     }
   };
 
   const handleStatusChange = async (memory, status) => {
     try {
-      const res = await fetch(`${BASE_URL}/memory/${memory.id}`, {
+      const data = await requestJson(`${BASE_URL}/memory/${memory.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status }),
       });
-      const data = await res.json();
       if (data.success) {
         setMemories((prev) => prev.map((m) => (m.id === memory.id ? data.memory : m)));
       } else {
-        alert(data.error || "Failed to update memory status");
+        setActionError(formatUiError(data.error || "Failed to update memory status") || "The memory request failed");
       }
     } catch (err) {
-      alert(err.message);
+      setActionError(formatUiError(err.message) || "The memory request failed");
     }
   };
 
@@ -244,7 +346,8 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     setMergePickerOpen(true);
   };
 
-  const mergeCandidates = memories.filter((m) => String(m.id) !== String(editTarget?.id));
+  // Merge is offered only when another loaded memory reads like this one.
+  const mergeCandidates = editTarget ? similarMemories(editTarget, memories) : [];
   const mergeTarget = memories.find((m) => String(m.id) === String(mergeTargetId));
 
   const confirmMerge = async () => {
@@ -252,14 +355,13 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
     setMerging(true);
     const mergedContent = `${mergeTarget.content}\n\nMerged duplicate ${editTarget.id}: ${editContent.trim()}`;
     try {
-      const updateRes = await fetch(`${BASE_URL}/memory/${mergeTarget.id}`, {
+      const updateData = await requestJson(`${BASE_URL}/memory/${mergeTarget.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: mergedContent }),
       });
-      const updateData = await updateRes.json();
       if (!updateData.success) {
-        alert(updateData.error || "Failed to merge memory");
+        setActionError(formatUiError(updateData.error || "Failed to merge memory") || "The memory request failed");
         return;
       }
       await handleStatusChange(editTarget, "archived");
@@ -269,39 +371,41 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
       setMergePickerOpen(false);
       setMergeTargetId("");
     } catch (err) {
-      alert(err.message);
+      setActionError(formatUiError(err.message) || "The memory request failed");
     } finally {
       setMerging(false);
     }
   };
 
-  const handleClearAll = async () => {
-    if (!window.confirm("WARNING: Are you sure you want to delete ALL memories? This cannot be undone.")) return;
-    
+  const handleClearAll = () => setPendingDelete("all");
+
+  const clearAllMemories = async () => {
+    setActionError(null);
     try {
-      const res = await fetch(`${BASE_URL}/memory/clear`, {
+      const data = await requestJson(`${BASE_URL}/memory/clear`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ confirmation: "CLEAR_MEMORIES" }),
       });
-      const data = await res.json();
       
       if (data.success) {
         setMemories([]);
+        setTotal(0);
       } else {
-        alert(data.error || "Failed to clear memories");
+        setActionError(formatUiError(data.error || "Failed to clear memories") || "The memory request failed");
       }
     } catch (err) {
-      alert(err.message);
+      setActionError(formatUiError(err.message) || "The memory request failed");
     }
   };
 
   const handleAddMemory = async () => {
     if (!newContent.trim()) return;
     setAdding(true);
+    setNotice(null);
     try {
       const tagsArray = newTags.split(",").map(t => t.trim()).filter(Boolean);
-      const res = await fetch(`${BASE_URL}/memory`, {
+      const data = await requestJson(`${BASE_URL}/memory`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -311,18 +415,28 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           source: "manual"
         }),
       });
-      const data = await res.json();
-      
-      if (data.success) {
+
+      if (data.success && data.already_saved) {
+        const saved = data.memory || {};
+        const text = saved.content || "";
+        const quoted = text.length > 120 ? `${text.slice(0, 120)}…` : text;
         setOpenAdd(false);
         setNewContent("");
         setNewTags("");
-        fetchMemories(searchQuery); // refresh list
+        setNotice(
+          `Already saved: "${quoted}" is a ${saved.type || "memory"} from ${formatTimestamp(saved.created_at)}. Nothing new was added.`,
+        );
+        reload();
+      } else if (data.success) {
+        setOpenAdd(false);
+        setNewContent("");
+        setNewTags("");
+        reload(1); // refresh list and total
       } else {
-        alert(data.error || "Failed to add memory");
+        setActionError(formatUiError(data.error || "Failed to add memory") || "The memory request failed");
       }
     } catch (err) {
-      alert(err.message);
+      setActionError(formatUiError(err.message) || "The memory request failed");
     } finally {
       setAdding(false);
     }
@@ -378,7 +492,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           <option value="candidate_recipe">Candidate recipe</option>
         </TextField>
         <TextField select size="small" label="Status" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} SelectProps={{ native: true }} sx={{ minWidth: 130 }}>
-          <option value="">All status</option>
+          <option value="all">All status</option>
           <option value="active">Active</option>
           <option value="archived">Archived</option>
           <option value="wrong">Wrong</option>
@@ -393,7 +507,20 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
       </Box>
 
       {error && (
-        <CollapsibleAlert severity="error" sx={{ mb: 2 }}>{error}</CollapsibleAlert>
+        <CollapsibleAlert
+          severity="error"
+          sx={{ mb: 2 }}
+          action={<Button color="inherit" size="small" onClick={() => reload()}>Retry</Button>}
+        >
+          {error}
+        </CollapsibleAlert>
+      )}
+      {notice && (
+        <CollapsibleAlert severity="info" sx={{ mb: 2 }} onClose={() => setNotice(null)}>{notice}</CollapsibleAlert>
+      )}
+      {actionError && (
+        <CollapsibleAlert severity="error" sx={{ mb: 2 }} onClose={() => setActionError(null)}>{actionError}</CollapsibleAlert>
+
       )}
 
       <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 480 }}>
@@ -403,7 +530,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           </Box>
         ) : memories.length === 0 ? (
           <Box sx={{ textAlign: "center", p: 4, color: "text.secondary" }}>
-            <Typography>No memories found.</Typography>
+            <Typography>{error ? "The memories could not be loaded." : "No memories found."}</Typography>
           </Box>
         ) : (
           // Spreadsheet-style memory table. Clicking any row opens the existing
@@ -420,7 +547,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
                 <TableCell sx={{ fontWeight: 700, fontSize: "0.7rem", width: 90 }}>Rank</TableCell>
                 <TableCell sx={{ fontWeight: 700, fontSize: "0.7rem", width: 100 }}>Status</TableCell>
                 <TableCell sx={{ fontWeight: 700, fontSize: "0.7rem" }}>Tags</TableCell>
-                <TableCell sx={{ fontWeight: 700, fontSize: "0.7rem", width: 120 }} align="right"></TableCell>
+                <TableCell sx={{ fontWeight: 700, fontSize: "0.7rem", width: 120, whiteSpace: "nowrap" }} align="right"></TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -487,27 +614,37 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
                         ))}
                       </Box>
                     </TableCell>
-                    <TableCell align="right" onClick={(e) => e.stopPropagation()}>
+                    <TableCell align="right" sx={{ whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>
                       {memory.status !== "active" && (
                         <Button size="small" color="success" onClick={() => handleStatusChange(memory, "active")}>
                           Restore
                         </Button>
                       )}
-                      <Button
-                        size="small"
-                        onClick={() => handleStatusChange(memory, "archived")}
-                        disabled={memory.status === "archived"}
-                      >
-                        Archive
-                      </Button>
-                      <Button
-                        size="small"
-                        color="warning"
-                        onClick={() => handleStatusChange(memory, "wrong")}
-                        disabled={memory.status === "wrong"}
-                      >
-                        Wrong
-                      </Button>
+                      <Tooltip title={memory.status === "archived" ? "Archived" : "Archive"}>
+                        <span>
+                          <IconButton
+                            size="small"
+                            aria-label="Archive memory"
+                            onClick={() => handleStatusChange(memory, "archived")}
+                            disabled={memory.status === "archived"}
+                          >
+                            <ArchiveOutlinedIcon fontSize="small" />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                      <Tooltip title={memory.status === "wrong" ? "Marked wrong" : "Mark wrong"}>
+                        <span>
+                          <IconButton
+                            size="small"
+                            color="warning"
+                            aria-label="Mark memory wrong"
+                            onClick={() => handleStatusChange(memory, "wrong")}
+                            disabled={memory.status === "wrong"}
+                          >
+                            <BlockIcon fontSize="small" />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
                       <IconButton
                         size="small"
                         aria-label="delete"
@@ -561,7 +698,25 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
       />
 
       {memories.length > 0 && (
-        <Box sx={{ mt: 2, display: "flex", justifyContent: "flex-end" }}>
+        <Box sx={{ mt: 2, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <Typography variant="caption" color="text.secondary">
+            Total: {total ?? memories.length}
+            {total != null && memories.length < total && (
+              <>
+                {" "}
+                (showing {memories.length})
+                <Button
+                  size="small"
+                  variant="text"
+                  onClick={loadMore}
+                  disabled={loadingMore}
+                  sx={{ ml: 1, py: 0, minWidth: 0, textTransform: "none" }}
+                >
+                  {loadingMore ? "Loading…" : "Load more"}
+                </Button>
+              </>
+            )}
+          </Typography>
           <Button color="error" size="small" onClick={handleClearAll}>
             Clear All Memories
           </Button>
@@ -650,9 +805,11 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           >
             Delete
           </Button>
-          <ActionButton onClick={handleMergeDuplicate} disabled={savingEdit}>
-            Merge Duplicate
-          </ActionButton>
+          {mergeCandidates.length > 0 && (
+            <ActionButton onClick={handleMergeDuplicate} disabled={savingEdit}>
+              Merge Duplicate
+            </ActionButton>
+          )}
           <Button onClick={() => setEditTarget(null)} disabled={savingEdit}>Cancel</Button>
           <Button
             onClick={handleSavePlainEdit}
@@ -673,7 +830,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
         <DialogTitle>Merge into another memory</DialogTitle>
         <DialogContent>
           <Hint sx={{ display: "block", mb: 1.5 }}>
-            Pick the memory to keep. This one is appended to it, then archived.
+            These memories read like this one. Pick the one to keep: this one is appended to it, then archived.
           </Hint>
           {mergeCandidates.length === 0 ? (
             <Typography variant="body2" color="text.secondary">
@@ -709,6 +866,25 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
       </Dialog>
 
       <ConfirmActionDialog
+        open={pendingDelete != null}
+        title={pendingDelete === "all" ? "Delete all memories" : "Delete this memory"}
+        description={
+          pendingDelete === "all"
+            ? "Every memory the agent has saved is deleted."
+            : (memories.find((m) => m.id === pendingDelete)?.content || "").slice(0, 160) || null
+        }
+        facts={pendingDelete === "all" && typeof total === "number" ? [{ label: "Memories", value: total }] : []}
+        confirmLabel={pendingDelete === "all" ? "Delete all" : "Delete memory"}
+        onConfirm={() => {
+          const target = pendingDelete;
+          setPendingDelete(null);
+          if (target === "all") clearAllMemories();
+          else deleteMemory(target);
+        }}
+        onClose={() => setPendingDelete(null)}
+      />
+
+      <ConfirmActionDialog
         open={mergeConfirmOpen}
         title="Merge this memory"
         description="The chosen memory keeps its text with this one appended. This memory is archived."
@@ -742,7 +918,7 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
           if (updated?.id) {
             setMemories((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
           } else {
-            fetchMemories(searchQuery);
+            reload();
           }
         }}
       />

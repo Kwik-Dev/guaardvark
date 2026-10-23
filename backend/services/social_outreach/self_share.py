@@ -19,6 +19,7 @@ import requests
 
 from backend.services.social_outreach import audit, kill_switch, persona
 from backend.services.social_outreach.reddit_outreach import (
+    web_access_refused,
     REDDIT_BASE,
     fetch_subreddit_rules,
     is_self_promo_banned,
@@ -315,6 +316,8 @@ class SelfShareLoop:
                 task_id=task_id,
             )
             return report
+        if web_access_refused(subreddit, report, task_id):
+            return report
 
         rules = fetch_subreddit_rules(subreddit)
         if rules is None:
@@ -351,9 +354,8 @@ class SelfShareLoop:
             return report
 
         report["drafted"] += 1
-        # Draft-only: when would_post, /draft-comment already marked the row
-        # approved; tick_process_approved_drafts posts with cadence. Never
-        # servo-post from this loop (avoids dual unsupervised auto-post).
+        # Draft-only: a person approves the draft and starts the post
+        # (watched_post). Never servo-post from this loop.
         if draft.get("would_post"):
             report["queued_for_post"] = 1
             report["reason"] = "queued_for_process_approved"

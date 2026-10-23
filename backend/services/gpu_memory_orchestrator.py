@@ -171,6 +171,30 @@ QUALITY_TIERS = {
 
 DEFAULT_TIER = "balanced"
 
+OLLAMA_UNKNOWN_VRAM_MB = 4000
+"""Assumed for a loaded Ollama model whose /api/ps entry reports no size."""
+
+
+def ollama_vram_mb(entry: dict) -> int:
+    """MB of GPU memory a loaded Ollama model holds, from its /api/ps entry.
+
+    ``size_vram`` is the part on the GPU; ``size`` is the whole model, CPU
+    part included, so a model partly or wholly offloaded to the CPU was
+    counted as if it all sat in VRAM. ``size`` is used only when Ollama does
+    not report ``size_vram``; a model wholly on the CPU counts 0.
+    """
+    size_vram = entry.get("size_vram")
+    if size_vram is not None:
+        try:
+            return max(0, int(size_vram)) // (1024 * 1024)
+        except (TypeError, ValueError):
+            pass
+    try:
+        size = int(entry.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    return size // (1024 * 1024) if size > 0 else OLLAMA_UNKNOWN_VRAM_MB
+
 
 # ---------------------------------------------------------------------------
 # The Orchestrator
@@ -411,6 +435,12 @@ class GPUMemoryOrchestrator:
             slot.last_used = time.time()
             logger.debug(f"Model {slot_id} end_use (in_use={slot.in_use})")
 
+    def pins(self, slot_id: str) -> int:
+        """How many begin_use pins ``slot_id`` holds now (0 when not registered)."""
+        with self._lock:
+            slot = self._registry.get(slot_id)
+            return max(0, int(getattr(slot, "in_use", 0) or 0)) if slot else 0
+
     def set_idle_timeout(self, slot_id: str, seconds: Optional[int]) -> bool:
         """Give one slot its own idle timeout (None returns it to the default).
 
@@ -637,13 +667,18 @@ class GPUMemoryOrchestrator:
                 if s.state in (SlotState.LOADED, SlotState.LOADING)
             )
 
+        # A failed query (no GPU, driver down) must not read as an empty card:
+        # the numbers are null, and the pages say "unknown" instead of
+        # "0.0 GB free".
+        queried = bool(vram.get("success"))
         snapshot = {
             "vram": {
-                "total_mb": vram.get("total_mb", 0),
-                "used_mb": vram.get("used_mb", 0),
-                "free_mb": vram.get("available_mb", 0),
-                "gpu_name": vram.get("gpu_name", "Unknown"),
-                "utilization_percent": vram.get("utilization_percent", 0),
+                "total_mb": vram.get("total_mb", 0) if queried else None,
+                "used_mb": vram.get("used_mb", 0) if queried else None,
+                "free_mb": vram.get("available_mb", 0) if queried else None,
+                "gpu_name": vram.get("gpu_name", "Unknown") if queried else None,
+                "utilization_percent": vram.get("utilization_percent", 0) if queried else None,
+                "queried": queried,
             },
             "models": models,
             "tracked_vram_mb": tracked_vram,
@@ -1038,8 +1073,7 @@ class GPUMemoryOrchestrator:
                 if resp.status_code == 200:
                     for m in resp.json().get("models", []):
                         name = m.get("name", "")
-                        size_bytes = m.get("size", 0)
-                        vram_mb = size_bytes // (1024 * 1024) if size_bytes else 4000
+                        vram_mb = ollama_vram_mb(m)
 
                         # Determine if it's an embedding or LLM
                         is_embed = any(kw in name.lower() for kw in ("embed", "retrieval", "minilm"))
@@ -1163,11 +1197,17 @@ class GPUMemoryOrchestrator:
     # ------------------------------------------------------------------
 
     def _background_loop(self):
-        """Periodic sync + idle eviction."""
+        """Periodic sync + idle eviction, and Keep ready in the server process."""
+        # Celery workers build their own orchestrator; one process loading the
+        # chat model is enough.
+        keeps_ready = os.environ.get("CELERY_WORKER_MODE", "false").lower() != "true"
         while not self._stop_event.is_set():
             try:
                 self._sync_from_hardware()
                 self._evict_idle_models()
+                if keeps_ready:
+                    from backend.services.chat_keep_ready import keep_ready_pass
+                    keep_ready_pass()
                 self._emit_status_if_subscribers()
             except Exception as e:
                 logger.error(f"Background loop error: {e}")
@@ -1199,9 +1239,14 @@ class GPUMemoryOrchestrator:
             gpu_present = has_gpu()
         except Exception:
             gpu_present = True  # detection failure → preserve prior (GPU) behavior
+        from backend.services import chat_keep_ready
+        kept = chat_keep_ready.active_chat_model() if chat_keep_ready.keep_ready_on() else None
         with self._lock:
             for slot in list(self._registry.values()):
                 if slot.state != SlotState.LOADED:
+                    continue
+                # Keep ready: the chat model leaves only for work that needs the card.
+                if kept and slot.slot_id.startswith("ollama:") and chat_keep_ready.same_model(slot.slot_id[7:], kept):
                     continue
                 # Active inference pin — never idle-evict mid-denoise / mid-batch.
                 if int(getattr(slot, "in_use", 0) or 0) > 0:

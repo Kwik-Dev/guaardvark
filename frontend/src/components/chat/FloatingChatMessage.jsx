@@ -13,17 +13,23 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import CheckIcon from "@mui/icons-material/Check";
 import MicIcon from "@mui/icons-material/Mic";
 import ThinkingCard from "./ThinkingCard";
+import GeneratedMedia from "./GeneratedMedia";
+import ImageLightbox from "../images/ImageLightbox";
 import { agentNoteCaption } from "./agentNoteCaptions";
+import copyText from "../../utils/copyText";
 
 /**
  * FloatingChatMessage - Renders an individual message item inside FloatingChatCard.
  * Supports copying prompts (user messages) and responses (assistant/system messages)
  * to clipboard with feedback tooltip and check icon matching ChatPage's MessageItem.
+ * A reply's generated pictures and videos render as in MessageItem, and a picture
+ * opens in the same lightbox.
  */
 const FloatingChatMessage = ({ message, msg, formatTime }) => {
   const m = message || msg || {};
   const theme = useTheme();
   const [copied, setCopied] = useState(false);
+  const [lightbox, setLightbox] = useState(null); // { images: [{url, name}], index }
   const timerRef = useRef(null);
 
   useEffect(() => {
@@ -51,37 +57,28 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
           : "";
       if (!text) return;
 
-      try {
-        if (navigator?.clipboard?.writeText) {
-          await navigator.clipboard.writeText(text);
-          setCopied(true);
-          if (timerRef.current) clearTimeout(timerRef.current);
-          timerRef.current = setTimeout(() => setCopied(false), 1500);
-        } else {
-          throw new Error("Clipboard API not available");
-        }
-      } catch {
-        // Fallback for non-HTTPS or unsupported contexts
-        try {
-          const ta = document.createElement("textarea");
-          ta.value = text;
-          ta.style.position = "fixed";
-          ta.style.opacity = "0";
-          document.body.appendChild(ta);
-          ta.focus();
-          ta.select();
-          document.execCommand("copy");
-          document.body.removeChild(ta);
-          setCopied(true);
-          if (timerRef.current) clearTimeout(timerRef.current);
-          timerRef.current = setTimeout(() => setCopied(false), 1500);
-        } catch (err) {
-          console.error("Copy failed:", err);
-        }
+      // copyText falls back to execCommand for non-HTTPS or unsupported contexts.
+      if (await copyText(text)) {
+        setCopied(true);
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = setTimeout(() => setCopied(false), 1500);
+      } else {
+        console.error("Copy failed");
       }
     },
     [m.content]
   );
+
+  const handleLightboxDownload = useCallback(() => {
+    const img = lightbox?.images[lightbox.index];
+    if (!img) return;
+    const link = document.createElement("a");
+    link.href = img.url;
+    link.download = img.name || "image";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }, [lightbox]);
 
   const formattedTime = formatTime
     ? formatTime(m.timestamp)
@@ -185,7 +182,7 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
             variant="caption"
             sx={{
               fontSize: "0.65rem",
-              color: "text.disabled",
+              color: "text.secondary",
               mt: 0.25,
               px: 0.5,
             }}
@@ -226,6 +223,14 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
           py: 0.75,
         }}
       >
+        {isAssistant && (
+          <GeneratedMedia
+            items={m.generatedImages}
+            onOpenPicture={(images, index) => setLightbox({ images, index })}
+            maxWidth="100%"
+            maxHeight={300}
+          />
+        )}
         {isAssistant &&
           typeof m.thinking === "string" &&
           m.thinking.trim() && (
@@ -298,7 +303,7 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
           variant="caption"
           sx={{
             fontSize: "0.65rem",
-            color: "text.disabled",
+            color: "text.secondary",
             mt: 0.25,
             px: 0.5,
           }}
@@ -306,9 +311,28 @@ const FloatingChatMessage = ({ message, msg, formatTime }) => {
           {formattedTime}
         </Typography>
       )}
+      {lightbox && (
+        <ImageLightbox
+          imageUrl={lightbox.images[lightbox.index]?.url}
+          imageName={lightbox.images[lightbox.index]?.name}
+          onClose={() => setLightbox(null)}
+          onPrev={() => setLightbox((prev) => ({ ...prev, index: Math.max(0, prev.index - 1) }))}
+          onNext={() => setLightbox((prev) => ({ ...prev, index: Math.min(prev.images.length - 1, prev.index + 1) }))}
+          onDownload={handleLightboxDownload}
+          hasPrev={lightbox.index > 0}
+          hasNext={lightbox.index < lightbox.images.length - 1}
+        />
+      )}
     </ListItem>
   );
 };
+
+const mediaItemShape = PropTypes.shape({
+  url: PropTypes.string,
+  alt: PropTypes.string,
+  caption: PropTypes.string,
+  type: PropTypes.string,
+});
 
 FloatingChatMessage.propTypes = {
   message: PropTypes.shape({
@@ -317,6 +341,7 @@ FloatingChatMessage.propTypes = {
     content: PropTypes.oneOfType([PropTypes.string, PropTypes.object]),
     thinking: PropTypes.string,
     truncated: PropTypes.bool,
+    generatedImages: PropTypes.arrayOf(mediaItemShape),
     timestamp: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
   }),
   msg: PropTypes.shape({
@@ -325,6 +350,7 @@ FloatingChatMessage.propTypes = {
     content: PropTypes.oneOfType([PropTypes.string, PropTypes.object]),
     thinking: PropTypes.string,
     truncated: PropTypes.bool,
+    generatedImages: PropTypes.arrayOf(mediaItemShape),
     timestamp: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
   }),
   formatTime: PropTypes.func,

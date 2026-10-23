@@ -25,7 +25,10 @@ from flask import Blueprint, jsonify, request
 from sqlalchemy import or_
 
 from backend.models import db, AgentMemory, AgentMemoryAudit
+from backend.tools.knowledge_tools import _contains
 from backend.services.memory_contract import (
+    EVENT_MEMORY_SOURCES,
+    EVENT_MEMORY_TYPES,
     MAX_PREFILTER_TERMS,
     MEMORY_SOURCES,
     MEMORY_STATUSES,
@@ -33,9 +36,11 @@ from backend.services.memory_contract import (
     SOURCE_TRUST_WEIGHTS,
     coerce_confidence,
     coerce_importance,
+    is_event_memory,
     memory_match_score,
     normalize_memory_source,
     normalize_memory_status,
+    normalize_memory_text,
     normalize_memory_type,
     normalize_tags,
     query_terms,
@@ -44,6 +49,7 @@ from backend.services.memory_contract import (
 )
 from backend.utils.clock import utcnow
 from backend.utils.memory_audit_log import (
+    log_memory_already_saved,
     log_memory_failed,
     log_memory_rejected,
     log_memory_saved,
@@ -123,6 +129,47 @@ def _parse_lesson_content(content: str, memory_type: str, source: str):
     return payload
 
 
+def find_saved_copy(
+    content: str,
+    *,
+    session_id=None,
+    project_id=None,
+    user_id=None,
+    workspace_root=None,
+):
+    """The active memory that already says `content` everywhere a new row
+    with this scope would be recalled, or None.
+
+    Texts match when normalize_memory_text makes them equal. Recall keeps the
+    rows that carry the asked-for session, project, user or workspace and the
+    rows that leave that column empty (see _query_memories), so a saved row
+    qualifies when each of those columns is empty or holds the new row's
+    value. A copy kept for the whole app answers a save in one chat; a copy
+    kept for another chat or project does not, since only that chat or
+    project recalls it. Event rows (is_event_memory) are records, not
+    statements, and are never a copy. The oldest match wins.
+    """
+    norm = normalize_memory_text(content)
+    if not norm:
+        return None
+    query = db.session.query(AgentMemory.id, AgentMemory.content).filter(
+        AgentMemory.status == "active",
+        or_(AgentMemory.type == None, AgentMemory.type.notin_(sorted(EVENT_MEMORY_TYPES))),
+        or_(AgentMemory.source == None, AgentMemory.source.notin_(sorted(EVENT_MEMORY_SOURCES))),
+    )
+    for column, value in (
+        (AgentMemory.session_id, session_id),
+        (AgentMemory.project_id, project_id),
+        (AgentMemory.user_id, user_id),
+        (AgentMemory.workspace_root, workspace_root),
+    ):
+        query = query.filter(column == None if value is None else or_(column == None, column == value))
+    for memory_id, saved in query.order_by(AgentMemory.created_at.asc()).all():
+        if normalize_memory_text(saved) == norm:
+            return db.session.get(AgentMemory, memory_id)
+    return None
+
+
 def add_memory(
     content: str,
     memory_type: str = "note",
@@ -148,6 +195,13 @@ def add_memory(
     Returns the created AgentMemory on success, or None on blank content /
     DB error. Errors are logged; the caller decides whether a failed memory
     write is fatal (usually not).
+
+    An active memory whose text is already saved where it would be recalled
+    (find_saved_copy) is not written twice: the saved row is returned with
+    `already_saved` set, and the caller says so rather than "saved". That row
+    is left as it was, timestamps included, and gets no audit entry, since
+    nothing in it changed; a person who wants a different type, tags or
+    importance edits it. Event rows (is_event_memory) are always written.
     """
     body = (content or "").strip()
     if not body:
@@ -170,6 +224,18 @@ def add_memory(
         extra_data = {**extra_data, "lesson": lesson_payload}
     mem_id = uuid.uuid4().hex[:12]
     try:
+        if status == "active" and not is_event_memory(memory_type, source):
+            existing = find_saved_copy(
+                body,
+                session_id=session_id,
+                project_id=project_id,
+                user_id=user_id,
+                workspace_root=workspace_root,
+            )
+            if existing is not None:
+                existing.already_saved = True
+                log_memory_already_saved(existing.id, source, body)
+                return existing
         memory = AgentMemory(
             id=mem_id,
             content=body,
@@ -206,6 +272,10 @@ def save_memory():
     Body: { content, source?, session_id?, tags?, type?, importance? }
 
     Save a memory entry. Content is the only required field.
+
+    201 with already_saved false is a new row. 200 with already_saved true
+    means the same text was already saved in that scope (see add_memory):
+    nothing was written and `memory` is the row that holds it.
     """
     data = request.get_json(silent=True)
     if not data or not data.get("content", "").strip():
@@ -237,7 +307,9 @@ def save_memory():
     )
     if memory is None:
         return jsonify({"success": False, "error": "Failed to save memory"}), 500
-    return jsonify({"success": True, "memory": memory.to_dict()}), 201
+    if memory.already_saved:
+        return jsonify({"success": True, "already_saved": True, "memory": memory.to_dict()}), 200
+    return jsonify({"success": True, "already_saved": False, "memory": memory.to_dict()}), 201
 
 
 @memory_bp.route("", methods=["GET"])
@@ -245,6 +317,9 @@ def list_memories():
     """
     GET /api/memory?search=&limit=50&offset=0&type=&source=&status=&sort=
     List or search memories. sort=trust orders by importance * source trust weight.
+    status is one of active, archived, wrong, or all (every row); without it
+    the rows marked wrong are left out. The body's total is the count of
+    matching rows, so a caller can page with offset.
     """
     try:
         query = db.session.query(AgentMemory)
@@ -258,8 +333,12 @@ def list_memories():
         if source:
             query = query.filter(AgentMemory.source == normalize_memory_source(source))
 
-        status = request.args.get("status")
-        if status:
+        # status=all is every row, the ones marked wrong included. No status
+        # is the working set (the CLI's /memory list): wrong rows left out.
+        status = (request.args.get("status") or "").strip().lower()
+        if status == "all":
+            pass
+        elif status:
             query = query.filter(AgentMemory.status == normalize_memory_status(status))
         else:
             query = query.filter((AgentMemory.status == None) | (AgentMemory.status != "wrong"))
@@ -272,12 +351,14 @@ def list_memories():
         if workspace_root:
             query = query.filter((AgentMemory.workspace_root == workspace_root) | (AgentMemory.workspace_root == None))
 
-        # Search by content substring (case-insensitive)
+        # Search by content substring (case-insensitive). The term is matched
+        # literally: '%', '_' and '\' in it are escaped, not LIKE wildcards.
         search = request.args.get("search", "").strip().lower()
         if search:
+            pattern = _contains(search)
             query = query.filter(
-                (AgentMemory.content.ilike(f"%{search}%")) |
-                (AgentMemory.tags.ilike(f"%{search}%"))
+                (AgentMemory.content.ilike(pattern, escape="\\")) |
+                (AgentMemory.tags.ilike(pattern, escape="\\"))
             )
 
         sort_mode = (request.args.get("sort") or "").strip().lower()
@@ -327,6 +408,74 @@ def list_memories():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+class MemoryNotFound(LookupError):
+    """No memory has the id update_memory_entry was given."""
+
+
+def update_memory_entry(memory_id, data: dict, actor: str) -> AgentMemory:
+    """Apply a PATCH /api/memory/<id> body to one memory and commit it with
+    its audit row. Raises MemoryNotFound for an unknown id and ValueError for
+    a value the entry cannot take; the caller rolls back on either."""
+    memory = db.session.query(AgentMemory).filter_by(id=memory_id).first()
+    if not memory:
+        raise MemoryNotFound(memory_id)
+
+    before = _memory_snapshot(memory)
+    new_type = normalize_memory_type(data.get("type", memory.type)) if data.get("type") else memory.type
+
+    if "content" in data:
+        content = (data.get("content") or "").strip()
+        if not content:
+            raise ValueError("Content cannot be empty")
+        lesson_payload = _parse_lesson_content(content, new_type, data.get("source", memory.source))
+        memory.content = content
+        if lesson_payload:
+            metadata = dict(memory.extra_data or {})
+            metadata["lesson"] = lesson_payload
+            memory.extra_data = metadata
+    if "tags" in data:
+        tags = normalize_tags(data.get("tags") or [])
+        memory.tags = json.dumps(tags) if tags else None
+    if "type" in data and data["type"]:
+        if "content" not in data:
+            lesson_payload = _parse_lesson_content(memory.content, new_type, data.get("source", memory.source))
+            if lesson_payload:
+                metadata = dict(memory.extra_data or {})
+                metadata["lesson"] = lesson_payload
+                memory.extra_data = metadata
+        memory.type = new_type
+    if "importance" in data and data["importance"] is not None:
+        try:
+            float(data["importance"])
+        except (TypeError, ValueError):
+            raise ValueError("importance must be numeric")
+        memory.importance = coerce_importance(data["importance"], memory.type)
+    if "confidence" in data and data["confidence"] is not None:
+        try:
+            float(data["confidence"])
+        except (TypeError, ValueError):
+            raise ValueError("confidence must be numeric")
+        memory.confidence = coerce_confidence(data["confidence"])
+    if "status" in data and data["status"]:
+        memory.status = normalize_memory_status(data["status"])
+    if "project_id" in data:
+        memory.project_id = data.get("project_id")
+    if "user_id" in data:
+        memory.user_id = data.get("user_id")
+    if "workspace_root" in data:
+        memory.workspace_root = data.get("workspace_root")
+    if "lesson_id" in data:
+        memory.lesson_id = data.get("lesson_id")
+    if "metadata" in data:
+        memory.extra_data = data.get("metadata") if isinstance(data.get("metadata"), dict) else None
+
+    memory.updated_at = datetime.now()
+    _write_memory_audit("update", memory_id, before=before, after=memory.to_dict(), actor=actor)
+    db.session.commit()
+    logger.info(f"Memory updated: {memory_id}")
+    return memory
+
+
 @memory_bp.route("/<memory_id>", methods=["PATCH"])
 def update_memory(memory_id):
     """
@@ -340,77 +489,13 @@ def update_memory(memory_id):
     """
     data = request.get_json(silent=True) or {}
     try:
-        memory = db.session.query(AgentMemory).filter_by(id=memory_id).first()
-        if not memory:
-            return jsonify({"success": False, "error": "Memory not found"}), 404
-
-        before = _memory_snapshot(memory)
-        new_type = normalize_memory_type(data.get("type", memory.type)) if data.get("type") else memory.type
-
-        if "content" in data:
-            content = (data.get("content") or "").strip()
-            if not content:
-                return jsonify({"success": False, "error": "Content cannot be empty"}), 400
-            try:
-                lesson_payload = _parse_lesson_content(content, new_type, data.get("source", memory.source))
-            except ValueError as err:
-                return jsonify({"success": False, "error": str(err)}), 400
-            memory.content = content
-            if lesson_payload:
-                metadata = dict(memory.extra_data or {})
-                metadata["lesson"] = lesson_payload
-                memory.extra_data = metadata
-        if "tags" in data:
-            tags = normalize_tags(data.get("tags") or [])
-            memory.tags = json.dumps(tags) if tags else None
-        if "type" in data and data["type"]:
-            if "content" not in data:
-                try:
-                    lesson_payload = _parse_lesson_content(memory.content, new_type, data.get("source", memory.source))
-                except ValueError as err:
-                    return jsonify({"success": False, "error": str(err)}), 400
-                if lesson_payload:
-                    metadata = dict(memory.extra_data or {})
-                    metadata["lesson"] = lesson_payload
-                    memory.extra_data = metadata
-            memory.type = new_type
-        if "importance" in data and data["importance"] is not None:
-            try:
-                float(data["importance"])
-            except (TypeError, ValueError):
-                return jsonify({"success": False, "error": "importance must be numeric"}), 400
-            memory.importance = coerce_importance(data["importance"], memory.type)
-        if "confidence" in data and data["confidence"] is not None:
-            try:
-                float(data["confidence"])
-            except (TypeError, ValueError):
-                return jsonify({"success": False, "error": "confidence must be numeric"}), 400
-            memory.confidence = coerce_confidence(data["confidence"])
-        if "status" in data and data["status"]:
-            memory.status = normalize_memory_status(data["status"])
-        if "project_id" in data:
-            memory.project_id = data.get("project_id")
-        if "user_id" in data:
-            memory.user_id = data.get("user_id")
-        if "workspace_root" in data:
-            memory.workspace_root = data.get("workspace_root")
-        if "lesson_id" in data:
-            memory.lesson_id = data.get("lesson_id")
-        if "metadata" in data:
-            memory.extra_data = data.get("metadata") if isinstance(data.get("metadata"), dict) else None
-
-        memory.updated_at = datetime.now()
-        _write_memory_audit(
-            "update",
-            memory_id,
-            before=before,
-            after=memory.to_dict(),
-            actor=(data.get("source") or "manual"),
-        )
-        db.session.commit()
-
-        logger.info(f"Memory updated: {memory_id}")
+        memory = update_memory_entry(memory_id, data, actor=(data.get("source") or "manual"))
         return jsonify({"success": True, "memory": memory.to_dict()})
+    except MemoryNotFound:
+        return jsonify({"success": False, "error": "Memory not found"}), 404
+    except ValueError as err:
+        db.session.rollback()
+        return jsonify({"success": False, "error": str(err)}), 400
     except Exception as e:
         db.session.rollback()
         logger.error(f"Failed to update memory {memory_id}: {e}")
@@ -479,6 +564,7 @@ def recall_debug():
     data = data or {}
     memories = _query_memories(
         count_access=False,
+        exclude_project_rows=bool(data.get("session_id")),
         limit=int(data.get("limit", 10)),
         query=data.get("query"),
         session_id=data.get("session_id"),
@@ -574,6 +660,7 @@ def _query_memories(
     include_always_on: bool = True,
     count_access: bool = True,
     min_importance: float | None = None,
+    exclude_project_rows: bool = False,
 ):
     """Single source of truth for memory SELECT.
 
@@ -596,6 +683,10 @@ def _query_memories(
     only the rows that fit their budget.
 
     min_importance drops rows below that importance, always-on rows included.
+
+    exclude_project_rows, with no project_id, leaves out rows kept for a
+    project: the caller is a chat outside any project, not a caller that
+    does not know its project.
 
     A query with keywords recalls only rows that share at least one of them as
     a whole word (memory_match_score above 0); the ILIKE prefilter alone would
@@ -627,6 +718,8 @@ def _query_memories(
                 or_(AgentMemory.project_id == project_id, AgentMemory.project_id == None)
                 if include_global else AgentMemory.project_id == project_id
             )
+        elif exclude_project_rows:
+            q = q.filter(AgentMemory.project_id == None)
         if user_id:
             q = q.filter(
                 or_(AgentMemory.user_id == user_id, AgentMemory.user_id == None)
@@ -708,6 +801,8 @@ def _query_memories(
                     or_(AgentMemory.project_id == project_id, AgentMemory.project_id == None)
                     if include_global else AgentMemory.project_id == project_id
                 )
+            elif exclude_project_rows:
+                always_q = always_q.filter(AgentMemory.project_id == None)
             if user_id:
                 always_q = always_q.filter(
                     or_(AgentMemory.user_id == user_id, AgentMemory.user_id == None)
@@ -772,6 +867,10 @@ def get_memories_for_context(
     If a query is provided, it attempts a keyword search. Otherwise, it returns
     the most important/recent memories. Output is one line per memory; lesson
     summaries are flattened from their stored JSON shape into imperative text.
+
+    A chat (a call with a session) outside any project does not recall rows
+    kept for a project; a caller with no session, which may not know its
+    project, is not limited that way.
 
     Returns a formatted string, or empty string if no memories exist.
     """
@@ -875,6 +974,7 @@ def _get_memories_for_context_inner(
         workspace_root=workspace_root,
         cli_working_memory=cli_working_memory,
         count_access=False,
+        exclude_project_rows=bool(session_id),
     )
     _LAST_SELECTED.ids = []
 

@@ -30,6 +30,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from backend.utils.node_identity import local_node_id
+
 logger = logging.getLogger(__name__)
 
 # Test runs this service starts never reach a database. An address nothing
@@ -47,6 +49,13 @@ _HEALTH_RUN_TESTS = (
     "backend/tests/test_code_tools.py",
     "-m", "not integration",
 )
+
+# A run still "running" this long after it started has lost its worker: Celery
+# kills every task at 40 minutes (task_time_limit in backend/celery_app.py), and
+# a reactive heal in the API process is one agent call. Two hours leaves room.
+STALE_RUN_AFTER = timedelta(hours=2)
+# Written to error_message so the scan views and the jobs list show why.
+STALE_RUN_REASON = "Interrupted: the worker running this scan stopped before it finished"
 
 
 def _test_env(**extra) -> Dict[str, str]:
@@ -399,7 +408,7 @@ class SelfImprovementService:
             run_record = SelfImprovementRun(
                 trigger="scheduled",
                 status="running",
-                node_id=os.environ.get("GUAARDVARK_NODE_ID", "local"),
+                node_id=local_node_id(),
             )
             db.session.add(run_record)
             db.session.commit()
@@ -460,7 +469,12 @@ class SelfImprovementService:
             # its closing answer alone ("I could not find the problem") is not one.
             changes = []
             verifications = []
+            from backend.services import job_arbiter
             for i, failure in enumerate(failures):
+                # Job order on: each fix is a step; hold before it while a chat
+                # or voice turn runs.
+                job_arbiter.yield_point("self_improvement", run_id, label="Self-improvement",
+                                        should_stop=lambda: self._cancel_requested(run_id))
                 if self._cancel_requested(run_id):
                     return self._finish_cancelled(run_record, start_time, changes)
                 # Not _is_safe_to_run: this run is the one running, so it would always stop here.
@@ -742,7 +756,7 @@ class SelfImprovementService:
             from backend.models import db, InterconnectorLearning
             for change in staged:
                 learning = InterconnectorLearning(
-                    source_node_id=os.environ.get("GUAARDVARK_NODE_ID", "local"),
+                    source_node_id=local_node_id(),
                     learning_type="bug_fix",
                     description=change.get("fix_description", ""),
                     code_diff=json.dumps(change),
@@ -788,7 +802,7 @@ class SelfImprovementService:
             run_record = SelfImprovementRun(
                 trigger="reactive",
                 status="running",
-                node_id=os.environ.get("GUAARDVARK_NODE_ID", "local"),
+                node_id=local_node_id(),
             )
             db.session.add(run_record)
             db.session.commit()
@@ -858,6 +872,72 @@ class SelfImprovementService:
             except Exception:
                 pass
 
+    def recover_stale_runs(self, probe_workers: bool = True) -> int:
+        """Close runs left ``running`` by a worker that died or was restarted.
+
+        _fail_if_still_running only sees a runner that returns; a killed
+        process leaves its row ``running`` for good, and /status, /runs and
+        the jobs list report a live scan forever. Same shape as
+        ResearchRunService._recover_stale_runs: a run this process owns is
+        left alone; when celery inspect reports no self-improvement task
+        anywhere, every other running row is dead; when a task is live (it
+        cannot say which row it owns) or inspect is unavailable, only rows
+        older than STALE_RUN_AFTER are closed. ``probe_workers=False`` skips
+        inspect, for the polled status routes. Returns the rows closed.
+        """
+        from backend.models import db, SelfImprovementRun
+        try:
+            q = db.session.query(SelfImprovementRun).filter(SelfImprovementRun.status == "running")
+            if self._current_run_id is not None:
+                q = q.filter(SelfImprovementRun.id != self._current_run_id)
+            rows = q.all()
+            if not rows:
+                return 0
+            live = self._celery_has_live_run() if probe_workers else None
+            # Rows carry the model's naive local timestamp, so the cutoff does too.
+            cutoff = datetime.now() - STALE_RUN_AFTER
+            n = 0
+            for run in rows:
+                if live is not False and not (run.timestamp and run.timestamp < cutoff):
+                    continue
+                run.status = "failed"
+                run.error_message = STALE_RUN_REASON
+                n += 1
+            if n:
+                db.session.commit()
+                logger.warning("Closed %d stale self-improvement run(s) as failed", n)
+            return n
+        except Exception as e:
+            logger.error(f"Could not recover stale self-improvement runs: {e}")
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+            return 0
+
+    @staticmethod
+    def _celery_has_live_run():
+        """True if a worker reports a self_improvement task active.
+
+        False if inspect succeeded and none are active. None if inspect
+        failed (do not clobber a maybe-live run).
+        """
+        try:
+            from backend.celery_app import celery
+            insp = celery.control.inspect(timeout=1.0)
+            if insp is None:
+                return None
+            active = insp.active()
+            if active is None:
+                return None
+            for _worker, tasks in (active or {}).items():
+                for t in tasks or []:
+                    if (t.get("name") or "").startswith("self_improvement."):
+                        return True
+            return False
+        except Exception:
+            return None
+
     def submit_directed_task(
         self, description: str, target_files: List[str] = None, priority: str = "medium",
         proposal: Optional[Dict[str, Any]] = None,
@@ -880,7 +960,7 @@ class SelfImprovementService:
             run_record = SelfImprovementRun(
                 trigger="directed",
                 status="running",
-                node_id=os.environ.get("GUAARDVARK_NODE_ID", "local"),
+                node_id=local_node_id(),
             )
             db.session.add(run_record)
             db.session.commit()

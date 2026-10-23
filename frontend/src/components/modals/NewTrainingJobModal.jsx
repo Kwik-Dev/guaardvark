@@ -96,8 +96,9 @@ const NewTrainingJobModal = ({
     const models = Array.isArray(status?.models) ? status.models : [];
     setBaseModels(models);
     setFormData((prev) => {
-      const current = models.find((m) => m.id === prev.base_model && m.fits && m.installed);
-      const chosen = current || models.find((m) => m.fits && m.installed);
+      const usable = (m) => m.fits && m.installed && m.trainable !== false;
+      const current = models.find((m) => m.id === prev.base_model && usable(m));
+      const chosen = current || models.find(usable);
       return { ...prev, base_model: chosen ? chosen.id : "", config: withinModel(prev.config, chosen) };
     });
   };
@@ -151,7 +152,7 @@ const NewTrainingJobModal = ({
 
   const selectedModel = baseModels.find((m) => m.id === formData.base_model);
   const fittingModels = baseModels.filter((m) => m.fits);
-  const notDownloaded = fittingModels.filter((m) => !m.installed);
+  const notDownloaded = fittingModels.filter((m) => !m.installed && m.trainable !== false);
   // The Vision choice appears once a vision base model is declared.
   const visionDeclared = baseModels.some((m) => m.vision);
 
@@ -213,7 +214,7 @@ const NewTrainingJobModal = ({
       setFormError("Job name is required.");
       return;
     }
-    if (!formData.base_model || !selectedModel?.installed) {
+    if (!formData.base_model || !selectedModel?.installed || selectedModel?.trainable === false) {
       setFormError("Choose a downloaded base model.");
       return;
     }
@@ -246,6 +247,8 @@ const NewTrainingJobModal = ({
   const selectedProfile = deviceProfiles.find(
     (p) => p.id === parseInt(formData.device_profile_id)
   );
+  // Not ready means one is missing or, all installed, a requirement is unmet.
+  const missingLibraries = (libraries?.libraries || []).filter((l) => l.state === "missing");
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
@@ -271,15 +274,19 @@ const NewTrainingJobModal = ({
               </Button>
             }
           >
-            <Typography variant="body2">
-              <strong>Training libraries are not installed.</strong>{" "}
-              Fine-tuning needs{" "}
-              {libraries.libraries
-                .filter((l) => l.state === "missing")
-                .map((l) => l.name)
-                .join(", ")}
-              . Install them from Training libraries (also in Settings), then create the job.
-            </Typography>
+            {missingLibraries.length > 0 ? (
+              <Typography variant="body2">
+                <strong>Training libraries are not installed.</strong>{" "}
+                Fine-tuning needs {missingLibraries.map((l) => l.name).join(", ")}. Install them
+                from Training libraries (also in Settings), then create the job.
+              </Typography>
+            ) : (
+              <Typography variant="body2">
+                <strong>Training libraries are installed, but incomplete.</strong>{" "}
+                {(libraries.unmet || []).join("; ")}. Click Repair in Training libraries (also
+                in Settings), then create the job.
+              </Typography>
+            )}
           </Alert>
         )}
         {loadProblems.length > 0 && (
@@ -343,11 +350,13 @@ const NewTrainingJobModal = ({
                 renderValue={(id) => baseModels.find((m) => m.id === id)?.name || id}
               >
                 {fittingModels.map((model) => (
-                  <MenuItem key={model.id} value={model.id} disabled={!model.installed}>
+                  <MenuItem key={model.id} value={model.id} disabled={!model.installed || model.trainable === false}>
                     <ListItemText
                       primary={model.name}
                       secondary={
-                        model.installed
+                        model.trainable === false
+                          ? "Not offered for training yet: its GPU memory has not been measured"
+                          : model.installed
                           ? `${model.license} · up to ${model.max_seq_length} tokens`
                           : `Not downloaded (${model.size_gb} GB)`
                       }

@@ -29,10 +29,13 @@ describe("catalogToNavGroups", () => {
     expect(listedPaths(groups)).toEqual([
       ["Main", "Dashboard", "/", null],
       ["Main", "Chat", "/chat", null],
-      ["Main", "Code Editor", "/code-editor", null],
       ["Main", "Files", "/documents", null],
       ["Main", "Media", "/images", null],
       ["Main", "Notes", "/notes", null],
+      ["Code", "Code Editor", "/code-editor", null],
+      ["Code", "Swarm", "/swarm", null],
+      ["Code", "System Map", "/system-map", null],
+      ["Code", "Self-improvement", "/self-improvement", "pendingFixes"],
       ["Studio", "Film Crew", "/film-crew", null],
       ["Studio", "Cast & LoRA", "/cast", null],
       ["Studio", "Music Video", "/music-video", null],
@@ -49,18 +52,18 @@ describe("catalogToNavGroups", () => {
       ["Management", "Jobs", "/tasks", null],
       ["Management", "Activity", "/activity", null],
       ["Management", "Outreach", "/outreach", null],
+      ["Management", "Social Accounts", "/social/accounts", null],
+      ["Management", "Social Posts", "/social/posts", null],
       ["Configuration", "Rules & Prompts", "/rules", null],
       ["Configuration", "Agent Tools", "/tools", null],
       ["Configuration", "Agents", "/agents", null],
       ["Configuration", "Agent Memory", "/agents/memory", null],
       ["Configuration", "FileGen", "/file-generation", null],
       ["Configuration", "CSVGen", "/content-library", null],
-      ["Configuration", "Swarm", "/swarm", null],
       ["Configuration", "Autoresearch", "/autoresearch", null],
       ["Configuration", "Plugins", "/plugins", null],
       ["Configuration", "Connections", "/connections", null],
       ["Configuration", "Approvals", "/approvals", "pendingApprovals"],
-      ["Configuration", "System Map", "/system-map", null],
       ["Configuration", "Settings", "/settings", null],
     ]);
   });
@@ -206,12 +209,40 @@ describe("workspaces", () => {
   });
 
   it("drops empty workspaces after a profile hides their only tools", () => {
-    const filtered = filterCatalog(CORE_NAV_CATALOG, ["/code-editor"]);
-    expect(visibleWorkspaces(filtered).map((w) => w.id)).not.toContain("code");
+    const codePages = ["/code-editor", "/swarm", "/system-map", "/self-improvement"];
+    expect(visibleWorkspaces(filterCatalog(CORE_NAV_CATALOG, codePages)).map((w) => w.id)).not.toContain("code");
+    // Creator hides the editor, the map and self-improvement but keeps Swarm.
+    const creator = filterCatalog(CORE_NAV_CATALOG, ["/code-editor", "/system-map", "/self-improvement"]);
+    expect(toolsForWorkspace(creator, "code").map((item) => item.id)).toEqual(["swarm"]);
+  });
+
+  it("gathers the code pages in the Code workspace, in strip order", () => {
+    expect(toolsForWorkspace(CORE_NAV_CATALOG, "code").map((item) => item.id)).toEqual([
+      "code-editor",
+      "swarm",
+      "system-map",
+      "self-improvement",
+    ]);
+  });
+
+  it("puts the social pages next to WordPress in Work", () => {
+    expect(toolsForWorkspace(CORE_NAV_CATALOG, "work").map((item) => item.id)).toEqual([
+      "clients",
+      "projects",
+      "websites",
+      "wordpress-sites",
+      "wordpress-pages",
+      "social-accounts",
+      "social-posts",
+      "jobs",
+      "activity",
+      "outreach",
+    ]);
   });
 
   it("rolls tool badges up to the workspace", () => {
     expect(workspaceBadge(CORE_NAV_CATALOG, "agents", { pendingApprovals: 3 })).toBe(3);
     expect(workspaceBadge(CORE_NAV_CATALOG, "home", { pendingApprovals: 3 })).toBe(0);
+    expect(workspaceBadge(CORE_NAV_CATALOG, "code", { pendingFixes: 2, pendingApprovals: 3 })).toBe(2);
   });
 });

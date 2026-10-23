@@ -80,9 +80,39 @@ def _cancel(job) -> bool:
 
 def _job_dict(job) -> dict:
     """The job as the Training page reads it, with whether its base model's
-    export to Ollama has been verified (the page offers Export only then)."""
-    from backend.services import training_base_models
-    return {**job.to_dict(), "export_verified": training_base_models.export_verified(job.base_model)}
+    export to Ollama has been verified (the page offers Export only then) and,
+    when it has, the levels Export offers and why it cannot run now
+    (export_blocked, with export_blocked_code; GGUF_CONVERTER_MISSING sends
+    the page to the converter's Install)."""
+    from backend.services import training_base_models, training_gguf_converter
+    verified = training_base_models.export_verified(job.base_model)
+    code = blocked = None
+    if verified:
+        from backend.tasks.training_tasks import export_block
+        block = export_block(job.base_model)
+        if block:
+            code, blocked = block
+    return {**job.to_dict(), "export_verified": verified, "export_blocked": blocked,
+            "export_blocked_code": code,
+            "export_levels": training_gguf_converter.levels() if verified else []}
+
+
+def _export_refused(job):
+    """The 409 for a job whose export cannot run now, or None."""
+    from backend.tasks.training_tasks import export_block
+    block = export_block(job.base_model, job.lora_path)
+    if block:
+        return error_response(block[1], 409, block[0])
+    return None
+
+
+def _export_level(data: dict):
+    """(level, None) for the request's quantization, or (None, the 400)."""
+    from backend.services import training_gguf_converter
+    try:
+        return training_gguf_converter.level_for(data.get("quantization")), None
+    except ValueError as e:
+        return None, error_response(str(e), 400, "UNSUPPORTED_LEVEL")
 
 
 def _put_back(job, before, what: str, exc: Exception):
@@ -259,9 +289,68 @@ def remove_training_libraries():
         return error_response(str(e), 500)
 
 
+@training_bp.route("/libraries/gguf-converter", methods=["GET"])
+def get_gguf_converter():
+    """Settings > Training libraries > GGUF converter: the pinned llama.cpp
+    converter Export uses, whether it is installed and intact, and the install
+    in progress. ?plan=1 also hands out the one-use token Install and Remove send."""
+    try:
+        from backend.services import training_gguf_converter
+        return success_response(
+            training_gguf_converter.status(with_plan_token=request.args.get("plan") == "1"))
+    except Exception as e:
+        logger.error(f"Error reading the GGUF converter: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+@training_bp.route("/libraries/gguf-converter/install", methods=["POST"])
+def install_gguf_converter():
+    """Fetch the pinned converter files from GitHub and check them.
+    Only the Install click sends what this needs:
+    {"confirm": "install", "plan_token": <from GET /libraries/gguf-converter?plan=1>}."""
+    from backend.services import training_gguf_converter
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "install":
+        return error_response(training_gguf_converter.NEEDS_CLICK, 403, "NEEDS_CLICK")
+    try:
+        result = training_gguf_converter.start_install(data.get("plan_token"))
+        logger.info("GGUF converter install started")
+        return success_response(result, "Install started", status_code=202)
+    except training_gguf_converter.Refused as e:
+        return error_response(str(e), e.status, e.code)
+    except Exception as e:
+        logger.error(f"Error starting the GGUF converter install: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
+@training_bp.route("/libraries/gguf-converter/remove", methods=["POST"])
+@ensure_db_session_cleanup
+def remove_gguf_converter():
+    """Delete the installed converter.
+    Body: {"confirm": "remove", "plan_token": <from GET /libraries/gguf-converter?plan=1>}."""
+    from backend.services import training_gguf_converter
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "remove":
+        return error_response(training_gguf_converter.NEEDS_CLICK, 403, "NEEDS_CLICK")
+    exporting = db.session.query(TrainingJob).filter(
+        TrainingJob.status == "running", TrainingJob.pipeline_stage == "exporting").count()
+    if exporting:
+        return error_response(f"{exporting} export(s) running; remove the converter once they "
+                              f"finish.", 409, "EXPORT_RUNNING")
+    try:
+        return success_response(training_gguf_converter.start_remove(data.get("plan_token")), "Removed")
+    except training_gguf_converter.Refused as e:
+        return error_response(str(e), e.status, e.code)
+    except Exception as e:
+        logger.error(f"Error removing the GGUF converter: {e}", exc_info=True)
+        return error_response(str(e), 500)
+
+
 def _libraries_missing_response():
     """The refusal for a job that would fail for want of the training
-    libraries, naming where to install them; None when they are there."""
+    libraries (one missing, or a requirement of theirs unmet), naming where
+    to install or repair them; None when they are ready. Export and import
+    run without them (the merge needs torch, transformers and peft only)."""
     from backend.services import training_libraries
     reason = training_libraries.unavailable_reason()
     if reason:
@@ -892,6 +981,155 @@ def start_filter_job():
         return error_response(str(e), 500)
 
 
+def _folder_build_options(data: dict):
+    """(options, None) from a Build from folder request, or (None, error
+    response). The folder must be one Bulk Import may read: the same roots
+    and refusals. options: folder, kinds, per_1000, target, include_large."""
+    from backend.api.files_api import resolve_import_directory
+    from backend.services.training import folder_dataset as fd
+
+    folder = data.get("folder")
+    if not isinstance(folder, str) or not folder.strip():
+        return None, error_response("folder is required", 400)
+    resolved, refusal = resolve_import_directory(folder.strip())
+    if refusal:
+        return None, error_response(refusal, 403, "PATH_NOT_ALLOWED")
+    if not os.path.isdir(resolved):
+        return None, error_response("folder is not a directory", 400)
+    kinds = data.get("kinds") or list(fd.DEFAULT_KINDS)
+    if not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds):
+        return None, error_response("kinds must be a list such as [\".md\", \".txt\"]", 400)
+    per_1000 = data.get("pairs_per_1000_words", fd.DEFAULT_PAIRS_PER_1000_WORDS)
+    if isinstance(per_1000, bool) or not isinstance(per_1000, (int, float)) \
+            or not 0 < per_1000 <= fd.MAX_PAIRS_PER_1000_WORDS:
+        return None, error_response(
+            f"pairs_per_1000_words must be a number above 0 and at most {fd.MAX_PAIRS_PER_1000_WORDS}", 400)
+    target = data.get("target_pairs", "enough")
+    if not (target in ("enough", "all") or (isinstance(target, int) and not isinstance(target, bool)
+                                            and 100 <= target <= 1_000_000)):
+        return None, error_response('target_pairs must be "enough", "all" or a whole number from 100', 400)
+    include_large = data.get("include_large_files") or []
+    if not isinstance(include_large, list) or not all(isinstance(p, str) for p in include_large):
+        return None, error_response("include_large_files must be a list of paths inside the folder", 400)
+    return {"folder": resolved, "kinds": fd.normalise_kinds(kinds), "per_1000": per_1000,
+            "target": target, "include_large": include_large}, None
+
+
+def _check_payload(prepared: dict) -> dict:
+    return {
+        "folder": prepared["folder"],
+        "kinds": prepared["kinds"],
+        "files": prepared["files"],
+        "words": prepared["words"],
+        "per_file": [{"source_path": d["source_path"], "words": d["words"]} for d in prepared["docs"]],
+        "skipped": prepared["skipped"],
+        "unreadable": prepared["unreadable"],
+        "scrub": prepared["scrub"],
+    }
+
+
+@training_bp.route("/pipeline/build-from-folder/check", methods=["POST"])
+def check_folder_build():
+    """Scan and scrub only (no model): what a build would read and remove."""
+    from backend.services.training import folder_dataset as fd
+
+    data = request.get_json(silent=True) or {}
+    opts, problem = _folder_build_options(data)
+    if problem:
+        return problem
+    try:
+        prepared = fd.prepare(opts["folder"], opts["kinds"], include_large=opts["include_large"])
+    except Exception as e:
+        logger.error(f"Folder build check failed: {e}", exc_info=True)
+        return error_response(f"Could not read the folder: {e}", 500)
+    return success_response({**_check_payload(prepared),
+                             "estimate": fd.estimate(prepared, opts["per_1000"], target=opts["target"])})
+
+
+@training_bp.route("/pipeline/build-from-folder/probe", methods=["POST"])
+def probe_folder_build():
+    """Write (and discard) the pairs of three chunks to measure the time a
+    build would take. Uses the local chat model; writes nothing."""
+    from backend.services.training import folder_dataset as fd
+    from backend.services.training.pair_generator import GenerationUnavailable
+
+    data = request.get_json(silent=True) or {}
+    opts, problem = _folder_build_options(data)
+    if problem:
+        return problem
+    try:
+        prepared = fd.prepare(opts["folder"], opts["kinds"], include_large=opts["include_large"])
+        probe = fd.probe_timing(prepared, opts["per_1000"], target=opts["target"])
+    except GenerationUnavailable as e:
+        return error_response(str(e), 503, "MODEL_UNAVAILABLE")
+    except Exception as e:
+        logger.error(f"Folder build probe failed: {e}", exc_info=True)
+        return error_response(f"Could not time the build: {e}", 500)
+    estimate = fd.estimate(prepared, opts["per_1000"], probe, target=opts["target"])
+    # The per-file counts only feed the estimate; the page has no use for a path per file.
+    probe.pop("passages_per_file", None)
+    return success_response({"probe": probe, "estimate": estimate})
+
+
+@training_bp.route("/pipeline/build-from-folder", methods=["POST"])
+@ensure_db_session_cleanup
+def start_folder_build():
+    """Build a messages dataset from a folder of notes, as a training-queue job."""
+    data = request.get_json(silent=True) or {}
+    opts, problem = _folder_build_options(data)
+    if problem:
+        return problem
+    folder = opts["folder"]
+    name = data.get("name")
+    name = name.strip() if isinstance(name, str) else ""
+    name = name or f"Build: {os.path.basename(folder.rstrip('/')) or folder}"
+
+    job_id = str(uuid.uuid4())
+    job = TrainingJob(
+        job_id=job_id,
+        name=name,
+        pipeline_stage="building",
+        status="pending",
+        config_json=json.dumps({"input_path": folder, "kinds": opts["kinds"], "pairs_per_1000_words": opts["per_1000"],
+                                "target_pairs": opts["target"], "include_large_files": opts["include_large"]}),
+    )
+    db.session.add(job)
+    db.session.commit()
+    try:
+        from backend.tasks.training_tasks import build_folder_dataset_task
+        task = build_folder_dataset_task.apply_async(
+            args=[job_id, folder, opts["kinds"], opts["per_1000"], opts["target"], opts["include_large"]],
+            queue="training")
+        job.celery_task_id = task.id
+        job.status = "running"
+        db.session.commit()
+    except Exception as e:
+        logger.error(f"Failed to start folder build: {e}", exc_info=True)
+        return _not_started(job, "folder build", e)
+    return success_response(job.to_dict(), status_code=201)
+
+
+@training_bp.route("/scrub-terms", methods=["GET"])
+def get_scrub_terms():
+    """The per-install word list a folder build replaces (names, machines, clients)."""
+    from backend.services.training import folder_dataset as fd
+    from backend.services.training.folder_scrub import load_terms
+
+    return success_response({"terms": load_terms(fd.scrub_terms_path())})
+
+
+@training_bp.route("/scrub-terms", methods=["PUT"])
+def put_scrub_terms():
+    from backend.services.training import folder_dataset as fd
+    from backend.services.training.folder_scrub import save_terms
+
+    data = request.get_json(silent=True) or {}
+    terms = data.get("terms")
+    if not isinstance(terms, list) or not all(isinstance(t, str) for t in terms):
+        return error_response("terms must be a list of strings", 400)
+    return success_response({"terms": save_terms(fd.scrub_terms_path(), terms)})
+
+
 @training_bp.route("/jobs/<int:job_id>/export-anyway", methods=["POST"])
 @ensure_db_session_cleanup
 def export_anyway(job_id):
@@ -915,6 +1153,11 @@ def export_anyway(job_id):
             )
         if not job.lora_path or not Path(job.lora_path).exists():
             return error_response(f"LoRA adapter path not found: {job.lora_path}", 400)
+
+        # Releasing a run for an export that cannot run would only change its status.
+        refused = _export_refused(job)
+        if refused:
+            return refused
 
         data = request.get_json(silent=True) or {}
         config = json.loads(job.config_json) if job.config_json else {}
@@ -964,13 +1207,14 @@ def export_job_to_gguf(job_id):
         if not lora_path.exists():
             return error_response(f"LoRA adapter path not found: {job.lora_path}", 400)
 
-        from backend.tasks.training_tasks import export_refusal
-        refusal = export_refusal(job.base_model, job.lora_path)
-        if refusal:
-            return error_response(refusal, 409, "EXPORT_NOT_VERIFIED")
+        refused = _export_refused(job)
+        if refused:
+            return refused
 
         data = request.get_json() or {}
-        quantization = data.get("quantization", "q4_k_m")
+        quantization, bad_level = _export_level(data)
+        if bad_level:
+            return bad_level
 
         before = (job.status, job.pipeline_stage)
         job.pipeline_stage = "exporting"
@@ -1077,10 +1321,13 @@ def export_to_ollama(job_id):
                 )
 
         data = request.get_json() or {}
-        quantization = data.get("quantization", "q4_k_m")
         model_name = data.get("model_name") or job.output_model_name or f"guaardvark-{job.name.lower().replace(' ', '-')}"
+        requested = str(data.get("quantization") or "").lower()
 
-        if job.gguf_path and Path(job.gguf_path).exists():
+        # A GGUF already exported at the level asked for (or with none asked
+        # for) is registered as it is; another level is exported again.
+        same_level = not requested or requested == (job.quantization_level or "").lower()
+        if job.gguf_path and Path(job.gguf_path).exists() and same_level:
             logger.info(f"GGUF already exists at {job.gguf_path}, skipping to import")
             before = (job.status, job.pipeline_stage)
             job.pipeline_stage = "importing"
@@ -1113,10 +1360,12 @@ def export_to_ollama(job_id):
         if not lora_path.exists():
             return error_response(f"LoRA adapter path not found: {job.lora_path}", 400)
 
-        from backend.tasks.training_tasks import export_refusal
-        refusal = export_refusal(job.base_model, job.lora_path)
-        if refusal:
-            return error_response(refusal, 409, "EXPORT_NOT_VERIFIED")
+        refused = _export_refused(job)
+        if refused:
+            return refused
+        quantization, bad_level = _export_level(data)
+        if bad_level:
+            return bad_level
 
         before = (job.status, job.pipeline_stage)
         job.pipeline_stage = "exporting"
@@ -1132,10 +1381,11 @@ def export_to_ollama(job_id):
 
             # Both steps take the training output folder (export reads lora/
             # in it and writes the .gguf beside it). The import signature is
-            # immutable so the chain does not prepend the export's result.
+            # immutable so the chain does not prepend the export's result;
+            # then_import keeps the job running between the two steps.
             model_dir = str(lora_path.parent)
             workflow = chain(
-                export_gguf_task.s(job.job_id, model_dir, quantization),
+                export_gguf_task.s(job.job_id, model_dir, quantization, then_import=True),
                 import_ollama_task.si(job.job_id, model_dir, model_name)
             )
             result = workflow.apply_async(queue="training")

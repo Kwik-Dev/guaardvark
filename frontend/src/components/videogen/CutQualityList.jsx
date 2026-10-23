@@ -9,6 +9,7 @@ import { Box, Stack, Typography } from "@mui/material";
 import QualityFlagsPill from "./QualityFlagsPill";
 import VlmReviewPill from "./VlmReviewPill";
 import ColourMatchPill from "./ColourMatchPill";
+import KeyframeMatchPill from "./KeyframeMatchPill";
 import ClipReviewHold, { ReviewStatePill } from "./ClipReviewHold";
 
 /**
@@ -16,8 +17,9 @@ import ClipReviewHold, { ReviewStatePill } from "./ClipReviewHold";
  * @param {Function} onApprove   (index) => keep the held cut
  * @param {Function} onRerender  (index) => render it again
  * @param {boolean}  [busy]
+ * @param {Function} [clipUrl]   (index) => URL of the rendered cut, played on a held cut
  */
-const CutQualityList = ({ clips, onApprove, onRerender, busy = false }) => {
+const CutQualityList = ({ clips, onApprove, onRerender, busy = false, clipUrl }) => {
   const checked = (clips || []).filter((c) => c && c.status === "done" && (c.quality || c.review));
   if (checked.length === 0) return null;
   const held = checked.filter((c) => c.review?.state === "needs_review");
@@ -34,12 +36,24 @@ const CutQualityList = ({ clips, onApprove, onRerender, busy = false }) => {
               <Typography variant="body2" sx={{ mr: 0.5 }}>Cut #{c.index}</Typography>
               <ReviewStatePill review={c.review} />
               <QualityFlagsPill quality={c.quality} />
+              <KeyframeMatchPill quality={c.quality} />
               <ColourMatchPill quality={c.quality} />
               <VlmReviewPill review={c.quality?.vlm_review} />
               {!c.review && !(c.quality?.flags || []).length && (
                 <Typography variant="caption" color="text.secondary">no problems found</Typography>
               )}
             </Stack>
+            {clipUrl && c.review?.state === "needs_review" && (
+              <Box
+                component="video"
+                controls
+                muted
+                loop
+                preload="metadata"
+                src={clipUrl(c.index)}
+                sx={{ display: "block", width: "100%", maxWidth: 480, mt: 0.5, borderRadius: 1, background: "#000" }}
+              />
+            )}
             <ClipReviewHold
               review={c.review}
               busy={busy}

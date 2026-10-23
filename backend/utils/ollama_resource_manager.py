@@ -8,6 +8,7 @@ available system resources before loading.
 
 import logging
 import os
+import warnings
 import re
 import threading
 import time
@@ -134,17 +135,38 @@ def is_text_chat_model(model_name: str) -> bool:
     """Check if a model is suitable as a default text chat LLM.
 
     The name rule leaves out vision-only and embedding models; when Ollama can
-    describe the model, one it lists as embedding is left out too, whatever its
-    name (bge-m3 has no "embed" in it).
+    describe the model, one it lists as embedding or decision is left out too,
+    whatever its name (bge-m3 has no "embed" in it; nimble and tev1 answer
+    with a label, not a reply). When it cannot, DECISION_NAME_PATTERNS stands
+    in for the decision capability.
     """
     if not model_name:
         return False
     lower = model_name.lower()
     if any(re.search(p, lower) for p in NON_TEXT_MODEL_PATTERNS):
         return False
+    from backend.services.model_capabilities import capabilities_for, decides_by_name
+    rec = capabilities_for(model_name, with_vision=False)
+    if rec.exists and rec.capabilities:
+        return not (rec.embedding or rec.decision)
+    return not (rec.exists and rec.embedding) and not decides_by_name(model_name)
+
+
+def known_not_to_chat(model_name: str) -> bool:
+    """True when Ollama describes the model and it cannot answer a chat
+    request: no "completion", or an embedding or decision model.
+
+    For a model a person chose. is_text_chat_model is the rule for picking a
+    default and its name rule also leaves out vision-named models (qwen3-vl,
+    llava) that chat fine. A model Ollama cannot describe is not known either way.
+    """
+    if not model_name:
+        return False
     from backend.services.model_capabilities import capabilities_for
     rec = capabilities_for(model_name, with_vision=False)
-    return not (rec.exists and rec.embedding)
+    if not (rec.exists and rec.capabilities):
+        return False
+    return not rec.completion or rec.embedding or rec.decision
 
 
 def _gpu_memory_mb() -> Optional[tuple]:
@@ -154,7 +176,11 @@ def _gpu_memory_mb() -> Optional[tuple]:
     if visible.isdigit():
         index = int(visible)
     try:
-        import pynvml
+        with warnings.catch_warnings():
+            # The pynvml wheel warns at import that it is deprecated in favour of
+            # nvidia-ml-py, which ships the same module; here it is only noise.
+            warnings.simplefilter("ignore", FutureWarning)
+            import pynvml
         pynvml.nvmlInit()
         try:
             info = pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(index))
@@ -433,6 +459,200 @@ def model_info_available(model_name: str) -> bool:
     return get_model_info(model_name) is not None
 
 
+# Ollama's manifest digests are compared on this many leading hex characters,
+# the length `ollama list` prints.
+DIGEST_PREFIX_LEN = 12
+_LLAMACPP_ALIAS = re.compile(r"^llamacpp:([0-9a-f]{12,64})$")
+_HEX_DIGEST = re.compile(r"^[0-9a-f]{12,64}$")
+
+
+def _short_digest(value) -> str:
+    digest = str(value or "").strip().lower()
+    if digest.startswith("sha256:"):
+        digest = digest[len("sha256:"):]
+    return digest[:DIGEST_PREFIX_LEN] if _HEX_DIGEST.match(digest) else ""
+
+
+def _full_model_name(model_name: str) -> str:
+    name = (model_name or "").strip().lower()
+    return name if not name or ":" in name else f"{name}:latest"
+
+
+def _ollama_tags() -> list:
+    """Ollama's /api/tags "models" entries; [] when it cannot be read."""
+    try:
+        resp = requests.get(f"{get_ollama_base_url()}/api/tags", timeout=5)
+        if resp.ok:
+            return list(resp.json().get("models") or [])
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not list Ollama models: %s", e)
+    return []
+
+
+def model_digests(model_name: str, tags: Optional[list] = None) -> frozenset:
+    """Short manifest digests Ollama lists under ``model_name``.
+
+    One name is not one build, and one build is not one name: Ollama 0.40
+    lists a pulled tag under two manifests (a ggml and a llamacpp build of the
+    same pull, so gemma4:e2b appears twice in /api/tags) and adds a
+    ``llamacpp:<digest>`` alias for the llamacpp one. The digests say which
+    build a name is. A name without a tag is read as ``:latest``. ``tags`` is
+    an /api/tags "models" list the caller already has; empty when Ollama
+    cannot be reached and the name carries no digest of its own.
+    """
+    name = _full_model_name(model_name)
+    if not name:
+        return frozenset()
+    if tags is None:
+        tags = _ollama_tags()
+    found = {
+        _short_digest(entry.get("digest"))
+        for entry in tags
+        if name in (str(entry.get("name") or "").lower(), str(entry.get("model") or "").lower())
+    }
+    alias = _LLAMACPP_ALIAS.match(name)
+    if alias:
+        found.add(alias.group(1)[:DIGEST_PREFIX_LEN])
+    found.discard("")
+    return frozenset(found)
+
+
+def model_families(model_name: str, tags: Optional[list] = None) -> frozenset:
+    """The model families Ollama reports for ``model_name`` (``details.family``).
+
+    A set, because one pull listed under two manifests can report two families
+    (embeddinggemma's appear as gemma3 and gemma-embedding). Manifests are
+    matched by name and by the digests :func:`model_digests` finds. Empty when
+    Ollama cannot be reached or the name is not installed.
+    """
+    name = _full_model_name(model_name)
+    if not name:
+        return frozenset()
+    if tags is None:
+        tags = _ollama_tags()
+    digests = model_digests(name, tags)
+    found = set()
+    for entry in tags:
+        names = {str(entry.get("name") or "").lower(), str(entry.get("model") or "").lower()}
+        if name in names or _short_digest(entry.get("digest")) in digests:
+            family = str((entry.get("details") or {}).get("family") or "").strip().lower()
+            if family:
+                found.add(family)
+    return frozenset(found)
+
+
+def same_model(a: str, b: str, tags: Optional[list] = None) -> Optional[bool]:
+    """Whether two Ollama model names are the same build.
+
+    True when they are the same name or share a manifest digest, False when
+    both resolve to digests and share none, None when either cannot be
+    resolved (not installed, Ollama unreachable)."""
+    name_a, name_b = _full_model_name(a), _full_model_name(b)
+    if not name_a or not name_b:
+        return None
+    if name_a == name_b:
+        return True
+    if tags is None:
+        tags = _ollama_tags()
+    digests_a, digests_b = model_digests(name_a, tags), model_digests(name_b, tags)
+    if not digests_a or not digests_b:
+        return None
+    return bool(digests_a & digests_b)
+
+
+# /api/ps is read at most this often; a decision asks several questions per turn.
+RESIDENT_TTL_S = 2.0
+# A model Ollama drops within this many seconds counts as not resident: a
+# question sent to it now could arrive after it is gone and load it again.
+RESIDENT_EXPIRY_MARGIN_S = 5.0
+_RESIDENT_TIMEOUT_S = 1.0
+_resident_cache: Dict[str, object] = {"at": 0.0, "models": []}
+_resident_lock = threading.Lock()
+_FRACTION = re.compile(r"(\.\d{6})\d+")
+
+
+def resident_models(ttl_s: float = RESIDENT_TTL_S) -> list:
+    """Ollama's /api/ps "models" entries, read at most once per ``ttl_s``.
+
+    [] when Ollama cannot be reached; a failed read is cached like a good one,
+    so a stopped Ollama costs one connection attempt per ``ttl_s``.
+    """
+    now = time.monotonic()
+    with _resident_lock:
+        if now - float(_resident_cache["at"]) < ttl_s:
+            return list(_resident_cache["models"])
+    models: list = []
+    try:
+        resp = requests.get(f"{get_ollama_base_url()}/api/ps", timeout=_RESIDENT_TIMEOUT_S)
+        if resp.ok:
+            models = list(resp.json().get("models") or [])
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not read Ollama's loaded models: %s", e)
+    with _resident_lock:
+        _resident_cache.update(at=time.monotonic(), models=models)
+    return list(models)
+
+
+def _expires_in_s(entry: dict) -> Optional[float]:
+    """Seconds until Ollama drops ``entry``, or None when it does not say."""
+    from datetime import datetime, timezone
+
+    raw = str(entry.get("expires_at") or "").strip()
+    if not raw:
+        return None
+    try:
+        # Ollama writes nanoseconds; older Pythons parse at most microseconds.
+        when = datetime.fromisoformat(_FRACTION.sub(r"\1", raw.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (when - datetime.now(timezone.utc)).total_seconds()
+
+
+def resident_entry(model_name: str, tags: Optional[list] = None) -> Optional[dict]:
+    """The /api/ps entry for ``model_name`` when it is loaded and staying loaded, else None.
+
+    Loaded means: on the GPU (``size_vram`` > 0) and not dropped within
+    RESIDENT_EXPIRY_MARGIN_S. Ollama 0.40 can list a loaded alias under a name
+    nobody asked for (``sha256-<digest>:latest`` for a ``llamacpp:<digest>``
+    model), so an entry matches when its name is the same name, or when
+    ``model_name`` resolves to exactly one manifest digest and the entry is
+    that build. A name listed under two builds (gemma4:e2b on 0.40) matches
+    only by name: a request by that name may load the other build. Another
+    size or tag of the same family never matches (gemma4:e2b is not
+    gemma4:12b). ``tags`` is an /api/tags list the caller already has.
+    """
+    name = _full_model_name(model_name)
+    if not name:
+        return None
+    running = resident_models()
+    match = None
+    for entry in running:
+        names = {_full_model_name(str(entry.get(k) or "")) for k in ("name", "model")}
+        if name in names:
+            match = entry
+            break
+    if match is None and running:
+        digests = model_digests(name, tags)
+        if len(digests) == 1:
+            for entry in running:
+                if _short_digest(entry.get("digest")) in digests:
+                    match = entry
+                    break
+    if match is None:
+        return None
+    try:
+        if int(match.get("size_vram") or 0) <= 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    remaining = _expires_in_s(match)
+    if remaining is not None and remaining <= RESIDENT_EXPIRY_MARGIN_S:
+        return None
+    return dict(match)
+
+
 def model_supports_tools(model_name: str) -> bool:
     """Check if a model supports native function calling via Ollama's capabilities API
     (or the model's declared row; see model_capabilities)."""
@@ -454,6 +674,26 @@ def model_supports_thinking(model_name: str) -> bool:
     if thinks_by_name(model_name):
         return True
     return capabilities_for(model_name, with_vision=False).thinking
+
+
+def think_off_value(model_name: str):
+    """What to send as ``think`` when thinking is meant to be off.
+
+    ``False``, or for an architecture whose thinking cannot be turned off
+    (:data:`model_capability_data.THINK_OFF_LEVEL_BY_ARCH`) the least level it
+    takes. A level means the model still reasons, so the caller leaves room for
+    it in num_predict.
+    """
+    from backend.services.model_capability_data import THINK_OFF_LEVEL_BY_ARCH
+    if not model_name:
+        return False
+    try:
+        from backend.services.model_capabilities import capabilities_for
+        arch = getattr(capabilities_for(model_name, with_vision=False), "architecture", "")
+    except Exception as e:  # noqa: BLE001 - a failed lookup must not break a chat call
+        logger.debug("architecture lookup failed for %r: %s", model_name, e)
+        return False
+    return THINK_OFF_LEVEL_BY_ARCH.get(str(arch or "").lower(), False)
 
 
 def thinking_kwargs(model_name: str) -> dict:
@@ -838,6 +1078,8 @@ def build_ollama(model_name: str, **kwargs):
 
 
 def clear_cache():
-    """Clear the model info cache and the unreachable-Ollama backoff."""
+    """Clear the model info cache, the unreachable-Ollama backoff and the /api/ps cache."""
     _model_info_cache.clear()
     _unreachable_at.clear()
+    with _resident_lock:
+        _resident_cache.update(at=0.0, models=[])

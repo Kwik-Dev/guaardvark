@@ -329,7 +329,11 @@ def test_each_job_tool_declares_wait_for_result_and_how_to_poll(name):
     param = cls.parameters["wait_for_result"]
     assert param.type == "bool" and param.default is False and not param.required
     assert "get_generation_status" in cls.description and "wait_for_result" in cls.description
-    assert "tooljob_" in it.GenerationStatusTool.description and name in it.GenerationStatusTool.description
+    assert "tooljob_" in it.GenerationStatusTool.description
+    # inpaint_image is not offered over MCP (DEFAULT_DENY_TOOLS), so the status
+    # tool MCP clients read does not name it.
+    if name != "inpaint_image":
+        assert name in it.GenerationStatusTool.description
 
 
 def test_the_timeout_text_never_points_at_a_batch_id():

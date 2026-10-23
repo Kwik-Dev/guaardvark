@@ -44,6 +44,30 @@ except ImportError:
     CACHE_DIR = "/tmp/guaardvark_cache"
     UPLOAD_DIR = "/tmp/guaardvark_uploads"
 
+def _kind_of(error) -> Optional[str]:
+    """The RenderErrorKind value an error carries (a RenderFailure, or an
+    exception classified by job_operation_gate), else None."""
+    if error is None:
+        return None
+    if isinstance(error, BaseException):
+        from backend.services.job_operation_gate import classify_render_exception
+        kind = classify_render_exception(error)
+    else:
+        from backend.services.job_types import failure_kind
+        kind = failure_kind(error)
+    value = getattr(kind, "value", None)
+    return value if value and value != "unknown" else None
+
+
+def _error_with_kind(exc: BaseException):
+    """``str(exc)``, keeping the failure kind with it (job_types.RenderFailure)."""
+    kind = _kind_of(exc)
+    if kind is None:
+        return str(exc)
+    from backend.services.job_types import RenderFailure
+    return RenderFailure(kind, str(exc))
+
+
 @dataclass
 class BatchPrompt:
     id: str
@@ -124,6 +148,8 @@ class BatchImageResult:
     generation_time: float = 0.0
     error: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # RenderErrorKind value (job_types) of a failed image, named where it failed.
+    error_kind: Optional[str] = None
 
 @dataclass
 class BatchGenerationStatus:
@@ -147,6 +173,8 @@ class BatchGenerationStatus:
     retry_data: Optional[Dict[str, Any]] = None
     # Set while the batch is admitted-but-waiting on VRAM; cleared on admit.
     gpu_wait_reason: Optional[str] = None
+    # RenderErrorKind value (job_types) of the batch's own error, when it has one.
+    error_kind: Optional[str] = None
 
 # Seed space shared with the offline path (offline_image_generator uses
 # torch.randint(0, 2**32)), so seeds stay comparable across generators.
@@ -481,6 +509,90 @@ class BatchImageGenerator:
         except Exception as e:  # noqa: BLE001
             logger.debug("drop_booking(image_batch:%s) failed: %s", batch_id, e)
 
+    def _apply_stills_default_to_auto(self, request: BatchImageRequest) -> Optional[str]:
+        """Give every Auto prompt in a batch the Stills model chosen in Settings >
+        Generation, when it can run here; returns that key, or None when nothing
+        changed (no choice made, or the choice is not installed, logged by
+        configured_default_for_auto).
+
+        Resolved once at intake so routing (a FLUX default goes to ComfyUI like
+        an explicit flux-dev pick), the resource estimate, and the job record's
+        model_used all name the same model. Cast prompts keep their own routing
+        by LoRA family.
+        """
+        gen = self.image_generator
+        resolver = getattr(gen, "configured_default_for_auto", None)
+        if not callable(resolver):
+            return None
+        auto_prompts = [
+            p for p in (request.prompts or [])
+            if (p.model or "").strip().lower() in ("", "auto")
+            and not getattr(p, "subject_ids", None)
+            and not getattr(p, "loras", None)
+        ]
+        if not auto_prompts:
+            return None
+        try:
+            preferred = resolver()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Stills default not consulted for batch Auto: %s", e)
+            return None
+        if not preferred:
+            return None
+        for p in auto_prompts:
+            p.model = preferred
+            note = self._resample_for_stills_default(p, preferred)
+            if note:
+                logger.info("Batch %s prompt %s: %s", request.batch_id, p.id, note)
+        # The API serialises FLUX (force_max_workers) only for an explicit model
+        # name; a substituted one needs the same.
+        try:
+            from backend.services.image_render_limits import limits_for
+            force_w = limits_for(preferred).get("force_max_workers")
+        except Exception:  # noqa: BLE001
+            force_w = None
+        if force_w and int(getattr(request, "max_workers", 0) or 0) > int(force_w):
+            request.max_workers = int(force_w)
+        logger.info(
+            "Batch %s: %d Auto prompt(s) render with the Stills default %r from Settings",
+            request.batch_id, len(auto_prompts), preferred,
+        )
+        return preferred
+
+    @staticmethod
+    def _resample_for_stills_default(p: BatchPrompt, key: str) -> Optional[str]:
+        """Sampling sent for an Auto row is the product default family's recipe
+        (the page mirrors Z-Image's presets for Auto: 9 steps, guidance 0). Under
+        a chosen model of another family that recipe is a bad knob (FLUX.1 Dev at
+        9 steps with guidance 0 badly under-resolves), so an untyped step count
+        takes the chosen family's default and a guidance outside the model's
+        range takes its default. A typed step count and an in-range guidance
+        stand. Returns the note recorded on the prompt, or None when nothing
+        changed (same family, or values the model can use).
+        """
+        from backend.services.image_render_limits import envelope_cfg
+        from backend.services.media_model_registry import DEFAULT_STILLS_MODEL, get_profile
+        from backend.services.stills_defaults import model_family, resolve_stills_defaults
+
+        if model_family(key) == model_family(DEFAULT_STILLS_MODEL):
+            return None
+        own = resolve_stills_defaults(key)
+        changes: List[str] = []
+        if not p.metadata.get("steps_explicit") and int(p.steps or 0) != int(own["steps"]):
+            changes.append(f"steps {p.steps} → {int(own['steps'])}")
+            p.steps = int(own["steps"])
+        guidance = envelope_cfg(key, p.guidance)
+        if p.guidance is None or abs(float(p.guidance) - guidance) > 1e-6:
+            changes.append(f"guidance {p.guidance} → {guidance:g}")
+            p.guidance = guidance
+        if not changes:
+            return None
+        label = (get_profile(key) or {}).get("name") or key
+        note = f"Auto renders with {label} (Settings > Stills): " + ", ".join(changes) + "."
+        prior = p.metadata.get("steps_notice")
+        p.metadata["steps_notice"] = f"{prior} {note}" if prior else note
+        return note
+
     def _resolve_batch_model_key(self, model_key: str, prompt_text: str = "") -> str:
         """Map a batch prompt model key to a catalog key for resource estimates."""
         if not model_key or model_key in ("auto", ""):
@@ -531,7 +643,7 @@ class BatchImageGenerator:
             return None
         else:
             model_key = self._resolve_batch_model_key(prompt.model, prompt.prompt)
-        if self._is_comfy_flux_model(model_key):
+        if self._comfy_t2i_family(model_key):
             return None
         return gen.available_models.get(model_key, model_key)
 
@@ -565,10 +677,14 @@ class BatchImageGenerator:
                 model_key = self._character_model_key(prompt)
             else:
                 model_key = self._resolve_batch_model_key(prompt.model, prompt.prompt)
-            if self._is_comfy_flux_model(model_key):
-                # Full FLUX-dev fp8 stills: ~12GB+ with T5; serialize workers elsewhere
-                vram_mb = max(vram_mb, 12000)
-                ram_gb = max(ram_gb, 16.0)
+            comfy_family = self._comfy_t2i_family(model_key)
+            if comfy_family:
+                # ComfyUI stills are priced flat by their family row (FLUX-dev fp8
+                # ~12GB with T5); the registry prices Qwen-Image 2.1. Workers are
+                # serialized elsewhere.
+                fam_vram, fam_ram = self._comfy_t2i_price(comfy_family)
+                vram_mb = max(vram_mb, fam_vram)
+                ram_gb = max(ram_gb, fam_ram)
                 continue
             catalog_id = gen.available_models.get(model_key, model_key)
 
@@ -746,6 +862,7 @@ class BatchImageGenerator:
         before the GPU session so nothing was evicted for it."""
         batch_status.status = "error"
         batch_status.error = reason
+        batch_status.error_kind = "model_not_installed"
         batch_status.failed_images = batch_status.total_images
         batch_status.end_time = datetime.now()
         batch_status.gpu_wait_reason = None
@@ -780,12 +897,23 @@ class BatchImageGenerator:
         return gen.missing_model_message(prompt.model or "auto")
 
     @staticmethod
-    def _is_comfy_flux_model(model_key: str | None) -> bool:
-        k = (model_key or "").strip().lower()
-        return "flux" in k
+    def _comfy_t2i_family(model_key: str | None) -> str | None:
+        """The ComfyUI text-to-image family a model key renders on ("flux",
+        "qwen-image-21"), or None for offline models and Comfy families without
+        a stills graph (user_model_families.comfy_t2i_family)."""
+        from backend.services.user_model_families import comfy_t2i_family
+        return comfy_t2i_family(model_key)
+
+    @staticmethod
+    def _comfy_t2i_price(family: str) -> Tuple[int, float]:
+        """(vram_mb, ram_gb) a ComfyUI stills family is admitted at: its
+        IMAGE_FAMILY_SPECS row, which for Qwen-Image 2.1 reads the registry."""
+        from backend.services.image_render_limits import limits_for
+        lim = limits_for(family)
+        return int(lim.get("vram_mb") or 12000), float(lim.get("ram_gb") or 16.0)
 
     def _should_use_comfy_stills(self, prompt: BatchPrompt) -> bool:
-        if self._is_comfy_flux_model(prompt.model):
+        if self._comfy_t2i_family(prompt.model):
             return True
         adapters = getattr(prompt, "adapter_loras", None) or []
         if not adapters:
@@ -796,33 +924,42 @@ class BatchImageGenerator:
         except Exception:
             return False
 
-    def _user_flux_unet(self, model_key: str | None) -> str | None:
-        mid = (model_key or "").strip()
-        if not mid.startswith("user-"):
+    def _comfy_t2i_target(self, model_key: str | None) -> Optional[dict]:
+        """{family, tag, unet} for a ComfyUI stills model: a user entry's own
+        UNET and the graph it renders on (user_image_models.comfy_t2i_target)."""
+        family = self._comfy_t2i_family(model_key)
+        if not family:
             return None
+        shipped = {"family": family, "tag": (model_key or "").strip(), "unet": None}
+        if not (model_key or "").strip().startswith("user-"):
+            return shipped
         try:
-            from backend.services.offline_image_generator import get_image_generator
-            entry = (getattr(get_image_generator(), "user_entries", None) or {}).get(mid) or {}
-            files = entry.get("files") or []
-            return (files[0].get("dst") if files else None) or None
+            from backend.services.user_image_models import comfy_t2i_target
+            gen = getattr(self, "image_generator", None)
+            if gen is None:
+                from backend.services.offline_image_generator import get_image_generator
+                gen = get_image_generator()
+            return comfy_t2i_target(gen, model_key) or shipped
         except Exception:
-            return None
+            return shipped
 
     def _generate_with_comfy_flux(self, prompt: BatchPrompt, batch_id: str = "") -> Optional[ImageGenerationResult]:
-        """FLUX stills or SDXL+LoRA via ComfyUI (user-added weights included)."""
+        """ComfyUI stills (FLUX, Qwen-Image 2.1) or SDXL+LoRA via ComfyUI, user-added weights included."""
         try:
             from backend.services.comfyui_image_generator import ComfyUIImageGenerator
         except Exception as e:
-            logger.warning("ComfyUI FLUX path unavailable: %s", e)
+            logger.warning("ComfyUI stills path unavailable: %s", e)
             return ImageGenerationResult(
                 success=False,
-                error=f"ComfyUI FLUX unavailable: {e}",
+                error=f"ComfyUI stills unavailable: {e}",
                 prompt_used=prompt.prompt,
             )
 
+        target = self._comfy_t2i_target(prompt.model)
+        family = (target or {}).get("family")
         width = prompt.width if prompt.width and prompt.width >= 512 else 1024
         height = prompt.height if prompt.height and prompt.height >= 512 else 1024
-        if self._is_comfy_flux_model(prompt.model):
+        if family:
             if prompt.width and prompt.width >= 768:
                 width = prompt.width
             if prompt.height and prompt.height >= 768:
@@ -830,20 +967,25 @@ class BatchImageGenerator:
             try:
                 from backend.services.image_resolution_limits import clamp_image_dimensions
                 ow, oh = width, height
-                width, height, warns = clamp_image_dimensions(width, height, "flux")
+                width, height, warns = clamp_image_dimensions(width, height, family)
                 for msg in warns:
-                    logger.warning("FLUX batch: %s", msg)
+                    logger.warning("%s batch: %s", family, msg)
                 if (width, height) != (ow, oh):
-                    logger.info("FLUX batch resolution %sx%s → %sx%s", ow, oh, width, height)
+                    logger.info("%s batch resolution %sx%s → %sx%s", family, ow, oh, width, height)
             except Exception as e:
-                logger.debug("FLUX dim clamp skipped: %s", e)
-        steps = int(prompt.steps if prompt.metadata.get("steps_explicit", False) else (prompt.steps or 28))
-        # FluxGuidance value (user "guidance" slider); KSampler cfg stays 1.0 inside Comfy.
-        guidance = float(prompt.guidance) if prompt.guidance is not None else 3.5
+                logger.debug("%s dim clamp skipped: %s", family, e)
+        # Defaults when the prompt carries none are the family row's (FLUX 28 /
+        # FluxGuidance 3.5, Qwen-Image 2.1 25 / cfg 1.0 from the official template).
+        from backend.services.image_render_limits import defaults_for
+        own = defaults_for(family or "flux-dev")
+        steps = int(prompt.steps if prompt.metadata.get("steps_explicit", False) else (prompt.steps or own["steps"]))
+        # FLUX: the FluxGuidance value (user "guidance" slider), KSampler cfg stays 1.0
+        # inside Comfy. Qwen-Image 2.1: the KSampler cfg itself.
+        guidance = float(prompt.guidance) if prompt.guidance is not None else float(own["guidance"])
 
         import tempfile, os as _os, time as _time
         out_path = _os.path.join(
-            tempfile.gettempdir(), f"flux_{prompt.id}_{int(_time.time() * 1000)}.png"
+            tempfile.gettempdir(), f"{(family or 'comfy').replace('-', '_')}_{prompt.id}_{int(_time.time() * 1000)}.png"
         )
         # FLUX is deterministic: identical prompt + identical seed = identical
         # pixels. This branch used to pin the seed to a literal 42 whenever the
@@ -851,18 +993,21 @@ class BatchImageGenerator:
         # rendering N copies of the same image. Derive per-slot instead.
         seed = resolve_image_seed(prompt, batch_id)
         loras = list(getattr(prompt, "adapter_loras", None) or [])
-        unet = self._user_flux_unet(prompt.model)
-        model_tag = "flux-dev"
-        if unet and str(unet).lower().endswith(".gguf"):
-            model_tag = "flux-schnell"
-        elif not self._is_comfy_flux_model(prompt.model):
+        unet = (target or {}).get("unet")
+        if not family:
             model_tag = "sdxl"
+        elif family == "flux":
+            # Shipped FLUX ids render on the dev graph; a user .gguf on schnell.
+            model_tag = target["tag"] if unet else "flux-dev"
+        else:
+            model_tag = target["tag"]
         try:
             gen = ComfyUIImageGenerator(
                 model=model_tag,
                 lora_strength=float(getattr(prompt, "adapter_scale", 0.8) or 0.8),
                 flux_unet=unet if model_tag == "flux-schnell" else None,
                 flux_dev_unet=unet if model_tag == "flux-dev" else None,
+                qwen21_unet=unet if family == "qwen-image-21" else None,
             )
             path = gen.generate_image(
                 prompt=prompt.prompt,
@@ -889,9 +1034,9 @@ class BatchImageGenerator:
                 metadata={"steps": getattr(gen, "last_steps", steps)},
             )
         except Exception as e:
-            logger.error("FLUX.1-dev batch generation failed: %s", e)
+            logger.error("ComfyUI %s batch generation failed: %s", model_tag, e)
             return ImageGenerationResult(
-                success=False, error=str(e), prompt_used=prompt.prompt
+                success=False, error=_error_with_kind(e), prompt_used=prompt.prompt
             )
 
     # ── Z-Image via ComfyUI (optional; GUAARDVARK_ZIMAGE_USE_COMFYUI=1) ────────
@@ -936,6 +1081,9 @@ class BatchImageGenerator:
             guidance = float(prompt.guidance)
         else:
             guidance = _cfg_default
+        # A seed per image, as on the FLUX path; a fixed fallback rendered every
+        # unseeded prompt in a batch with the same noise.
+        seed = resolve_image_seed(prompt)
 
         import tempfile
         out_path = os.path.join(
@@ -950,7 +1098,7 @@ class BatchImageGenerator:
                 width=width,
                 height=height,
                 negative_prompt=prompt.negative_prompt or "",
-                seed=prompt.seed if prompt.seed is not None else 42,
+                seed=seed,
                 steps=steps,
                 cfg=guidance,
                 model="zimage",
@@ -961,12 +1109,12 @@ class BatchImageGenerator:
                 prompt_used=prompt.prompt,
                 model_used="zimage",
                 image_size=(width, height),
-                seed_used=prompt.seed,
+                seed_used=seed,
             )
         except Exception as e:
             logger.error("ComfyUI Z-Image batch generation failed: %s", e)
             return ImageGenerationResult(
-                success=False, error=str(e), prompt_used=prompt.prompt
+                success=False, error=_error_with_kind(e), prompt_used=prompt.prompt
             )
 
     def _generate_with_character_lora(self, prompt: BatchPrompt) -> Optional[ImageGenerationResult]:
@@ -1041,7 +1189,7 @@ class BatchImageGenerator:
             )
         except Exception as e:
             logger.error(f"Character LoRA generation failed: {e}")
-            return ImageGenerationResult(success=False, error=str(e), prompt_used=final_prompt)
+            return ImageGenerationResult(success=False, error=_error_with_kind(e), prompt_used=final_prompt)
 
     def _generate_single_image(self, batch_id: str, prompt: BatchPrompt, output_dir: Path,
                              batch_status: BatchGenerationStatus) -> BatchImageResult:
@@ -1129,7 +1277,8 @@ class BatchImageGenerator:
                     prompt_id=prompt.id,
                     success=False,
                     generation_time=time.time() - start_time,
-                    error=error_msg
+                    error=error_msg,
+                    error_kind=_kind_of(result.error),
                 )
 
             image_ext = Path(result.image_path).suffix or ".png"
@@ -1157,6 +1306,9 @@ class BatchImageGenerator:
             if batch_status and hasattr(batch_status, 'generate_thumbnails') and batch_status.generate_thumbnails:
                 thumbnail_path = self._create_thumbnail(str(target_path), output_dir / "thumbnails")
 
+            prompt_record = self._prompt_record(prompt)
+            typed_prompt = prompt_record["original_prompt"]
+
             if self.progress_system:
                 completed = batch_status.completed_images + 1
                 progress = int((completed / batch_status.total_images) * 100)
@@ -1164,14 +1316,14 @@ class BatchImageGenerator:
                 self.progress_system.update_process(
                     process_id=batch_id,
                     progress=progress,
-                    message=f"Generated image {completed}/{batch_status.total_images}: {prompt.prompt[:50]}...",
+                    message=f"Generated image {completed}/{batch_status.total_images}: {typed_prompt[:50]}...",
                     additional_data={
                         "batch_id": batch_id,
                         "generated_count": completed,
                         "target_count": batch_status.total_images,
                         "completed": completed,
                         "total": batch_status.total_images,
-                        "current_prompt": prompt.prompt[:100]
+                        "current_prompt": typed_prompt[:100]
                     }
                 )
 
@@ -1182,7 +1334,7 @@ class BatchImageGenerator:
                 thumbnail_path=thumbnail_path,
                 generation_time=time.time() - start_time,
                 metadata={
-                    "original_prompt": prompt.prompt,
+                    **prompt_record,
                     "style": prompt.style,
                     "dimensions": actual,
                     **({"dimensions_requested": requested} if actual != requested else {}),
@@ -1202,7 +1354,8 @@ class BatchImageGenerator:
                 prompt_id=prompt.id,
                 success=False,
                 generation_time=time.time() - start_time,
-                error=str(e)
+                error=str(e),
+                error_kind=_kind_of(e),
             )
         finally:
             # An exception raised here would replace the function's return value
@@ -1225,6 +1378,8 @@ class BatchImageGenerator:
                 "batch_id": batch_status.batch_id,
                 "display_name": getattr(batch_status, "display_name", None),
                 "status": batch_status.status,
+                "error": str(batch_status.error) if batch_status.error else None,
+                "error_kind": batch_status.error_kind,
                 "total_images": batch_status.total_images,
                 "completed_images": batch_status.completed_images,
                 "failed_images": batch_status.failed_images,
@@ -1245,6 +1400,7 @@ class BatchImageGenerator:
                         "thumbnail_path": r.thumbnail_path,
                         "generation_time": r.generation_time,
                         "error": r.error,
+                        "error_kind": r.error_kind,
                         "metadata": r.metadata
                     }
                     for r in batch_status.results
@@ -1262,6 +1418,31 @@ class BatchImageGenerator:
 
         except Exception as e:
             logger.error(f"Failed to save batch metadata: {e}")
+
+    @staticmethod
+    def _remember_typed_prompt(prompt: BatchPrompt) -> None:
+        """Keep what the person typed before a rewrite replaces ``prompt.prompt``.
+
+        The first rewrite wins: a storyboard pass followed by a director pass
+        still names the image by the typed text."""
+        if prompt.metadata is None:
+            prompt.metadata = {}
+        prompt.metadata.setdefault("typed_prompt", (prompt.prompt or "").strip())
+
+    @staticmethod
+    def _prompt_record(prompt: BatchPrompt) -> Dict[str, Any]:
+        """The prompt keys of an image's metadata.
+
+        ``original_prompt`` is what the person typed, which is what captions,
+        the lightbox title and the registered document show. When a chat-model
+        rewrite replaced it, ``rewritten_prompt`` carries the text that went on
+        to the generator, for the details view."""
+        typed = ((prompt.metadata or {}).get("typed_prompt") or prompt.prompt or "").strip()
+        sent = (prompt.prompt or "").strip()
+        record: Dict[str, Any] = {"original_prompt": typed or sent}
+        if typed and sent and sent != typed:
+            record["rewritten_prompt"] = sent
+        return record
 
     def _apply_director(self, request: BatchImageRequest) -> None:
         """If director_mode or storyboard_concept, rewrite prompts via Media Director.
@@ -1310,6 +1491,7 @@ class BatchImageGenerator:
                         if shot != concept and shot != (p.prompt or "").strip():
                             p.auto_enhance = False
                             changed += 1
+                        self._remember_typed_prompt(p)
                         p.prompt = shot
                     if changed:
                         request.auto_enhance = False
@@ -1359,6 +1541,7 @@ class BatchImageGenerator:
                 if (bp.prompt or "").strip() and idx < len(directed):
                     newp = (directed[idx] or "").strip()
                     if newp and newp != (bp.prompt or "").strip():
+                        self._remember_typed_prompt(bp)
                         bp.prompt = newp
                         bp.auto_enhance = False
                         changed += 1
@@ -1476,6 +1659,10 @@ class BatchImageGenerator:
                 "ui_config": getattr(request, "ui_config", None),
             }
         }
+
+        # After retry_data, so a retry still says "auto" and follows the Settings
+        # choice current at that time.
+        self._apply_stills_default_to_auto(request)
 
         with self.batch_lock:
             self.active_batches[batch_id] = batch_status
@@ -1623,6 +1810,7 @@ class BatchImageGenerator:
                                                 batch_status.failed_images += 1
                                                 if not batch_status.error:
                                                     batch_status.error = result.error
+                                                    batch_status.error_kind = result.error_kind
 
                                             batch_status.results = _ordered_results()
 
@@ -2418,6 +2606,8 @@ class BatchImageGenerator:
                 output_dir=str(batch_folder),
                 display_name=metadata.get("display_name"),
                 retry_data=metadata.get("retry_data"),
+                error=metadata.get("error"),
+                error_kind=metadata.get("error_kind"),
             )
         except (ValueError, KeyError, TypeError) as e:
             logger.warning(f"Failed to load metadata for batch {batch_folder.name}: {e}")
@@ -2432,6 +2622,7 @@ class BatchImageGenerator:
                     thumbnail_path=r.get("thumbnail_path"),
                     generation_time=r.get("generation_time", 0.0) or 0.0,
                     error=r.get("error"),
+                    error_kind=r.get("error_kind"),
                     metadata=r.get("metadata") or {},
                 )
                 for r in metadata.get("results", []) or []
@@ -2564,6 +2755,9 @@ class BatchImageGenerator:
         filled["guidance"] = resolved["guidance"]
 
         from backend.services.image_prompt_sanitize import sanitize_image_prompt
+        # A typed seed numbers the batch from itself, so a reused image seed
+        # renders that image first and the copies after it still differ.
+        base_seed = kwargs.get("seed")
         prompts = []
         for i, prompt in enumerate(prompt_list):
             cleaned = sanitize_image_prompt(prompt)
@@ -2572,6 +2766,7 @@ class BatchImageGenerator:
             prompts.append(BatchPrompt(
                 id=f"prompt_{i+1}",
                 prompt=cleaned,
+                seed=(int(base_seed) + i) % SEED_SPACE if base_seed is not None else None,
                 metadata={
                     "steps_explicit": kwargs.get("steps_explicit", False),
                     "steps_requested": kwargs.get("steps_requested", resolved["steps_requested"]),

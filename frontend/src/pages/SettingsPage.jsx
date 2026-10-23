@@ -39,7 +39,8 @@ import VoiceSettingsModal from "../components/modals/VoiceSettingsModal";
 import ExportChatsButton from "../components/settings/ExportChatsButton";
 import ProfileSection from "../components/settings/ProfileSection";
 import TipsSetting from "../components/settings/TipsSetting";
-import { SOCKET_URL } from "../api/apiClient";
+import JobOrderSetting from "../components/settings/JobOrderSetting";
+import { SOCKET_URL, handleResponse } from "../api/apiClient";
 import { SUPPORT_LINKS } from "../config/constants";
 import CoffeeIcon from "@mui/icons-material/Coffee";
 import StarIcon from "@mui/icons-material/Star";
@@ -55,7 +56,10 @@ import {
   clearBehaviorLog,
   getMusicDirectory,
   setMusicDirectory as setMusicDirectoryAPI,
+  getChatKeepReady,
+  setChatKeepReady,
 } from "../api/settingsService";
+import { enablePlugin, startPlugin } from "../api/pluginsService";
 import { useAppStore } from "../stores/useAppStore";
 import { useStatus } from "../contexts/StatusContext";
 import PageLayout from "../components/layout/PageLayout";
@@ -75,12 +79,14 @@ import {
 } from "../components/settings/ui";
 import IndexProfileChips from "../components/settings/IndexProfileChips";
 import RerankerControl from "../components/settings/RerankerControl";
+import IdentityCheckControl from "../components/settings/IdentityCheckControl";
 import RebuildIndexDialog from "../components/settings/RebuildIndexDialog";
 import IndexProfileEditDialog from "../components/settings/IndexProfileEditDialog";
 import ModelManagementSection from "../components/settings/ModelManagementSection";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { useTheme, useMediaQuery } from "@mui/material";
 import { useSnackbar } from "../components/common/SnackbarProvider";
+import { formatUiError } from "../utils/uiError";
 import * as interconnectorApi from "../api/interconnectorService";
 import { useVoice } from "../contexts/VoiceContext";
 import * as apiService from "../api";
@@ -93,6 +99,7 @@ import {
 import { ragAutoresearchService } from "../api/ragAutoresearchService";
 import { getMcpStatus } from "../api/mcpService";
 import { NAV_CHROME } from "../config/navCatalog";
+import copyText from "../utils/copyText";
 
 const debugLog = (...args) => {
   if (import.meta.env.DEV) {
@@ -130,6 +137,12 @@ const VOICE_CHAT_ENABLED_KEY = "guaardvark_voiceChatEnabled";
 
 const SettingsPage = () => {
   const [availableModels, setAvailableModels] = useState([]);
+  // Ollama did not answer the last model list; the list then holds only the
+  // saved model.
+  const [ollamaOffline, setOllamaOffline] = useState(false);
+  const [startingOllama, setStartingOllama] = useState(false);
+  const [keepReady, setKeepReady] = useState(null);
+  const [savingKeepReady, setSavingKeepReady] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
   const [embeddingModel, setEmbeddingModel] = useState("");
   const [_isLoadingEmbeddingModel, setIsLoadingEmbeddingModel] = useState(true);
@@ -166,8 +179,11 @@ const SettingsPage = () => {
   const [imageKeepMinutes, setImageKeepMinutes] = useState(0);
   const [imageKeepSaving, setImageKeepSaving] = useState(false);
   // Media stack (stills / cast LoRA train / max quality) — Ollama-picker style
+  // stills_model holds the person's choice, "auto" when nothing was chosen
+  // (the backend's stills_chosen); the picker never shows the filled-in
+  // default as if someone had picked it.
   const [mediaModels, setMediaModelsState] = useState({
-    stills_model: "zimage-turbo",
+    stills_model: "auto",
     cast_train_base: "zimage-turbo",
     max_quality_model: "flux-dev",
     train_profiles: [],
@@ -357,6 +373,7 @@ const SettingsPage = () => {
   const [embeddingModels, setEmbeddingModels] = useState([]);
   const [selectedEmbeddingModel, setSelectedEmbeddingModel] = useState("");
   const [isSwitchingEmbedding, setIsSwitchingEmbedding] = useState(false);
+  const [confirmEmbeddingOpen, setConfirmEmbeddingOpen] = useState(false);
   const [embedDimFilter, setEmbedDimFilter] = useState(null); // null = all, or a number like 1024
   const [chatSizeFilter, setChatSizeFilter] = useState(null); // null = all, or "small"/"medium"/"large"
 
@@ -376,7 +393,7 @@ const SettingsPage = () => {
   const [mcpStatus, setMcpStatus] = useState(null);
   const [confineToolPaths, setConfineToolPaths] = useState(false);
   const [musicDirectorySaved, setMusicDirectorySaved] = useState("");
-  // "rules" clears rules the chat learned; "log" empties the behaviour log file.
+  // "rules" clears rules marked LEARNED; "log" empties the behaviour log file.
   const [learningClear, setLearningClear] = useState(null);
   const [learningBusy, setLearningBusy] = useState(false);
   const [editProfile, setEditProfile] = useState(null);
@@ -663,10 +680,10 @@ const SettingsPage = () => {
   };
 
   const copyWhisperCommand = async (command) => {
-    try {
-      await navigator.clipboard.writeText(command);
+    // copyText falls back to execCommand: navigator.clipboard is absent over plain http on the LAN.
+    if (await copyText(command)) {
       showMessage("Command copied to clipboard.", "success");
-    } catch (e) {
+    } else {
       showMessage("Could not copy — select the command and copy it manually.", "warning");
     }
   };
@@ -878,14 +895,11 @@ const SettingsPage = () => {
   const fetchAvailableModels = useCallback(async () => {
     // Avoid clearing import/export notifications when refreshing the list
     try {
-      const modelsResult = await apiService.getAvailableModels();
+      const modelsResult = await apiService.getChatModelList();
       if (modelsResult?.error)
         throw new Error(`Available models fetch failed: ${modelsResult.error}`);
-      let modelsList = Array.isArray(modelsResult)
-        ? modelsResult.filter((m) => m && m.name)
-        : Array.isArray(modelsResult?.models)
-          ? modelsResult.models.filter((m) => m && m.name)
-          : [];
+      setOllamaOffline(modelsResult.ollamaOffline);
+      let modelsList = modelsResult.models.filter((m) => m && m.name);
       // Ensure the currently active model appears in the dropdown
       if (
         activeModel &&
@@ -940,6 +954,62 @@ const SettingsPage = () => {
       }
     })();
   }, []);
+
+  const handleStartOllama = async () => {
+    setStartingOllama(true);
+    try {
+      let result;
+      try {
+        result = await startPlugin("ollama");
+      } catch (err) {
+        // A switched-off plugin refuses to start; the button means "on".
+        if (!/disabled/i.test(err.message || "")) throw err;
+        await enablePlugin("ollama");
+        result = await startPlugin("ollama");
+      }
+      const data = result?.data ?? result;
+      if (data?.gated) {
+        throw new Error(
+          `Ollama was started moments ago; try again in ${Math.ceil(data.cooldown_remaining || 0)} s`,
+        );
+      }
+      showMessage("Ollama is running", "success");
+      await fetchAvailableModels();
+    } catch (err) {
+      showMessage(`Could not start Ollama: ${err.message}`, "error");
+    } finally {
+      setStartingOllama(false);
+    }
+  };
+
+  const fetchKeepReady = useCallback(async () => {
+    try {
+      const result = await getChatKeepReady();
+      setKeepReady(result?.data ?? result);
+    } catch {
+      // Older backend without Keep ready: the chip stays hidden.
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchKeepReady();
+    const id = setInterval(() => {
+      if (!document.hidden) fetchKeepReady();
+    }, 10000);
+    return () => clearInterval(id);
+  }, [fetchKeepReady]);
+
+  const handleKeepReadyToggle = async (next) => {
+    setSavingKeepReady(true);
+    try {
+      const result = await setChatKeepReady(next);
+      setKeepReady(result?.data ?? result);
+    } catch (err) {
+      showMessage(`Could not change Keep ready: ${err.message}`, "error");
+    } finally {
+      setSavingKeepReady(false);
+    }
+  };
 
   // Fetch GPU resources and embedding model list
   const fetchResources = useCallback(async () => {
@@ -1178,7 +1248,7 @@ const SettingsPage = () => {
           }
           setMediaModelsState((prev) => ({
             ...prev,
-            stills_model: data.stills_model || prev.stills_model,
+            stills_model: data.stills_chosen || "auto",
             cast_train_base: data.cast_train_base || prev.cast_train_base,
             max_quality_model: data.max_quality_model || prev.max_quality_model,
             character_lora_strength:
@@ -2062,15 +2132,11 @@ const SettingsPage = () => {
     }
   };
 
-  const handleSetEmbeddingClick = async () => {
-    if (
-      !window.confirm(
-        "Switch the embedding model?\n\n" +
-          "Same vector width: the existing index is kept.\n" +
-          "Different width: the index is emptied and every document must be re-indexed.\n\nContinue?",
-      )
-    )
-      return;
+  // Asks first (ConfirmActionDialog below); switchEmbedding runs on confirm.
+  const handleSetEmbeddingClick = () => setConfirmEmbeddingOpen(true);
+
+  const switchEmbedding = async () => {
+    setConfirmEmbeddingOpen(false);
     setIsSwitchingEmbedding(true);
     try {
       const r = await fetch("/api/model/embedding/set", {
@@ -2078,24 +2144,38 @@ const SettingsPage = () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: selectedEmbeddingModel }),
       });
-      const d = await r.json();
+      // handleResponse: an error status or an offline backend becomes an
+      // error with the server's reason instead of a JSON parse failure.
+      const d = await handleResponse(r, { quiet: true });
       if (d.success) {
         setEmbeddingModel(selectedEmbeddingModel);
         const payload = payloadOf(d);
         const dims = payload?.dimensions;
+        const queued = payload?.reindex_queued ?? 0;
+        const pending = payload?.reindex_pending ?? 0;
+        // Indexed text with no document behind it is not re-indexed; say what
+        // and how to rebuild it.
+        const notRebuilt = payload?.not_rebuilt || [];
+        const notRebuiltText = notRebuilt.length
+          ? " Not rebuilt automatically: " +
+            notRebuilt.map((n) => `${n.rows} ${n.kind.replace(/_/g, " ")} row(s). ${n.how}`).join(" ")
+          : "";
         showMessage(
           payload?.index_cleared
-            ? `Embedding switched to ${selectedEmbeddingModel} (${dims}d). The index was emptied; re-index your documents.`
-            : `Embedding switched to ${selectedEmbeddingModel} (${dims}d). Same width, index kept.`,
-          payload?.index_cleared ? "warning" : "success",
+            ? `Embedding switched to ${selectedEmbeddingModel} (${dims}d). The index was emptied and ${queued} ` +
+                `document(s) queued to be indexed again` +
+                (pending ? `; ${pending} wait for indexing to resume.` : ".") +
+                notRebuiltText
+            : `Embedding model is already ${selectedEmbeddingModel}; index kept.`,
+          payload?.index_cleared && (pending || notRebuilt.length) ? "warning" : "success",
         );
         fetchResources();
         setProfilesReloadKey((k) => k + 1);
       } else {
-        showMessage(d.error || "Failed to switch embedding", "error");
+        showMessage(formatUiError(d.error) || "Failed to switch embedding", "error");
       }
     } catch (e) {
-      showMessage(`Failed: ${e.message}`, "error");
+      showMessage(`The embedding model was not switched: ${formatUiError(e) || "the request failed"}`, "error");
     } finally {
       setIsSwitchingEmbedding(false);
     }
@@ -2501,7 +2581,7 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-general"
       title="General"
-      help="Your name, picture and theme, how pages are listed, tips, the music folder and the product profile."
+      help="Your name, picture and theme, how pages are listed, tips, job order, the music folder and the product profile."
     >
       <input
         type="file"
@@ -2611,6 +2691,7 @@ const SettingsPage = () => {
         </Line>
       </Cluster>
       <TipsSetting />
+      <JobOrderSetting showMessage={showMessage} />
       <Cluster
         label="Media library"
         help="The music folder the assistant searches when you ask it to play music. Left empty, it uses ~/Music."
@@ -2707,7 +2788,7 @@ const SettingsPage = () => {
           <ActionButton
             kind={chatModelPending ? "primary" : "neutral"}
             onClick={handleSetModelClick}
-            disabled={!chatModelPending || isLoading || isLoadingModel}
+            disabled={!chatModelPending || isLoading || isLoadingModel || ollamaOffline}
             loading={isLoadingModel}
             tooltip="Loads the model, unloads the previous one and rebuilds the query engine. Can take minutes on a cold GPU."
           >
@@ -2750,6 +2831,58 @@ const SettingsPage = () => {
             <LinearProgress sx={{ height: 4, borderRadius: 2 }} />
             <Hint>{modelSwitchMessage || "Switching model…"}</Hint>
           </Box>
+        )}
+        {ollamaOffline && (
+          <Line>
+            <StatusPill
+              tone="warn"
+              label="Ollama is off"
+              tooltip="Chat models run in Ollama. While it is off, the list shows only the saved model."
+            />
+            <ActionButton
+              kind="primary"
+              onClick={handleStartOllama}
+              loading={startingOllama}
+              tooltip="Starts the Ollama plugin, then reloads the list"
+            >
+              Start Ollama
+            </ActionButton>
+          </Line>
+        )}
+        {keepReady && (
+          <Line>
+            <SettingChip
+              label="Keep ready"
+              on={Boolean(keepReady.enabled)}
+              onToggle={handleKeepReadyToggle}
+              disabled={savingKeepReady || keepReady.env_writable === false}
+              tooltip="Keeps the chat model and voice input loaded with no idle timeout, so a reply after an hour is as fast as one after a minute. It steps aside for image, video and training work and loads again when that work is done. This machine only."
+            />
+            {keepReady.enabled && (
+              <StatusPill
+                tone={
+                  keepReady.state === "ready"
+                    ? "ok"
+                    : keepReady.state === "loading"
+                      ? "info"
+                      : "warn"
+                }
+                label={
+                  keepReady.state === "ready"
+                    ? "loaded"
+                    : keepReady.state === "loading"
+                      ? "loading"
+                      : keepReady.state === "stepped aside"
+                        ? "stepped aside"
+                        : "waiting"
+                }
+                tooltip={keepReady.detail || ""}
+              />
+            )}
+            {keepReady.enabled && keepReady.detail && keepReady.state !== "ready" && (
+              <Hint>{keepReady.detail}</Hint>
+            )}
+          </Line>
         )}
       </Cluster>
 
@@ -2944,20 +3077,24 @@ const SettingsPage = () => {
             <Select
               labelId="media-stills-label"
               label="Stills"
-              value={mediaModels.stills_model || "zimage-turbo"}
+              value={mediaModels.stills_model || "auto"}
               onChange={(e) =>
                 saveMediaModel("stills_model", e.target.value, "Stills model")
               }
             >
-              {(mediaModels.stills_profiles?.length
-                ? mediaModels.stills_profiles
-                : [
-                    { id: "zimage-turbo", name: "Z-Image Turbo" },
-                    { id: "flux-dev", name: "FLUX.1 Dev" },
-                    { id: "krea2-turbo", name: "Krea 2 Turbo" },
-                    { id: "sdxl-legacy", name: "SDXL (Legacy)" },
-                  ]
-              ).map((p) => (
+              {[
+                // Saves "auto": Auto picks render by card size again, the way
+                // back once a model has been chosen.
+                { id: "auto", name: "Auto (best for this card)" },
+                ...(mediaModels.stills_profiles?.length
+                  ? mediaModels.stills_profiles
+                  : [
+                      { id: "zimage-turbo", name: "Z-Image Turbo" },
+                      { id: "flux-dev", name: "FLUX.1 Dev" },
+                      { id: "krea2-turbo", name: "Krea 2 Turbo" },
+                      { id: "sdxl-legacy", name: "SDXL (Legacy)" },
+                    ]),
+              ].map((p) => (
                 <MenuItem key={p.id} value={p.id}>
                   {p.name || p.id}
                   {p.recommended ? " ★" : ""}
@@ -3111,6 +3248,12 @@ const SettingsPage = () => {
             </Box>
           ))}
         </Line>
+      </Cluster>
+      <Cluster
+        label="Cast identity check"
+        help="An image encoder that compares a character's post-training test picture with its reference photos, and each cinematic clip's middle frame with its keyframe. Optional: without it there is no identity score and clips are compared by colour."
+      >
+        <IdentityCheckControl showMessage={showMessage} />
       </Cluster>
       <Cluster
         label="Model libraries"
@@ -3361,7 +3504,7 @@ const SettingsPage = () => {
                   ?.scrollIntoView({ behavior: "smooth", block: "start" })
               }
             >
-              Settings → API key
+              Settings → Access
             </ActionButton>
           ) : (
             <ActionButton onClick={() => navigate("/agents/mcp")}>
@@ -3383,7 +3526,7 @@ const SettingsPage = () => {
     <SettingsPanel
       id="settings-sync"
       title="Sync"
-      help="Keep rules, memories and code in step with your other Guaardvark machines."
+      help="Keep code, projects and rules in step with your other Guaardvark machines. Agent memories stay on each machine."
     >
       <Line>
         <SettingChip
@@ -3391,7 +3534,7 @@ const SettingsPage = () => {
           on={interconnectorEnabled}
           onToggle={handleInterconnectorToggle}
           onSettings={() => setInterconnectorModalOpen(true)}
-          tooltip="Sync rules, memories and code with the other machines you have connected."
+          tooltip="Sync code, projects, rules and other records with the machines you have connected. Agent memories are not synced."
         />
         {interconnectorEnabled && interconnectorPendingCount > 0 && (
           <StatusPill
@@ -3537,7 +3680,7 @@ const SettingsPage = () => {
           kind="destructive"
           onClick={() => setLearningClear("rules")}
           disabled={isLoading}
-          tooltip="Deletes every rule the chat learned on its own; rules you wrote stay"
+          tooltip="Deletes every rule marked as learned; rules you wrote stay"
         >
           Clear learned rules
         </ActionButton>
@@ -3771,7 +3914,7 @@ const SettingsPage = () => {
       variant="standard"
       actions={
         appVersion ? (
-          <Typography variant="caption" color="text.disabled">
+          <Typography variant="caption" color="text.secondary">
             v{appVersion}
           </Typography>
         ) : null
@@ -3874,6 +4017,21 @@ const SettingsPage = () => {
         }}
       />
       <ConfirmActionDialog
+        open={confirmEmbeddingOpen}
+        onClose={() => setConfirmEmbeddingOpen(false)}
+        onConfirm={switchEmbedding}
+        title="Switch the embedding model"
+        description={
+          "Another model's vectors cannot be searched alongside the old ones, even at the same width, " +
+          "so the index is emptied and every indexed document is queued to be indexed again with the new model. " +
+          "Searches find less until that finishes."
+        }
+        facts={[{ label: "New model", value: selectedEmbeddingModel || "—" }]}
+        keeps="your documents themselves; only their search index is rebuilt."
+        confirmLabel="Switch and re-index"
+        busy={isSwitchingEmbedding}
+      />
+      <ConfirmActionDialog
         open={rebootDialogOpen}
         onClose={handleCancelReboot}
         onConfirm={handleConfirmReboot}
@@ -3959,7 +4117,7 @@ const SettingsPage = () => {
         }
         description={
           learningClear === "rules"
-            ? "Deletes every rule marked as learned, the ones the chat added on its own from corrections and preferences."
+            ? "Deletes every rule marked as learned: the ones shipped in the rule bundle, and any saved by the /saverule command. The chat does not add rules on its own."
             : "Empties the behaviour log file that Behaviour learning reads to adapt replies. Learning starts again from nothing."
         }
         keeps={

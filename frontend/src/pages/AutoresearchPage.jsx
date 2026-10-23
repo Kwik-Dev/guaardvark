@@ -45,7 +45,9 @@ import { io } from "socket.io-client";
 import { SOCKET_URL } from "../api/apiClient";
 import { ragAutoresearchService } from "../api/ragAutoresearchService";
 import { selfImprovementService } from "../api/selfImprovementService";
+import { guardedMediaSrc } from "../utils/assetGuard";
 import AlertSnackbar from "../components/common/AlertSnackbar";
+import CodeKeepsTable, { formatServerTime as formatDate } from "../components/selfImprovement/CodeKeepsTable";
 import EntityContextMenu from "../components/common/EntityContextMenu";
 import useContextMenu from "../hooks/useContextMenu";
 import {
@@ -63,17 +65,6 @@ const RUN_STATUS_COLORS = {
   halted: "warning",
   failed_precondition: "error",
   killed: "error",
-};
-
-// The server writes UTC timestamps without a zone; read them as UTC, not local time.
-const formatDate = (iso) => {
-  if (!iso) return "—";
-  try {
-    const text = String(iso);
-    return new Date(/[zZ]|[+-]\d\d:\d\d$/.test(text) ? text : `${text}Z`).toLocaleString();
-  } catch {
-    return iso;
-  }
 };
 
 const formatScore = (v) =>
@@ -460,7 +451,7 @@ const AutoresearchPage = () => {
     try {
       if (action === "approve") {
         await selfImprovementService.approveFix(fixId);
-        showMessage("Code keep approved — apply from Settings Pending Fixes", "success");
+        showMessage("Code keep approved. Apply it from Self-improvement › Pending fixes.", "success");
       } else {
         await selfImprovementService.rejectFix(fixId);
         showMessage("Code keep rejected", "info");
@@ -799,55 +790,7 @@ const AutoresearchPage = () => {
       </Paper>
 
       {/* --- Code keeps (PendingFixes staged by the director) --- */}
-      {codeKeeps.length > 0 && (
-        <Paper
-          elevation={0}
-          sx={{ p: 2, mb: 3, border: 1, borderColor: "divider" }}
-        >
-          <Typography variant="h6" sx={{ mb: 1 }}>
-            Code keeps
-          </Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
-            Swarm arms that passed preserve-and-extend. Approve here, then apply
-            from Settings — nothing auto-merges to main.
-          </Typography>
-          <TableContainer>
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>Description</TableCell>
-                  <TableCell>Status</TableCell>
-                  <TableCell>Created</TableCell>
-                  <TableCell align="right">Actions</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {codeKeeps.map((fix) => (
-                  <TableRow key={fix.id}>
-                    <TableCell>{fix.fix_description}</TableCell>
-                    <TableCell>
-                      <Chip label={fix.status} size="small" sx={{ height: 20, fontSize: "0.7rem" }} />
-                    </TableCell>
-                    <TableCell>{formatDate(fix.created_at)}</TableCell>
-                    <TableCell align="right">
-                      {fix.status === "proposed" && (
-                        <>
-                          <Button size="small" onClick={() => handleCodeKeep(fix.id, "approve")}>
-                            Approve
-                          </Button>
-                          <Button size="small" color="warning" onClick={() => handleCodeKeep(fix.id, "reject")}>
-                            Reject
-                          </Button>
-                        </>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </TableContainer>
-        </Paper>
-      )}
+      <CodeKeepsTable keeps={codeKeeps} onDecide={handleCodeKeep} />
 
       {/* --- Runs --- */}
       <Paper
@@ -974,7 +917,15 @@ const AutoresearchPage = () => {
                   },
                 }}
               >
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedRun.report_md}</ReactMarkdown>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    // The report quotes model-proposed values; never load a remote image from it.
+                    img: (props) => <img {...props} src={guardedMediaSrc(props.src)} alt={props.alt || ""} />,
+                  }}
+                >
+                  {selectedRun.report_md}
+                </ReactMarkdown>
               </Box>
             ) : (
               <Typography variant="body2" color="text.secondary">

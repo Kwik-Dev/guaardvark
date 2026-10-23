@@ -1,7 +1,8 @@
 """Settings > Training libraries: Unsloth, TRL and Datasets install into the
 backend's Python only from the modal's click, hold every other installed
 package where it is, leave out what the project removes or must not import,
-come out again on Remove, and training jobs refuse while they are missing.
+come out again on Remove, and training jobs refuse while they are missing or
+incomplete (a requirement of theirs unmet).
 
 Seams: subprocess.Popen (pip), read by _pip at call time; _spawn (the
 background thread), installed_versions, _requires, hardware_fit,
@@ -17,6 +18,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 os.environ["GUAARDVARK_MODE"] = "test"
@@ -148,6 +153,30 @@ def test_unmet_requirements_name_the_package_and_skip_what_is_left_out(env, monk
                      "trl 1.13.0 needs accelerate>=1.4.0 (1.2.1 installed)"]
 
 
+def _accelerate_put_back(env, monkeypatch):
+    """Every library installed, with accelerate below what TRL declares: what
+    a start-up `pip install -r` left when the requirements pinned 1.2.1."""
+    env.update(INSTALLED)
+    env["accelerate"] = "1.2.1"
+    monkeypatch.setattr(tl, "_requires", lambda name: ["accelerate>=1.4.0"] if name == "trl" else [])
+
+
+INCOMPLETE = ("The training libraries are installed, but incomplete: trl 1.13.0 needs "
+              "accelerate>=1.4.0 (1.2.1 installed). Open Settings > Training libraries and "
+              "click Repair.")
+
+
+def test_an_unmet_requirement_reads_installed_but_not_ready(env, monkeypatch):
+    _accelerate_put_back(env, monkeypatch)
+
+    status = tl.status()
+
+    assert {lib["state"] for lib in status["libraries"]} == {"installed"}
+    assert status["ready"] is False
+    assert status["unmet"] == ["trl 1.13.0 needs accelerate>=1.4.0 (1.2.1 installed)"]
+    assert status["download_mb"] == 0
+
+
 # ---- only the click installs -------------------------------------------------------------
 
 def test_install_refuses_without_a_plan_token(env, pip):
@@ -208,8 +237,10 @@ def test_a_machine_that_is_not_practical_installs_only_anyway(env, monkeypatch):
 def test_nothing_but_the_routes_starts_a_run():
     """No task, schedule or startup step can install: the only code that
     calls start_install or start_remove is the route behind the modal. The
-    base-model Download (training_base_models) defines its own pair, called
-    from the same routes file."""
+    base-model Download (training_base_models) and the GGUF converter
+    (training_gguf_converter) define their own pairs, called from the same
+    routes file; the search reranker (utils/reranker.py) defines its own
+    start_install, called from its Settings route in api/index_mgmt_api.py."""
     backend = Path(tl.__file__).resolve().parents[1]
     skip = {"tests", "venv", ".venv", "node_modules", "__pycache__"}
     callers = set()
@@ -223,7 +254,32 @@ def test_nothing_but_the_routes_starts_a_run():
             if "start_install(" in text or "start_remove(" in text:
                 callers.add(path.relative_to(backend).as_posix())
     assert callers == {"api/training/routes.py", "services/training_libraries.py",
-                       "services/training_base_models.py"}
+                       "services/training_base_models.py", "services/training_gguf_converter.py",
+                       "api/index_mgmt_api.py", "utils/reranker.py"}
+
+
+def test_start_up_requirements_keep_what_an_install_moves():
+    """start.sh, heal_backend_venv.sh and the dependency reconciler run
+    `pip install -r` on these files, which reinstalls a package whose version
+    falls outside its line. A package the install moves must stay inside it,
+    or the next start-up undoes the install and fine-tuning fails at step 1."""
+    backend = Path(tl.__file__).resolve().parents[1]
+    declared = []
+    for name in ("requirements-base.txt", "requirements.txt"):
+        for line in (backend / name).read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line and not line.startswith("-"):
+                declared.append((name, Requirement(line)))
+    checked = 0
+    for package, (spec, _why) in tl.MAY_CHANGE.items():
+        edges = [Version(s.version) for s in SpecifierSet(spec) if s.operator in (">=", "<=", "==")]
+        for source, req in declared:
+            if canonicalize_name(req.name) != package:
+                continue
+            checked += 1
+            assert any(req.specifier.contains(v) for v in edges), (
+                f"{source} declares {req}, which start-up would hold outside {package}{spec}")
+    assert checked, "no package the install moves is declared; this test checks nothing"
 
 
 # ---- the install ---------------------------------------------------------------------
@@ -415,7 +471,7 @@ def test_remove_is_refused_when_nothing_is_installed(env):
     assert refused.value.code == "NOTHING_TO_REMOVE"
 
 
-# ---- jobs refuse while the libraries are missing -------------------------------------
+# ---- jobs refuse while the libraries are missing or incomplete ------------------------
 
 def _missing(*names):
     def version(name):
@@ -436,6 +492,16 @@ def test_the_job_refusal_names_what_is_missing_and_where_to_install_it(env, monk
                                        "Install it in Settings > Training libraries.")
 
     monkeypatch.setattr(tl.metadata, "version", _missing())
+    assert tl.unavailable_reason() is None
+
+
+def test_the_job_refusal_names_an_unmet_requirement_and_points_to_repair(env, monkeypatch):
+    monkeypatch.setattr(tl.metadata, "version", _missing())
+    _accelerate_put_back(env, monkeypatch)
+
+    assert tl.unavailable_reason() == INCOMPLETE
+
+    env["accelerate"] = "1.15.0"
     assert tl.unavailable_reason() is None
 
 
@@ -536,6 +602,31 @@ def test_resume_refuses_while_the_libraries_are_missing(client, monkeypatch):
     assert "Settings > Training libraries" in _error(response)["message"]
     db.session.expire_all()
     assert db.session.get(TrainingJob, job.id).status == "failed"
+
+
+def test_create_start_and_resume_refuse_while_a_requirement_is_unmet(client, env, monkeypatch):
+    monkeypatch.setattr(tl.metadata, "version", _missing())
+    _accelerate_put_back(env, monkeypatch)
+    pending = TrainingJob(job_id="later", name="later", base_model="org/base", dataset_id=1,
+                          status="pending", pipeline_stage="pending")
+    failed = TrainingJob(job_id="old", name="old", base_model="org/base", status="failed",
+                         pipeline_stage="training", is_resumable=True, checkpoint_path="/ckpt/checkpoint-10")
+    db.session.add_all([pending, failed])
+    db.session.commit()
+
+    created = client.post("/api/training/jobs", json={
+        "name": "job", "base_model": "org/base", "dataset_id": 1, "start_immediately": True})
+    started = client.post(f"/api/training/jobs/{pending.id}/start")
+    resumed = client.post(f"/api/training/jobs/{failed.id}/resume")
+
+    for response in (created, started, resumed):
+        assert response.status_code == 409
+        assert _error(response)["code"] == "TRAINING_LIBRARIES_MISSING"
+        assert _error(response)["message"] == INCOMPLETE
+    db.session.expire_all()
+    assert db.session.query(TrainingJob).count() == 2
+    assert db.session.get(TrainingJob, pending.id).status == "pending"
+    assert db.session.get(TrainingJob, failed.id).status == "failed"
 
 
 def test_other_hosts_cannot_install_or_remove():

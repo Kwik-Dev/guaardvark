@@ -50,7 +50,7 @@ def test_approved_draft_dispatcher_skips_when_kill_switch_off(app, db_session, m
 
     db_session.refresh(row)
     assert bootstrap_called["n"] == 0
-    assert result == {"processed": 0, "reason": "kill_switch_off"}
+    assert result == {"unsupported": 0, "reason": "kill_switch_off"}
     assert row.status == "approved"
 
 
@@ -134,7 +134,7 @@ def test_run_pass_refuses_to_queue_when_kill_switch_off(app, client, db_session)
     assert Task.query.count() == 0
 
 
-def test_run_pass_creates_task_queue_row_when_enabled(app, client, db_session, monkeypatch):
+def test_run_pass_creates_task_queue_row_when_enabled(app, client, db_session, monkeypatch, web_access_on):
     """Enabled Outreach launches should be Task-backed for TaskPage/Activity/progress."""
     from backend.api import social_outreach_api
     from backend.models import Setting, Task

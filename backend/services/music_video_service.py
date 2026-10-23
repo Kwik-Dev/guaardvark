@@ -263,6 +263,106 @@ def compute_cut_plan(
     return cuts
 
 
+# Bars per cut by the loudness (0..1 within the song) of the two bars a cut starts
+# on: loud passages cut every bar, quiet ones hold up to eight. Measured on two
+# songs, at 112 BPM and 123 BPM: quiet parts
+# 7-8 cuts/min, loud parts 23-29 cuts/min, Wan 2.2 5B render time +14% over the
+# energy-quarter planner for the same song (43 cuts against 28).
+BARS_PER_CUT_BY_LOUDNESS = ((0.75, 1), (0.45, 2), (0.20, 4), (0.0, 8))
+MIN_BAR_CUT_S = 1.5   # a bar shorter than this (fast tempo) cuts every two bars
+
+
+def compute_bar_cut_plan(
+    downbeat_times: list[float],
+    bar_energy: list[float],
+    sections: list[dict[str, Any]],
+    duration: float,
+    *,
+    beat_times: list[float] | None = None,
+    max_cut_s: float | None = None,
+    slow_pace: bool = False,
+) -> list[dict[str, Any]]:
+    """Cut plan on the song's bar grid, paced by its loudness.
+
+    ``downbeat_times``, ``bar_energy`` and ``sections`` come from the analyzer's
+    read-the-song mode (song_structure, ``section_count=None``). Every boundary
+    is a bar start, a section start always starts a cut, and a cut spans 1, 2, 4
+    or 8 bars by ``BARS_PER_CUT_BY_LOUDNESS`` (doubled for ``slow_pace``). A cut
+    is never longer than ``max_cut_s`` (what a forward clip can fill) unless a
+    single bar is. Returns ``[{index, start_s, end_s, energy, section_label}]``
+    like ``compute_cut_plan``, with ``energy`` the 0..1 loudness the cut was
+    paced by.
+    """
+    bars = [float(b) for b in downbeat_times]
+    n = len(bars)
+    if n == 0:
+        return compute_cut_plan(beat_times or [], sections, duration, max_cut_s=max_cut_s,
+                                slow_pace=slow_pace)
+    energy = [float(e) for e in bar_energy] + [0.0] * max(0, n - len(bar_energy))
+    section_starts = {
+        i for i, b in enumerate(bars) if i > 0
+        and any(abs(b - float(s.get("start", -1))) < 1e-3 for s in sections)
+    }
+    deltas = sorted(b - a for a, b in zip(bars, bars[1:]))
+    bar_len = deltas[len(deltas) // 2] if deltas else duration
+
+    def at(i: int) -> float:
+        return bars[i] if i < n else duration
+
+    cuts: list[dict[str, Any]] = []
+    i = 0
+    while i < n:
+        start = 0.0 if i == 0 else bars[i]
+        window = energy[i:i + 2]
+        loudness = sum(window) / len(window)
+        k = next(b for t, b in BARS_PER_CUT_BY_LOUDNESS if loudness >= t)
+        if slow_pace:
+            k = min(8, k * 2)
+        while k * bar_len < MIN_BAR_CUT_S:
+            k *= 2
+        while k > 1 and max_cut_s and at(min(i + k, n)) - start > max_cut_s:
+            k //= 2
+        j = i + 1
+        while j < i + k and j < n and j not in section_starts:
+            j += 1
+        cuts.append({
+            "start_s": start,
+            "end_s": at(j),
+            "energy": loudness,
+            "section_label": _section_for(start, sections).get("label", "unlabeled") if sections else "unlabeled",
+        })
+        i = j
+
+    # The tail after the last bar rides on the last cut; split it on a beat if that
+    # leaves the cut longer than a clip can fill.
+    if max_cut_s and beat_times:
+        last = cuts[-1]
+        while last["end_s"] - last["start_s"] > max_cut_s:
+            inside = [b for b in beat_times if last["start_s"] + MIN_BAR_CUT_S <= b <= last["start_s"] + max_cut_s]
+            split = inside[-1] if inside else last["start_s"] + max_cut_s
+            cuts.append({**last, "start_s": split})
+            last["end_s"] = split
+            last = cuts[-1]
+    cuts[-1]["end_s"] = duration
+
+    for idx, c in enumerate(cuts):
+        c["index"] = idx
+    return cuts
+
+
+def default_keyframe_model() -> str:
+    """Storyboard and keyframe stills default to Z-Image Turbo when its weights are
+    on disk (offline, as on the Images page), else FLUX-schnell through ComfyUI."""
+    try:
+        from backend.services.offline_image_generator import get_image_generator
+        info = (get_image_generator().get_available_models() or {}).get("zimage-turbo") or {}
+        if info.get("availability") == "ready":
+            return "zimage-turbo"
+    except Exception:  # noqa: BLE001 — a probe failure keeps the ComfyUI default
+        pass
+    return "flux-schnell"
+
+
 def probe_duration(path: str) -> float:
     """Duration of a media file in seconds via ffprobe. 0.0 if unknown."""
     try:
@@ -353,6 +453,206 @@ def fill_clip_to_duration(
     return output_path
 
 
+# --- Editing / versions helpers (pure) ---------------------------------------
+
+# Settings that change what a clip looks like. A rendered clip whose inputs hash
+# differently from its recorded input_hash is stale and is rendered again; every
+# other clip is kept (revise / restore re-render only what changed).
+CLIP_RENDER_SETTING_KEYS = (
+    "i2v_model", "i2v_engine", "keyframe_model", "keyframe_steps", "keyframe_lora_strength",
+    "i2v_width", "i2v_height", "i2v_steps", "still_width", "still_height",
+    "fill_method", "max_stretch", "interpolation_multiplier", "fps", "width", "height",
+    "use_lora_consistency", "subject_ids", "loras", "lora_paths", "high_consistency",
+    "flux_unet", "flux_t5", "flux_clip", "flux_vae", "prompt_style",
+)
+
+# Run-time bookkeeping that never travels into a copy or a saved version.
+TRANSIENT_SETTING_KEYS = (
+    "stage_timings", "progress", "storyboard_generating", "storyboard_error",
+    "storyboard_progress", "storyboard_generating_since",
+)
+
+MAX_REVISIONS_PER_VIDEO = 50
+
+
+def _file_signature(path) -> list | None:
+    """[size, mtime_ns] of a file, or None when there is none. Survives a copy
+    that keeps the timestamp (shutil.copy2, a hard link), so a duplicated
+    video's storyboards still match the clips rendered from them."""
+    import os as _os
+    if not path:
+        return None
+    try:
+        st = _os.stat(path)
+    except OSError:
+        return None
+    return [st.st_size, st.st_mtime_ns]
+
+
+def clip_input_hash(clip: dict, settings: dict | None, fallback_prompt: str | None = None) -> str:
+    """Stable digest of everything that decides a clip's pixels.
+
+    ``fallback_prompt`` is the video's style prompt, which a cut with no prompt
+    of its own renders from. The storyboard counts by its file, so regenerating
+    it in place makes the clip animated from the old one stale."""
+    import hashlib
+    import json as _json
+    s = settings or {}
+    payload = {
+        "prompt": (clip.get("prompt") or fallback_prompt or "").strip(),
+        "start": round(float(clip.get("start") or 0.0), 3),
+        "end": round(float(clip.get("end") or 0.0), 3),
+        "seed": clip.get("seed"),
+        "storyboard": _file_signature(clip.get("storyboard_path")),
+        "storyboard_variation": clip.get("storyboard_variation"),
+        "duration": clip.get("duration_seconds"),
+        # A held cut rendered again is a new take with its own file, so a saved
+        # version keeps the take it was saved with.
+        "rerenders": int(clip.get("rerenders") or 0),
+        "settings": {k: s.get(k) for k in CLIP_RENDER_SETTING_KEYS},
+    }
+    raw = _json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def clip_is_stale(clip: dict, settings: dict | None, fallback_prompt: str | None = None) -> bool:
+    """A done clip rendered from different inputs than it has now. Clips from
+    before input hashing (no input_hash) are never called stale."""
+    recorded = clip.get("input_hash")
+    if not recorded:
+        return False
+    return recorded != clip_input_hash(clip, settings, fallback_prompt)
+
+
+def clip_needs_render(clip: dict, settings: dict | None, fallback_prompt: str | None = None, exists=None) -> bool:
+    """Whether the clip generator would render this cut: not done, its file is
+    gone, or its inputs changed since it was rendered. Cancelled cuts never are."""
+    import os as _os
+    if clip.get("status") == "cancelled":
+        return False
+    exists = exists or _os.path.exists
+    on_disk = bool(clip.get("clip_path")) and exists(clip["clip_path"])
+    return not (clip.get("status") == "done" and on_disk) or clip_is_stale(clip, settings, fallback_prompt)
+
+
+def clip_file_name(idx: int, render_hash: str) -> str:
+    """One file per cut and set of inputs. A new render never overwrites the
+    footage a saved version (or a copy of the video) still points at."""
+    return f"clip_{idx}_{render_hash}.mp4"
+
+
+def prune_unused_clip_files(clip_dir, idx: int, keep_paths) -> list[str]:
+    """Delete this cut's earlier renders that no clip list still points at.
+
+    Only files this module names (``clip_<idx>_<16 hex>.mp4``) in the video's
+    own clip folder are considered, so a hand-placed file or a pre-hash
+    ``clip_<idx>.mp4`` is never touched. ``keep_paths``: every clip_path in the
+    current clips and in every saved version. Returns the paths removed."""
+    import os as _os
+    import re as _re
+    from pathlib import Path as _Path
+    pattern = _re.compile(rf"^clip_{int(idx)}_[0-9a-f]{{16}}\.mp4$")
+    keep = {_os.path.realpath(str(p)) for p in keep_paths if p}
+    removed = []
+    try:
+        entries = list(_Path(clip_dir).iterdir())
+    except OSError:
+        return removed
+    for f in entries:
+        if not pattern.match(f.name) or _os.path.realpath(str(f)) in keep:
+            continue
+        try:
+            f.unlink()
+            removed.append(str(f))
+        except OSError:
+            pass
+    return removed
+
+
+def clean_settings(settings: dict | None) -> dict:
+    return {k: v for k, v in (settings or {}).items() if k not in TRANSIENT_SETTING_KEYS}
+
+
+def snapshot_of(mv) -> dict:
+    """Everything needed to bring a music video's creative state back."""
+    import copy
+    return {
+        "name": mv.name,
+        "style_prompt": mv.style_prompt,
+        "project_id": mv.project_id,
+        "cut_plan": copy.deepcopy(mv.cut_plan or []),
+        "clips": copy.deepcopy(mv.clips or []),
+        "settings": clean_settings(mv.settings_json),
+        "output_document_id": mv.output_document_id,
+        "stage": mv.current_stage,
+    }
+
+
+def restored_clips(clips: list | None, exists=None) -> list:
+    """Clips from a snapshot, with any whose file is gone set back to pending."""
+    import copy
+    import os as _os
+    exists = exists or _os.path.exists
+    out = copy.deepcopy(clips or [])
+    for c in out:
+        if c.get("status") == "cancelled":
+            c["status"] = "pending"
+        if c.get("status") == "done" and not (c.get("clip_path") and exists(c["clip_path"])):
+            c.update({"status": "pending", "clip_path": None, "quality": None, "review": None})
+        if c.get("status") == "failed":
+            c["status"] = "pending"
+        c.pop("deferred_since", None)
+    return out
+
+
+def attach_outputs_to_project(mv, doc_ids) -> list[int]:
+    """File a music video's output Documents under its Project.
+
+    Remembers the ids in settings_json["project_document_ids"] so a project delete
+    can detach them first: Project.documents is delete-orphan, and a finished
+    video must not vanish with the project it was filed under. Returns the ids
+    attached. The song is never moved (it may be shared by other videos).
+    """
+    ids = [int(i) for i in doc_ids if isinstance(i, int) or (isinstance(i, str) and i.isdigit())]
+    if not ids:
+        return []
+    s = dict(mv.settings_json or {})
+    known = [i for i in (s.get("project_document_ids") or []) if isinstance(i, int)]
+    s["project_document_ids"] = sorted(set(known) | set(ids))
+    mv.settings_json = s
+    from backend.models import Document
+    for doc in Document.query.filter(Document.id.in_(ids)).all():
+        doc.project_id = mv.project_id
+        mark_video_output(doc, "music_video", mv.id)
+    return ids
+
+
+VIDEO_OUTPUT_MARK = "video_output"
+
+
+def mark_video_output(doc, kind: str, row_id: int) -> None:
+    """Record on the Document itself that it is a rendered video's output, so a
+    project delete keeps it even after the video's own row is gone."""
+    import json as _json
+    try:
+        meta = _json.loads(doc.file_metadata) if doc.file_metadata else {}
+    except (TypeError, ValueError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    meta[VIDEO_OUTPUT_MARK] = {"kind": kind, "id": int(row_id)}
+    doc.file_metadata = _json.dumps(meta)
+
+
+def is_marked_video_output(doc) -> bool:
+    import json as _json
+    try:
+        meta = _json.loads(doc.file_metadata) if doc.file_metadata else {}
+    except (TypeError, ValueError):
+        return False
+    return isinstance(meta, dict) and isinstance(meta.get(VIDEO_OUTPUT_MARK), dict)
+
+
 class MusicVideoService(PipelineService):
     """Coordinates state transitions on MusicVideo rows.
 
@@ -367,6 +667,7 @@ class MusicVideoService(PipelineService):
     stage_to_agent = STAGE_TO_AGENT
     task_namespace = "music_video"
     stage_context = "music-video"
+    record_stage_timings = True
 
     # --- Lifecycle ---------------------------------------------------------
 
@@ -380,6 +681,9 @@ class MusicVideoService(PipelineService):
         project_id: int | None,
         settings: dict | None = None,
     ) -> MusicVideo:
+        settings = dict(settings or {})
+        if not settings.get("keyframe_model"):
+            settings["keyframe_model"] = default_keyframe_model()
         mv = MusicVideo(
             name=name,
             song_document_id=song_document_id,
@@ -423,9 +727,13 @@ class MusicVideoService(PipelineService):
             idx = c.get("index")
             if isinstance(idx, int) and idx in prompt_updates:
                 new_p = (prompt_updates[idx] or "").strip()
-                if new_p:
+                if new_p and new_p != (c.get("prompt") or "").strip():
                     c["prompt"] = new_p
                     changed = True
+                    # A rendered clip from before input hashing can't be detected as
+                    # stale by hash; send it back to render explicitly.
+                    if c.get("status") == "done" and not c.get("input_hash"):
+                        c.update({"status": "pending", "clip_path": None, "quality": None, "review": None})
         if changed:
             mv.clips = clips
             self.s.commit()
@@ -522,6 +830,8 @@ class MusicVideoService(PipelineService):
         clips = copy.deepcopy(mv.clips or [])
         for c in clips:
             idx = c.get("index")
+            if c.get("locked"):
+                continue  # a locked cut keeps the person's prompt and storyboard
             if isinstance(idx, int) and idx < len(prompts):
                 c["prompt"] = prompts[idx]
                 # P0 stale-storyboard fix: when the Director prompt for a cut changes,

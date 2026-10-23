@@ -71,6 +71,9 @@ import {
   DEFAULT_I2V_MODEL,
   familyType,
   isCogVideoXModel,
+  canvasDimensions,
+  parseSeed,
+  MAX_SEED,
   isWanModel,
   isLtxModel,
   isMinimaxModel,
@@ -80,13 +83,27 @@ import {
 import QualityFlagsPill from "../components/videogen/QualityFlagsPill";
 import VlmReviewPill from "../components/videogen/VlmReviewPill";
 import ColourMatchPill from "../components/videogen/ColourMatchPill";
+import KeyframeMatchPill from "../components/videogen/KeyframeMatchPill";
 import ClipReviewHold, { ReviewStatePill } from "../components/videogen/ClipReviewHold";
 import RenderFailureNote from "../components/videogen/RenderFailureNote";
 import { refusalText } from "../utils/renderFailure";
 import { applicableAdapters as applicableAdapterModels } from "../utils/videoAdapters";
+import { stepsFromProfile, stepsTileNote } from "../utils/videoSteps";
+import { promptControlsState } from "../utils/videoPromptControls";
+import { joinPreviews, previewLabel, promptsToPreview } from "../utils/videoPreviewPrompts";
+import { comfyUiLink } from "../utils/comfyUiLink";
+import { formatVideoStamp } from "../utils/videoBatchStamp";
 import { applyClipRename, applyClipRenameToPlayer, clipFileName } from "../utils/videoRename";
 import VideoGenEffectiveSettings from "../components/videogen/VideoGenEffectiveSettings";
 import LiveLatentPreview from "../components/videogen/LiveLatentPreview";
+import ReferenceBoard from "../components/videogen/ReferenceBoard";
+import FrameSlot from "../components/videogen/FrameSlot";
+import {
+  boardProblems,
+  emptyBoard,
+  previewBoard,
+  serializeBoard,
+} from "../components/videogen/referenceBoardModel";
 import { videoGenStageLabel } from "../components/videogen/stageLabels";
 import {
   PlayArrow as PlayIcon,
@@ -105,31 +122,18 @@ import {
   FullscreenExit as FullscreenExitIcon,
 } from "@mui/icons-material";
 
+import axios from "axios";
+import { uploadDroppedMedia } from "../components/videoeditor/useExternalDrop";
 import { formatUiError } from "../utils/uiError";
+import { handleResponse } from "../api/apiClient";
 import EntityContextMenu from "../components/common/EntityContextMenu";
+import TextInputDialog from "../components/common/TextInputDialog";
 import useContextMenu from "../hooks/useContextMenu";
 import lazyWithReload from "../utils/lazyWithReload";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
 const stripGlyph = (label) => String(label || "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
-
-const formatVideoDate = (isoStr) => {
-  if (!isoStr) return null;
-  try {
-    const d = new Date(isoStr);
-    const now = new Date();
-    const diffMs = now - d;
-    const diffMin = Math.floor(diffMs / 60000);
-    const diffHr = Math.floor(diffMs / 3600000);
-    const diffDay = Math.floor(diffMs / 86400000);
-    if (diffMin < 1) return "Just now";
-    if (diffMin < 60) return `${diffMin}m ago`;
-    if (diffHr < 24) return `${diffHr}h ago`;
-    if (diffDay < 7) return `${diffDay}d ago`;
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: d.getFullYear() !== now.getFullYear() ? "numeric" : undefined });
-  } catch { return null; }
-};
 
 // Lazy import for VideoModelsModal
 const VideoModelsModal = lazyWithReload(() => import("../components/modals/VideoModelsModal"));
@@ -196,19 +200,39 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [faceRestoreModelReady, setFaceRestoreModelReady] = useState(null);
   const faceRestoreAvailable =
     faceRestoreNodeAvailable === true && faceRestoreModelReady === true;
+  // Where the backend talks to ComfyUI (/gpu/comfyui/status); the ComfyUI
+  // button opens that port on the host this page was opened on.
+  const [comfyUiUrl, setComfyUiUrl] = useState(null);
 
   // Prompt preview state (calls /enhance-preview)
   const [previewEnhanced, setPreviewEnhanced] = useState("");
+  const [previewVerbatim, setPreviewVerbatim] = useState(false);
+  const [previewEnhanceOff, setPreviewEnhanceOff] = useState(false);
+  // How many clips the previewed batch sends, and how many were previewed.
+  const [previewCounts, setPreviewCounts] = useState({ shown: 0, total: 0, storyboard: false });
   const [previewLoading, setPreviewLoading] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
+  // Settings > Verbatim prompts, as the backend reports it: the render then
+  // skips the enhancer and the Director, so the controls that feed them say so.
+  const [verbatimPrompts, setVerbatimPrompts] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch(`${API_BASE}/settings/verbatim_prompts`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (alive && d?.data) setVerbatimPrompts(Boolean(d.data.enabled)); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   // Batch-wide prompt modifiers (mirror BatchImageGen's "Look & Feel" pattern)
   const [lookAndFeel, setLookAndFeel] = useState("");
   const [negativePrompt, setNegativePrompt] = useState("");
   const [lowVramMode, setLowVramMode] = useState(() => {
     const saved = localStorage.getItem('lowVramMode');
-    // Default to TRUE for 16GB GPUs to prevent CUDA memory errors
-    return saved !== null ? saved === 'true' : true;
+    // Off unless the person turns it on. On a 16 GB card Wan 2.2 14B renders
+    // 416x736 and 832x480 at 49 frames and 25 steps without it (measured
+    // 2026-10-20); on, it cut every Wan clip to 480 px and 33 frames.
+    return saved !== null ? saved === 'true' : false;
   });
 
   // Advanced settings
@@ -218,7 +242,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     generate_frames_only: false,
     frames_per_batch: 1,
     combine_frames: false,
-    freeu: false,
     face_restore: false,
     lora_name: "",
     lora_strength: 1.0,
@@ -230,9 +253,15 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     adapter_strength: 0.7,
     // User text encoder id ("" = the one the model ships with).
     text_encoder: "",
+    // Typed seed; blank gives every clip a new random seed.
+    seed: "",
   });
-  // End frame for models that declare first+last-frame generation (image mode).
-  const [endFrame, setEndFrame] = useState(null); // {path, name}
+  // End frame for models that declare l2v / flf2v (image mode): {ref, name,
+  // thumbnailUrl}, ref being an uploaded file's path or a library document id.
+  const [endFrame, setEndFrame] = useState(null);
+  // Reference board for models that declare ref2v (references mode).
+  const [refBoard, setRefBoard] = useState(emptyBoard);
+  const promptInputRef = useRef(null);
   // Audio guide for models that declare audio_in: a voice clip or track the
   // model performs from the start of the clip. {path, name}
   const [audioGuide, setAudioGuide] = useState(null);
@@ -253,10 +282,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   // Training images are never used as start frames (keyframes always on-demand).
   const [castSubjects, setCastSubjects] = useState([]);
   const [selectedSubjectIds, setSelectedSubjectIds] = useState([]);
+  // Why the Cast Library could not be read; shown instead of "train a character".
+  const [castError, setCastError] = useState(null);
+  const [castReload, setCastReload] = useState(0);
   useEffect(() => {
     let alive = true;
+    setCastError(null);
     fetch("/api/cast-library")
-      .then((r) => (r.ok ? r.json() : { subjects: [] }))
+      .then((r) => handleResponse(r, { quiet: true }))
       .then((d) => {
         if (!alive) return;
         const trained = (d.subjects || []).filter(
@@ -264,9 +297,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         );
         setCastSubjects(trained);
       })
-      .catch(() => {});
+      .catch((e) => {
+        if (alive) setCastError(formatUiError(e) || "the request failed");
+      });
     return () => { alive = false; };
-  }, []);
+  }, [castReload]);
 
   // CogVideoX temporal-coherence feature (quality, not speed)
   const [fetaEnabled, setFetaEnabled] = useState(false);
@@ -291,7 +326,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     setAdvancedParams((prev) => ({
       ...prev,
       face_restore: faceRestoreAvailable === true,
-      freeu: isWanModel(model, modelMeta[model]),
     }));
     if (isCogVideoXModel(model, modelMeta[model])) {
       setFetaEnabled(true);
@@ -314,6 +348,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         const gpu = await gpuRes.json();
         nodeOk = gpu?.data?.face_restore_node_available === true;
         setFaceRestoreNodeAvailable(nodeOk);
+        if (gpu?.data?.comfyui_url) setComfyUiUrl(gpu.data.comfyui_url);
       }
       if (modelsRes.ok) {
         const models = await modelsRes.json();
@@ -348,6 +383,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [videoPlayer, setVideoPlayer] = useState(null); // { url, title, batchId, results, currentIndex }
+  const [renameDialog, setRenameDialog] = useState(null); // { batchId, videoPath, current }
   const videoPlayerBoxRef = useRef(null);
   const [isPlayerFullscreen, setIsPlayerFullscreen] = useState(false);
 
@@ -435,7 +471,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   const refreshModels = useCallback(async () => {
     try {
       const res = await fetch(`${API_BASE}/batch-video/models`);
-      const data = await res.json();
+      const data = await handleResponse(res, { quiet: true });
       if (data.success && data.data?.models) {
         const vids = data.data.models.filter(m => GENERATION_TYPES.has(m.type));
         const ids = new Set(vids.map(m => m.id));
@@ -466,7 +502,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         setModelNotReady(prev => (prev && meta[prev.id]?.is_ready ? null : prev));
       }
     } catch (e) {
-      // Offline / API down — fall back to the (already-culled) MODEL_OPTIONS.
+      // Offline / API down — fall back to the (already-culled) MODEL_OPTIONS,
+      // and say so: without the API nobody knows which of them are installed.
+      setError(`Video models could not be checked: ${formatUiError(e) || "the request failed"}. The list shows the defaults; a model may not be installed.`);
     }
   }, []);
 
@@ -500,6 +538,19 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     })();
   }, []);
 
+  // Models that take a reference board; the References input is offered
+  // whenever the registry lists one, installed or not (Generate routes an
+  // uninstalled one to Install).
+  const refModelIds = useMemo(
+    () => Object.keys(modelMeta).filter((id) => modelMeta[id]?.capabilities?.modes?.includes("ref2v")),
+    [modelMeta],
+  );
+  useEffect(() => {
+    if (inputMode === "references" && Object.keys(modelMeta).length > 0 && refModelIds.length === 0) {
+      setInputMode("text");
+    }
+  }, [inputMode, modelMeta, refModelIds]);
+
   // Filter models by current input mode AND the backend allowlist.
   // Registry-only (user-added) ids are not in MODEL_OPTIONS; capabilities win.
   const availableModels = useMemo(() => {
@@ -515,6 +566,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       .filter((id) => {
         const caps = modelMeta[id]?.capabilities || {};
         const opt = MODEL_OPTIONS[id];
+        if (inputMode === "references") return (caps.modes || []).includes("ref2v");
         return inputMode === "image"
           ? (caps.supports_i2v ?? opt?.supportsI2V)
           : (caps.supports_t2v ?? opt?.supportsT2V);
@@ -534,9 +586,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
   useEffect(() => {
     const meta = modelMeta[model];
     const opt = MODEL_OPTIONS[model];
-    const isCompatible = inputMode === "image"
-      ? (meta?.capabilities?.supports_i2v ?? opt?.supportsI2V)
-      : (meta?.capabilities?.supports_t2v ?? opt?.supportsT2V);
+    const isCompatible = inputMode === "references"
+      ? (meta?.capabilities?.modes || []).includes("ref2v")
+      : inputMode === "image"
+        ? (meta?.capabilities?.supports_i2v ?? opt?.supportsI2V)
+        : (meta?.capabilities?.supports_t2v ?? opt?.supportsT2V);
     if (!isCompatible) {
       const fallback = availableModels[0]?.[0]
         || (inputMode === "image" ? DEFAULT_I2V_MODEL : DEFAULT_T2V_MODEL);
@@ -567,11 +621,27 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       setPromptStyle(offeredStyles[0] || "none");
     }
   }, [offeredStyles, promptStyle]);
+  // Null when the model declares no speed profiles (the registry sends {}),
+  // so the control is hidden; otherwise always one of the declared names.
   const activeSpeedProfile = useMemo(() => {
-    const profiles = modelCaps?.speed_profiles;
-    if (!profiles) return null;
-    return profiles[advancedParams.speed_profile] ? advancedParams.speed_profile : "standard";
+    const profiles = modelCaps?.speed_profiles || {};
+    const names = Object.keys(profiles);
+    if (!names.length) return null;
+    if (profiles[advancedParams.speed_profile]) return advancedParams.speed_profile;
+    return profiles.standard ? "standard" : names[0];
   }, [modelCaps, advancedParams.speed_profile]);
+  const activeProfileSpec = useMemo(
+    () => (activeSpeedProfile ? modelCaps?.speed_profiles?.[activeSpeedProfile] || null : null),
+    [modelCaps, activeSpeedProfile],
+  );
+  // A step count typed in Advanced wins over presets, floors and profiles.
+  const stepsTyped = advancedParams.num_inference_steps !== null && advancedParams.num_inference_steps !== undefined;
+  // When the model's speed profile fixes the steps, the Steps chips cannot
+  // change the render and say so instead of labelling the tile.
+  const profileSteps = useMemo(
+    () => stepsFromProfile({ profileSpec: activeProfileSpec, stepsTyped }),
+    [activeProfileSpec, stepsTyped],
+  );
 
   // Seed the controls from the registry's per-VRAM-class starting settings
   // once, when the selected model's metadata arrives. Anything can be changed
@@ -618,9 +688,19 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     }
   };
 
+  // A model change keeps the end frame and audio guide when the new model
+  // takes them too, so switching precision builds does not drop a pick.
   useEffect(() => {
-    setEndFrame(null);
-    setAudioGuide(null);
+    const caps = modelMeta[model]?.capabilities;
+    if (caps) {
+      const modes = caps.modes || [];
+      if (!modes.includes("l2v") && !modes.includes("flf2v")) setEndFrame(null);
+      if (!caps.audio_in) setAudioGuide(null);
+    }
+    // Keyed on the model only: a metadata refresh must not clear a pick.
+  }, [model]);
+
+  useEffect(() => {
     setSelectedPromptPreset("");
     let alive = true;
     (async () => {
@@ -659,7 +739,14 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     // Resolve through the model: the snap effect settles a render later, and
     // a restored config can name a ratio this model never supported.
     const effectiveAspectRatio = resolveAspectRatio(model, aspectRatio);
-    // CogVideoX is trained on 720x480 (3:2). Aspect-ratio math at 16:9 lands
+    // A model with a declared canvas (CogVideoX 1.5 I2V) renders at its fixed
+    // short side whatever the Size chips say; the aspect sets the long side.
+    const canvas = MODEL_OPTIONS[model]?.canvas;
+    if (canvas) {
+      const ratioConfig = ASPECT_RATIO_PRESETS[effectiveAspectRatio] || ASPECT_RATIO_PRESETS["16:9"];
+      return canvasDimensions(canvas, ratioConfig.ratio, MODEL_OPTIONS[model].dimensionAlignment);
+    }
+    // CogVideoX 1.0 is trained on 720x480 (3:2). Aspect-ratio math at 16:9 lands
     // on 720x405 → snaps to 720x400, which is off-spec and produces distorted
     // output every time. Pin to the model's native frame and let the user
     // letterbox / crop in post if they need a different aspect.
@@ -724,6 +811,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     [encoderModels, model],
   );
 
+  // Low VRAM clamps frames, resolution and steps on CogVideoX and Wan only,
+  // and never shrinks a model below the canvas it declares.
+  const lowVramClamps = (m, meta) =>
+    lowVramMode && ((isCogVideoXModel(m, meta) && !MODEL_OPTIONS[m]?.canvas) || isWanModel(m, meta));
+
   // Compute final params from presets
   const computedParams = useMemo(() => {
     const quality = QUALITY_PRESETS[qualityPreset] || QUALITY_PRESETS.standard;
@@ -760,8 +852,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     //
     // An explicit value in Advanced still wins: the floor exists to stop a preset
     // silently choosing a bad number, not to overrule someone who typed one.
-    const profileSpec = activeSpeedProfile ? modelCaps?.speed_profiles?.[activeSpeedProfile] : null;
-    const stepsTyped = !(advancedParams.num_inference_steps === null || advancedParams.num_inference_steps === undefined);
+    const profileSpec = activeProfileSpec;
     const declaredMin = profileSpec?.min_steps ?? modelConfig.minSteps ?? modelCaps?.min_steps ?? (isCogVideoXModel(model, modelMeta[model]) ? 50 : null);
     if (declaredMin && effectiveSteps < declaredMin && !stepsTyped) {
       effectiveSteps = declaredMin;
@@ -782,7 +873,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     // Low VRAM safe preset for CogVideoX on 16GB GPUs
     // Very aggressive settings based on successful test: 8 frames, 15 steps, 480x320.
     // (cogvideox-2b was retired; cogvideox-5b stays and is tamed via the clamps below.)
-    if (lowVramMode && isCogVideoXModel(model, modelMeta[model])) {
+    // A model with a declared canvas is never shrunk below it.
+    if (lowVramMode && isCogVideoXModel(model, modelMeta[model]) && !modelConfig.canvas) {
       // Aggressively clamp frames - tested working with 8 frames
       if (effectiveDurationFrames > 12) {
         effectiveDurationFrames = 12;
@@ -875,10 +967,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       height,
       num_inference_steps: effectiveSteps,
       guidance_scale: advancedParams.guidance_scale,
+      seed: parseSeed(advancedParams.seed),
       generate_frames_only: advancedParams.generate_frames_only,
-      frames_per_batch: lowVramMode && (isCogVideoXModel(model, modelMeta[model]) || isWanModel(model, modelMeta[model])) ? 1 : advancedParams.frames_per_batch,
+      frames_per_batch: lowVramClamps(model, modelMeta[model]) ? 1 : advancedParams.frames_per_batch,
       combine_frames: advancedParams.combine_frames,
-      freeu: advancedParams.freeu,
       face_restore: advancedParams.face_restore,
       lora_name: advancedParams.lora_name,
       lora_strength: advancedParams.lora_strength,
@@ -916,11 +1008,15 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           : {}),
       },
     };
-  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode, modelMeta, modelCaps, activeSpeedProfile, applicableAdapters, applicableEncoders]);
+  }, [qualityPreset, durationPreset, motionPreset, model, advancedParams, videoDimensions, lowVramMode, qualityTier, promptStyle, enhancePrompt, directorMode, cinematicKeyframe, directorGuidance, fetaEnabled, fetaWeight, selectedSubjectIds, keyframeModel, postUpscale, highConsistencyMode, modelMeta, modelCaps, activeSpeedProfile, activeProfileSpec, stepsTyped, applicableAdapters, applicableEncoders]);
+
+  // Low VRAM clamps frames, resolution and steps on CogVideoX and Wan only
+  // (computedParams above); on other models the switch leaves the steps alone.
+  const lowVramClampApplies = lowVramClamps(model, modelMeta[model]);
 
   const qualityChipOptions = useMemo(() => {
     if (isLtxModel(model, modelMeta[model])) return [];
-    if (lowVramMode && (isWanModel(model, modelMeta[model]) || isCogVideoXModel(model, modelMeta[model]))) return [];
+    if (lowVramClamps(model, modelMeta[model])) return [];
     const min = MODEL_OPTIONS[model]?.minSteps ?? modelCaps?.min_steps ?? 0;
     const seen = new Set();
     const out = [];
@@ -960,37 +1056,51 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     handleClearCompletedQueue,
   } = useBatchVideo({ setError, setSuccess, computedParams });
 
-  // Fetch enhanced prompt preview from backend (re-uses the same enhance_video_prompt logic + fidelity_mode)
+  // Preview what Add to queue will send: the same enhance_video_prompt path
+  // as the render, once per clip. The route takes one prompt per call and
+  // the enhancer is a pure function, so a batch is previewed line by line.
   const fetchPromptPreview = async () => {
-    // Compute first prompt locally to avoid forward-reference issues with parsedPrompts const
-    const firstLine = (promptsText || "").split("\n").map((p) => p.trim()).filter(Boolean)[0] || "";
-    const basePrompt = inputMode === "text" ? (firstLine || promptsText.trim()) : promptsText.trim();
-    if (!basePrompt) {
+    const { prompts, total } = promptsToPreview({ inputMode, promptsText, lookAndFeel, storyboardMode });
+    if (prompts.length === 0) {
       setPreviewEnhanced("");
       return;
     }
     setPreviewLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/batch-video/enhance-preview`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: basePrompt,
-          prompt_style: promptStyle,
-          enhance_prompt: enhancePrompt,
-          fidelity_mode: fidelityMode,
-          model,
-          width: (computedParams && computedParams.width) || videoDimensions.width,
-          height: (computedParams && computedParams.height) || videoDimensions.height,
-        }),
-      });
-      const data = await res.json();
-      if (data.success && data.data) {
-        setPreviewEnhanced(data.data.enhanced_prompt || "");
-        setShowPreview(true);
-      } else {
-        setPreviewEnhanced("");
-      }
+      const previewOne = async (prompt) => {
+        const res = await fetch(`${API_BASE}/batch-video/enhance-preview`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt,
+            prompt_style: promptStyle,
+            enhance_prompt: enhancePrompt,
+            fidelity_mode: fidelityMode,
+            model,
+            width: (computedParams && computedParams.width) || videoDimensions.width,
+            height: (computedParams && computedParams.height) || videoDimensions.height,
+            motion_strength: computedParams?.motion_strength,
+            ...(inputMode === "references"
+              ? {
+                  references: previewBoard(refBoard),
+                  duration_frames: computedParams?.duration_frames,
+                  fps: computedParams?.fps,
+                }
+              : {}),
+          }),
+        });
+        const data = await res.json();
+        if (!data.success || !data.data) throw new Error(data.error || `HTTP ${res.status}`);
+        return data.data;
+      };
+      const results = await Promise.all(prompts.map(previewOne));
+      setPreviewEnhanced(joinPreviews(results.map((r) => r.enhanced_prompt || "")));
+      const verbatim = results.some((r) => Boolean(r.verbatim));
+      setPreviewVerbatim(verbatim);
+      setVerbatimPrompts(verbatim);
+      setPreviewEnhanceOff(results.some((r) => r.enhance_prompt === false));
+      setPreviewCounts({ shown: results.length, total, storyboard: storyboardMode && inputMode === "text" });
+      setShowPreview(true);
     } catch (e) {
       console.error("Prompt preview failed", e);
       setPreviewEnhanced("");
@@ -1006,96 +1116,100 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       .filter(Boolean);
   }, [promptsText]);
 
-  // File upload handling
-  // Upload one end frame through the same route as start images and keep its
-  // server path; sent as last_frame_paths, one per start image.
+  // Which prompt controls the render reads right now (Motion chips, Prompt style).
+  const promptControls = useMemo(
+    () => promptControlsState({ enhancePrompt, verbatimPrompts, inputMode, fidelityMode, directorMode, storyboardMode }),
+    [enhancePrompt, verbatimPrompts, inputMode, fidelityMode, directorMode, storyboardMode],
+  );
+
+  // End-frame modes the selected model declares (image mode): flf2v with a
+  // start image, l2v without one.
+  const endFrameModes = useMemo(
+    () => (inputMode === "image" ? (modelCaps?.modes || []).filter((m) => m === "l2v" || m === "flf2v") : []),
+    [inputMode, modelCaps],
+  );
+  const lastFrameOnly =
+    inputMode === "image" && selectedImages.length === 0 && !!endFrame?.ref && endFrameModes.includes("l2v");
+  // The board follows the reference model's ref_limits, also while the model
+  // list is still switching over to it.
+  const refLimits = (modelCaps?.modes || []).includes("ref2v")
+    ? modelCaps.ref_limits
+    : modelMeta[refModelIds[0]]?.capabilities?.ref_limits;
+  // A card with a measured board budget shares it between the render, the
+  // pictures and the clips (tier_defaults.ref_token_budget).
+  const refFit = useMemo(() => ({
+    budget: modelMeta[model]?.tier_defaults?.ref_token_budget,
+    renderFrames: computedParams?.duration_frames,
+    width: computedParams?.width,
+    height: computedParams?.height,
+    fps: computedParams?.fps || 24,
+  }), [modelMeta, model, computedParams]);
+  const refProblems = useMemo(() => boardProblems(refBoard, refLimits, refFit), [refBoard, refLimits, refFit]);
+
+  // Put a reference tag at the prompt's cursor (or its end).
+  const insertPromptTag = useCallback((tag) => {
+    const el = promptInputRef.current;
+    setPromptsText((prev) => {
+      const start = el?.selectionStart ?? prev.length;
+      const end = el?.selectionEnd ?? prev.length;
+      const before = prev.slice(0, start);
+      const pad = before && !/\s$/.test(before) ? " " : "";
+      return `${before}${pad}${tag} ${prev.slice(end)}`;
+    });
+    requestAnimationFrame(() => el?.focus());
+  }, []);
+
+  // File upload handling. Start and end images go to Files > Images through
+  // /api/files/upload, the path the References board uses, and are sent as
+  // library document ids, which the generate routes resolve the same way as
+  // a Files pick. (The old /batch-image/upload route put every upload in
+  // Image Gen's Recent Batches as an "Uploaded Images" batch.)
+  const uploadImageDocuments = useCallback(async (files) => {
+    // Frames are render inputs, not documents to search: no vision index pass.
+    const docs = await uploadDroppedMedia(files, { http: axios, autoIndex: false });
+    const images = docs.filter((d) => d.kind === "image");
+    if (images.length === 0) throw new Error("Only image files can be used as frames.");
+    return images;
+  }, []);
+
   const handleEndFrameUpload = useCallback(async (file) => {
     if (!file) return;
     setIsUploadingEndFrame(true);
     try {
-      const formData = new FormData();
-      formData.append("files", file);
-      const response = await fetch(`${API_BASE}/batch-image/upload`, { method: "POST", body: formData });
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || `Upload failed: HTTP ${response.status}`);
-      }
-      const data = await response.json();
-      if (data.success && data.data.batch_id) {
-        const statusRes = await fetch(`${API_BASE}/batch-image/status/${data.data.batch_id}?include_results=true`);
-        const statusData = statusRes.ok ? await statusRes.json() : null;
-        const first = statusData?.data?.results?.find((r) => r.success && r.image_path);
-        if (first) {
-          setEndFrame({ path: first.image_path, name: file.name });
-          return;
-        }
-      }
-      throw new Error("The end frame did not upload");
+      const [doc] = await uploadImageDocuments([file]);
+      setEndFrame({
+        ref: String(doc.id),
+        name: doc.filename || file.name,
+        thumbnailUrl: doc.thumbnail_url || `${API_BASE}/files/thumbnail?document_id=${doc.id}`,
+      });
     } catch (err) {
-      setError(`End frame upload failed: ${err.message}`);
+      setError(`End frame upload failed: ${err.response?.data?.error?.message || err.message}`);
     } finally {
       setIsUploadingEndFrame(false);
     }
-  }, []);
+  }, [uploadImageDocuments]);
 
   const handleFileUpload = useCallback(async (files) => {
     if (!files || files.length === 0) return;
 
     setIsUploading(true);
     try {
-      const formData = new FormData();
-      files.forEach(file => {
-        formData.append('files', file);
-      });
-
-      const response = await fetch(`${API_BASE}/batch-image/upload`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || `Upload failed: HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-
-      if (data.success && data.data.batch_id) {
-        // Fetch the uploaded images from the new batch
-        const statusRes = await fetch(`${API_BASE}/batch-image/status/${data.data.batch_id}?include_results=true`);
-        if (statusRes.ok) {
-          const statusData = await statusRes.json();
-          if (statusData.success && statusData.data.results) {
-            const newImages = statusData.data.results
-              .filter(r => r.success && r.image_path)
-              .map(r => {
-                const getFilename = (path) => {
-                  if (!path) return null;
-                  const parts = path.replace(/\\/g, '/').split('/');
-                  return parts[parts.length - 1];
-                };
-                const imageFilename = getFilename(r.image_path);
-                return {
-                  id: `${data.data.batch_id}_${imageFilename}`,
-                  path: r.image_path,
-                  thumbnailUrl: r.thumbnail_path
-                    ? `${API_BASE}/batch-image/image/${data.data.batch_id}/${encodeURIComponent(getFilename(r.thumbnail_path))}?thumbnail=true`
-                    : `${API_BASE}/batch-image/image/${data.data.batch_id}/${encodeURIComponent(imageFilename)}`,
-                  name: imageFilename,
-                  batchId: data.data.batch_id,
-                };
-              });
-            setSelectedImages(prev => [...prev, ...newImages]);
-          }
-        }
-        setSuccess(`Uploaded ${files.length} image(s) successfully`);
-      }
+      const docs = await uploadImageDocuments(files);
+      const newImages = docs.map((doc) => ({
+        id: `doc_${doc.id}`,
+        path: String(doc.id),
+        thumbnailUrl: doc.thumbnail_url || `${API_BASE}/files/thumbnail?document_id=${doc.id}`,
+        name: doc.filename,
+        documentId: doc.id,
+      }));
+      setSelectedImages((prev) => [...prev, ...newImages]);
+      setSuccess(`Uploaded ${newImages.length} image(s) to Files > Images`);
     } catch (err) {
-      setError(`Failed to upload files: ${err.message}`);
+      setError(`Failed to upload files: ${err.response?.data?.error?.message || err.message}`);
     } finally {
       setIsUploading(false);
     }
-  }, []);
+  }, [uploadImageDocuments]);
 
   const handleDragOver = useCallback((e) => {
     e.preventDefault();
@@ -1229,8 +1343,20 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       setError("Please enter at least one prompt.");
       return;
     }
-    if (inputMode === "image" && selectedImages.length === 0) {
-      setError("Please select or upload at least one image.");
+    if (inputMode === "image" && selectedImages.length === 0 && !lastFrameOnly) {
+      setError(endFrameModes.includes("l2v")
+        ? "Add a start image, or an end frame and a description."
+        : "Please select or upload at least one image.");
+      return;
+    }
+    if ((lastFrameOnly || inputMode === "references") && !promptsText.trim()) {
+      setError(inputMode === "references"
+        ? "Describe the video, naming the references."
+        : "Describe the video that ends on the end frame.");
+      return;
+    }
+    if (inputMode === "references" && refProblems.length > 0) {
+      setError(refProblems[0]);
       return;
     }
 
@@ -1278,17 +1404,42 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         qualityPreset, durationPreset, motionPreset, aspectRatio, videoSize,
         promptStyle, cinematicKeyframe, fidelityMode, negativePrompt,
         storyboardMode, storyboardShots, lowVramMode, highConsistencyMode, advancedParams,
-        selectedImages,
+        selectedImages, endFrame, refBoard,
       };
 
       const guidePayload =
-        audioGuide?.path && modelCaps?.audio_in
-          ? { guides: (inputMode === "text" ? finalPrompts : imagePaths).map(() => [
+        audioGuide?.path && modelCaps?.audio_in && inputMode !== "references"
+          ? { guides: (inputMode === "text" ? finalPrompts : lastFrameOnly ? [motionPrompt] : imagePaths).map(() => [
               { kind: "audio", path: audioGuide.path, frame_idx: 0 },
             ]) }
           : {};
+      const promptWithLook = lf && motionPrompt ? `${motionPrompt}, ${lf}` : motionPrompt;
       const body =
-        inputMode === "text"
+        inputMode === "references"
+          ? {
+              prompt: promptWithLook,
+              references: serializeBoard(refBoard),
+              ...computedParams,
+              // Identity comes from the references, not a keyframe or a rewrite.
+              director_mode: false,
+              cinematic_keyframe: false,
+              fidelity_mode: fidelityMode,
+              high_consistency: highConsistencyMode,
+              ...negativePayload,
+              ui_config: uiConfig,
+            }
+          : lastFrameOnly
+          ? {
+              prompts: [promptWithLook],
+              last_frame_paths: [endFrame.ref],
+              ...guidePayload,
+              ...computedParams,
+              fidelity_mode: fidelityMode,
+              high_consistency: highConsistencyMode,
+              ...negativePayload,
+              ui_config: uiConfig,
+            }
+          : inputMode === "text"
           ? {
               prompts: finalPrompts,
               ...guidePayload,
@@ -1301,11 +1452,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
             }
           : {
               image_paths: imagePaths,
-              ...(endFrame?.path && modelCaps?.modes?.includes("flf2v")
-                ? { last_frame_paths: imagePaths.map(() => endFrame.path) }
+              ...(endFrame?.ref && endFrameModes.includes("flf2v")
+                ? { last_frame_paths: imagePaths.map(() => endFrame.ref) }
                 : {}),
               ...guidePayload,
-              prompt: lf && motionPrompt ? `${motionPrompt}, ${lf}` : motionPrompt,
+              prompt: promptWithLook,
               ...computedParams,
               fidelity_mode: fidelityMode,
               high_consistency: highConsistencyMode,
@@ -1314,7 +1465,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
             };
 
       const url =
-        inputMode === "text"
+        inputMode === "references"
+          ? `${API_BASE}/batch-video/generate/references`
+          : inputMode === "text" || lastFrameOnly
           ? `${API_BASE}/batch-video/generate/text`
           : `${API_BASE}/batch-video/generate/image`;
 
@@ -1342,7 +1495,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
       setSuccess(
         gpuMsg
           ? `Batch queued. ${gpuMsg}`
-          : "Batch queued. The worker drains one batch at a time — keep stacking 'em."
+          : "Batch queued. Batches render one at a time; you can add more while this one runs."
       );
       startPollingStatus(batchId);
       await fetchBatches();
@@ -1459,6 +1612,12 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         if (cfg.storyboardShots) setStoryboardShots(cfg.storyboardShots);
         if (typeof cfg.lowVramMode === "boolean") setLowVramMode(cfg.lowVramMode);
         if (cfg.advancedParams && typeof cfg.advancedParams === "object") setAdvancedParams(cfg.advancedParams);
+        if (cfg.endFrame && (cfg.endFrame.ref || cfg.endFrame.path)) {
+          setEndFrame({ ...cfg.endFrame, ref: cfg.endFrame.ref || cfg.endFrame.path });
+        }
+        if (cfg.refBoard && typeof cfg.refBoard === "object") {
+          setRefBoard({ images: [], videos: [], audios: [], ...cfg.refBoard });
+        }
 
         if (Array.isArray(cfg.selectedImages) && cfg.selectedImages.length > 0) {
           setSelectedImages(cfg.selectedImages);
@@ -1491,12 +1650,12 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           style_embedding: p.style_embedding || "",
           guidance_scale: p.guidance_scale ?? prev.guidance_scale,
           wan_sampler_profile: p.wan_sampler_profile ?? prev.wan_sampler_profile,
-          freeu: !!p.freeu,
           face_restore: !!p.face_restore,
           lora_name: p.lora_name || "",
           lora_strength: p.lora_strength ?? prev.lora_strength,
           frames_per_batch: p.frames_per_batch ?? prev.frames_per_batch,
           combine_frames: !!p.combine_frames,
+          seed: p.seed != null ? String(p.seed) : "",
         }));
         setSuccess(`Loaded "${name}" core settings (older batch — double-check resolution/duration).`);
       }
@@ -1528,15 +1687,22 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
   // The server answers with the clip's new paths; the page repoints its cards and
   // an open player from them, so Play serves the renamed file without a reload.
-  const handleRenameVideo = async (batchId, videoPath) => {
-    const current = clipFileName(videoPath);
-    const newName = window.prompt("Rename video (the extension stays the same)", current);
-    if (newName === null || !newName.trim() || newName.trim() === current) return;
+  const handleRenameVideo = (batchId, videoPath) => {
+    setRenameDialog({ batchId, videoPath, current: clipFileName(videoPath) });
+  };
+
+  const submitRenameVideo = async (newName) => {
+    const target = renameDialog;
+    setRenameDialog(null);
+    if (!target) return;
+    const { batchId, videoPath, current } = target;
+    const name = newName.trim();
+    if (!name || name === current) return;
     try {
       const res = await fetch(`${API_BASE}/batch-video/video/${batchId}/${encodePathSegments(videoPath)}/rename`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ new_name: newName.trim() }),
+        body: JSON.stringify({ new_name: name }),
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok || !body.success) {
@@ -1579,8 +1745,13 @@ const VideoGeneratorPage = ({ embedded = false }) => {
 
   const controlsDisabled = isGenerating || ffGenerating;
   const canQueue =
-    !isGenerating && !ffGenerating && (inputMode === "text" ? parsedPrompts.length > 0 : selectedImages.length > 0);
-  const { gpuBusy, blockReason } = useJobsGate({ submitMode: "queue" });
+    !isGenerating && !ffGenerating && (
+      inputMode === "text" ? parsedPrompts.length > 0
+        : inputMode === "references"
+          ? promptsText.trim().length > 0 && refBoard.images.length + refBoard.videos.length > 0
+          : selectedImages.length > 0 || (lastFrameOnly && promptsText.trim().length > 0)
+    );
+  const { gpuBusy, blockReason, blockDetail } = useJobsGate({ submitMode: "queue" });
   const castIdentityLocked = selectedSubjectIds.length > 0;
   const keyframeModelOptions = useMemo(() => {
     // With cast: family is auto from the character LoRA (backend ignores manual model).
@@ -1638,6 +1809,13 @@ const VideoGeneratorPage = ({ embedded = false }) => {
     return [
       videoUrl && { label: "Play", onClick: () => openResultPlayer(res, idx, videoUrl) },
       videoUrl && { label: "Open in new tab", onClick: () => window.open(videoUrl, "_blank") },
+      res.metadata?.seed != null && {
+        label: "Use this clip's seed",
+        onClick: () => {
+          setAdvancedParams((prev) => ({ ...prev, seed: String(res.metadata.seed) }));
+          setSuccess(`Seed ${res.metadata.seed} is set in Advanced. Clear it to get random seeds again.`);
+        },
+      },
       held && { label: "Approve clip", onClick: () => handleApproveClip(batchId, res.item_id), dividerBefore: true },
       held && { label: "Re-render clip", onClick: () => handleRerenderClip(batchId, res.item_id) },
       !res.video_path && res.frame_paths?.length > 0 && {
@@ -1742,7 +1920,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
         <DashboardTile
           label="Steps"
           value={String(computedParams.num_inference_steps)}
-          sub={lowVramMode ? "Low VRAM clamp" : qualityChipOptions.find((o) => o.value === qualityPreset)?.label || "preset"}
+          sub={stepsTileNote({
+            lowVramClamp: lowVramClampApplies,
+            profile: profileSteps,
+            presetLabel: qualityChipOptions.find((o) => o.value === qualityPreset)?.label,
+          })}
         />
         <DashboardTile
           label="Queue"
@@ -1779,8 +1961,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 <SettingChip
                   label="Low VRAM"
                   on={lowVramMode}
-                  note={lowVramMode ? "next job" : undefined}
-                  tooltip="Reduces frames, resolution, and steps on 16GB cards. Default on."
+                  note={lowVramMode ? (lowVramClampApplies ? "next job" : "not for this model") : undefined}
+                  tooltip={lowVramClampApplies || !lowVramMode
+                    ? "Reduces frames, resolution, and steps for CogVideoX and Wan, for a card that runs out of memory. Off by default."
+                    : "Clamps frames, resolution and steps for CogVideoX and Wan only; this model renders at the settings shown."}
                   onToggle={(next) => {
                     setLowVramMode(next);
                     localStorage.setItem("lowVramMode", next.toString());
@@ -1812,6 +1996,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     { value: "text", label: "Text" },
                     { value: "image", label: "Image" },
                     { value: "ffmpeg", label: "FFmpeg" },
+                    ...(refModelIds.length > 0
+                      ? [{ value: "references", label: "References", tooltip: "Pictures, clips and audio the clip keeps: who is in it, how it moves, how it sounds." }]
+                      : []),
                   ]}
                 />
               </Cluster>
@@ -1845,7 +2032,36 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   )}
                 </Cluster>
               )}
-              {inputMode === "text" ? (
+              {inputMode === "references" ? (
+                <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
+                  <ReferenceBoard
+                    value={refBoard}
+                    onChange={setRefBoard}
+                    limits={refLimits}
+                    fit={refFit}
+                    onInsertTag={insertPromptTag}
+                    onError={setError}
+                  />
+                  <TextField
+                    label="Describe the video"
+                    multiline
+                    minRows={3}
+                    maxRows={8}
+                    value={promptsText}
+                    onChange={(e) => setPromptsText(e.target.value)}
+                    inputRef={promptInputRef}
+                    placeholder='Maya walks into the cafe, looks at the camera and says "Morning!"'
+                    helperText={enhancePrompt
+                      ? 'Use the names you gave above, or click a tag to insert it. Write a spoken line as: the chef says: "…"'
+                      : "Enhance is off: this is sent as typed, so name references by their tags."}
+                    fullWidth
+                    size="small"
+                  />
+                  {refProblems.length > 0 && (refBoard.images.length + refBoard.videos.length + refBoard.audios.length) > 0 && (
+                    <Hint sx={{ color: "warning.main" }}>{refProblems.join(" ")}</Hint>
+                  )}
+                </Box>
+              ) : inputMode === "text" ? (
                 <TextField
                   label={storyboardMode ? "Storyboard concept" : "What do you want to see? (one prompt per line)"}
                   multiline
@@ -1871,18 +2087,20 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               ) : (
                 <Box>
                   {inputMode !== "ffmpeg" && (
-                    <TextField
-                      label="Describe the motion or action (optional)"
-                      multiline
-                      minRows={2}
-                      maxRows={4}
-                      value={promptsText}
-                      onChange={(e) => setPromptsText(e.target.value)}
-                      placeholder="Slow camera zoom in with a gentle head turn"
-                      fullWidth
-                      size="small"
-                      sx={{ mb: 1.5 }}
-                    />
+                  <TextField
+                    label={selectedImages.length === 0 && endFrame && endFrameModes.includes("l2v")
+                      ? "Describe the video that ends on the end frame"
+                      : "Describe the motion or action (optional)"}
+                    multiline
+                    minRows={2}
+                    maxRows={4}
+                    value={promptsText}
+                    onChange={(e) => setPromptsText(e.target.value)}
+                    placeholder="Slow camera zoom in with a gentle head turn"
+                    fullWidth
+                    size="small"
+                    sx={{ mb: 1.5 }}
+                  />
                   )}
                   <Box
                     onDragOver={handleDragOver}
@@ -1923,6 +2141,20 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   <Line sx={{ mt: 1 }}>
                     <ActionButton onClick={openGallery}>Select from gallery</ActionButton>
                   </Line>
+                  {endFrameModes.length > 0 && (
+                    <Box sx={{ mt: 1.5 }}>
+                      <FrameSlot
+                        label="End frame"
+                        value={endFrame}
+                        onChange={setEndFrame}
+                        onUploadFile={handleEndFrameUpload}
+                        uploading={isUploadingEndFrame}
+                        hint={endFrameModes.includes("l2v")
+                          ? "The clip ends on this picture. Without a start image, it is made from your description."
+                          : "The clip ends on this picture."}
+                      />
+                    </Box>
+                  )}
                   {selectedImages.length > 0 && (
                     <Box sx={{ mt: 1, display: "flex", gap: 1, flexWrap: "wrap" }}>
                       {selectedImages.map((img) => (
@@ -2205,23 +2437,33 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 <SettingChip
                   label="Enhance prompt"
                   on={enhancePrompt}
-                  tooltip="Adds quality and motion descriptors. Motion chips do nothing when this is off."
+                  note={enhancePrompt && verbatimPrompts && inputMode !== "references" ? "skipped: Verbatim prompts" : undefined}
+                  tooltip={verbatimPrompts && inputMode !== "references"
+                    ? "Verbatim prompts is on in Settings: the prompt is sent as typed and this does nothing."
+                    : "Adds quality and motion descriptors. Motion chips and Prompt style do nothing when this is off."}
                   onToggle={setEnhancePrompt}
                 />
                 <ActionButton
                   onClick={fetchPromptPreview}
                   loading={previewLoading}
-                  disabled={!((inputMode === "text" ? parsedPrompts.length : promptsText.trim()) > 0)}
+                  disabled={!((inputMode === "text" ? parsedPrompts.length : promptsText.trim().length) > 0)}
                 >
                   Preview enhanced
                 </ActionButton>
               </Line>
               {showPreview && previewEnhanced && (
                 <TextField
-                  label="Enhanced prompt (what will be sent)"
+                  label={previewLabel({
+                    shown: previewCounts.shown,
+                    total: previewCounts.total,
+                    verbatim: previewVerbatim,
+                    enhanceOff: previewEnhanceOff,
+                    storyboard: previewCounts.storyboard,
+                  })}
                   value={previewEnhanced}
                   multiline
                   minRows={2}
+                  maxRows={previewCounts.total > 1 ? 16 : undefined}
                   fullWidth
                   size="small"
                   InputProps={{ readOnly: true }}
@@ -2231,7 +2473,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               )}
             </SettingsPanel>
 
-            {inputMode !== "ffmpeg" && (
+            {inputMode !== "ffmpeg" && inputMode !== "references" && (
             <SettingsPanel
               id="videogen-pipeline"
               title="Pipeline"
@@ -2324,7 +2566,19 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 </Select>
               </FormControl>
               <Hint>
-                {castSubjects.length === 0
+                {castError ? (
+                  <Box component="span" sx={{ color: "error.main" }}>
+                    Cast Library could not be loaded: {castError}.{" "}
+                    <Box
+                      component="button"
+                      type="button"
+                      onClick={() => setCastReload((n) => n + 1)}
+                      sx={{ background: "none", border: 0, p: 0, color: "inherit", textDecoration: "underline", cursor: "pointer", font: "inherit" }}
+                    >
+                      Retry
+                    </Box>
+                  </Box>
+                ) : castSubjects.length === 0
                   ? "Train a character in Cast Library to lock identity into every keyframe."
                   : "LoRA + prompt invent each keyframe still, then animate."}
               </Hint>
@@ -2346,7 +2600,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     </Select>
                   </FormControl>
                   <ActionButton onClick={() => setVideoModelsModalOpen(true)}>Manage models</ActionButton>
-                  <ActionButton kind="link" onClick={() => window.open("http://localhost:8188", "_blank")}>
+                  <ActionButton
+                    kind="link"
+                    tooltip={`Opens ${comfyUiLink(window.location.hostname, comfyUiUrl)} in a new tab`}
+                    onClick={() => window.open(comfyUiLink(window.location.hostname, comfyUiUrl), "_blank", "noopener")}
+                  >
                     ComfyUI
                   </ActionButton>
                 </Line>
@@ -2408,11 +2666,17 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 )}
               </Cluster>
               {qualityChipOptions.length > 0 && (
-                <Cluster label="Steps" note="raised to the model floor">
+                <Cluster
+                  label="Steps"
+                  note={profileSteps.fixed
+                    ? `set by the speed profile, ${profileSteps.label}; these chips do not change it`
+                    : "raised to the model floor"}
+                >
                   <ChoiceChips
                     ariaLabel="Quality steps"
                     value={qualityPreset}
                     onChange={setQualityPreset}
+                    disabled={profileSteps.fixed}
                     options={qualityChipOptions}
                   />
                 </Cluster>
@@ -2429,12 +2693,12 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   }))}
                 />
               </Cluster>
-              <Cluster label="Motion" note={enhancePrompt ? "via prompt enhancer" : "no effect while Enhance is off"}>
+              <Cluster label="Motion" note={promptControls.motion.note}>
                 <ChoiceChips
                   ariaLabel="Motion"
                   value={motionPreset}
                   onChange={setMotionPreset}
-                  disabled={!enhancePrompt}
+                  disabled={!promptControls.motion.active}
                   options={Object.entries(MOTION_PRESETS).map(([key, preset]) => ({
                     value: key,
                     label: stripGlyph(preset.label),
@@ -2442,7 +2706,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   }))}
                 />
               </Cluster>
-              {isCogVideoXModel(model, modelMeta[model]) ? (
+              {isCogVideoXModel(model, modelMeta[model]) && !MODEL_OPTIONS[model]?.canvas ? (
                 <Hint>CogVideoX is trained at {computedParams.width}×{computedParams.height}. Other aspects distort.</Hint>
               ) : (
                 <>
@@ -2463,7 +2727,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       ariaLabel="Video size"
                       value={videoSize}
                       onChange={setVideoSize}
-                      disabled={isLtxModel(model, modelMeta[model]) || isMinimaxModel(model, modelMeta[model])}
+                      disabled={isLtxModel(model, modelMeta[model]) || isMinimaxModel(model, modelMeta[model]) || !!MODEL_OPTIONS[model]?.canvas}
                       options={Object.entries(VIDEO_SIZE_PRESETS).map(([key, preset]) => ({
                         value: key,
                         label: stripGlyph(preset.label),
@@ -2524,14 +2788,6 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   tooltip="Also save a lossless PNG sequence beside the MP4."
                   onToggle={(next) => setAdvancedParams({ ...advancedParams, generate_frames_only: next })}
                 />
-                {isWanModel(model, modelMeta[model]) && (
-                  <SettingChip
-                    label="FreeU"
-                    on={advancedParams.freeu}
-                    tooltip="Fine-detail boost on Wan."
-                    onToggle={(next) => setAdvancedParams({ ...advancedParams, freeu: next })}
-                  />
-                )}
                 {isCogVideoXModel(model, modelMeta[model]) && (
                   <SettingChip
                     label="FETA"
@@ -2569,11 +2825,11 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   </Select>
                 </FormControl>
               )}
-              {modelCaps?.speed_profiles && (
+              {activeSpeedProfile && (
                 <FormControl size="small" fullWidth>
                   <InputLabel>Speed profile</InputLabel>
                   <Select
-                    value={activeSpeedProfile || "standard"}
+                    value={activeSpeedProfile}
                     onChange={(e) => setAdvancedParams({ ...advancedParams, speed_profile: e.target.value })}
                     label="Speed profile"
                   >
@@ -2600,24 +2856,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                   </Select>
                 </FormControl>
               )}
-              {inputMode === "image" && modelCaps?.modes?.includes("flf2v") && (
-                <Line>
-                  <ActionButton component="label" loading={isUploadingEndFrame}>
-                    {endFrame ? `End frame: ${endFrame.name}` : "Add end frame"}
-                    <input
-                      type="file"
-                      accept="image/*"
-                      hidden
-                      onChange={(e) => {
-                        handleEndFrameUpload(e.target.files?.[0]);
-                        e.target.value = "";
-                      }}
-                    />
-                  </ActionButton>
-                  {endFrame && <ActionButton onClick={() => setEndFrame(null)}>Remove</ActionButton>}
-                </Line>
-              )}
-              {modelCaps?.audio_in && (
+              {modelCaps?.audio_in && inputMode !== "references" && (
                 <Cluster label="Audio guide">
                   <Line nowrap>
                     <FormControl size="small" className="grow">
@@ -2663,7 +2902,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     onChange={(e) => setAdvancedParams({ ...advancedParams, guidance_scale: Number(e.target.value) })}
                     sx={{ width: 120 }}
                   />
-                  <FormControl size="small" sx={{ minWidth: 180 }}>
+                  <FormControl size="small" sx={{ minWidth: 180 }} disabled={!promptControls.style.active}>
                     <InputLabel>Prompt style</InputLabel>
                     <Select value={promptStyle} onChange={(e) => setPromptStyle(e.target.value)} label="Prompt style">
                       {Object.entries(PROMPT_STYLES)
@@ -2673,6 +2912,18 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                         ))}
                     </Select>
                   </FormControl>
+                  <TextField
+                    size="small"
+                    label="Seed"
+                    placeholder="random"
+                    value={advancedParams.seed ?? ""}
+                    inputProps={{ inputMode: "numeric" }}
+                    onChange={(e) => {
+                      const digits = e.target.value.replace(/\D/g, "").slice(0, String(MAX_SEED).length);
+                      setAdvancedParams((prev) => ({ ...prev, seed: digits }));
+                    }}
+                    sx={{ width: 150 }}
+                  />
                   <TextField
                     label="Frames / batch"
                     type="number"
@@ -2686,6 +2937,13 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                     sx={{ width: 140 }}
                   />
                 </Line>
+                {!promptControls.style.active && <Hint>{promptControls.style.note}.</Hint>}
+                {computedParams.seed != null && (
+                  <Hint>Every clip in this batch uses seed {computedParams.seed}. Clear it for a new random seed per clip.</Hint>
+                )}
+                {computedParams.seed == null && String(advancedParams.seed ?? "").trim() !== "" && (
+                  <Hint>Seeds go up to {MAX_SEED}; this one is ignored.</Hint>
+                )}
               </Cluster>
               {inputMode !== "ffmpeg" && (
                 <>
@@ -2698,9 +2956,8 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                 keyframeModel={keyframeModel}
                 directorMode={directorMode}
                 faceRestore={advancedParams.face_restore}
-                freeu={advancedParams.freeu}
               />
-              <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} queueMode />
+              <GpuGateBanner gpuBusy={gpuBusy} blockReason={blockReason} blockDetail={blockDetail} queueMode />
                 </>
               )}
               <ActionButton
@@ -3041,6 +3298,7 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                               <Chip label={`${res.frame_paths.length}f`} size="small" variant="outlined" />
                             )}
                             <VlmReviewPill review={res.metadata?.quality?.vlm_review} />
+                            <KeyframeMatchPill quality={res.metadata?.quality} />
                             <ColourMatchPill quality={res.metadata?.quality} />
                             <QualityFlagsPill quality={res.metadata?.quality} />
                           </Stack>
@@ -3174,7 +3432,9 @@ const VideoGeneratorPage = ({ embedded = false }) => {
               <Box sx={{ maxHeight: 520, overflowY: 'auto', pr: 0.5 }}>
               <Grid container spacing={2}>
                 {batches.map((b) => {
-                  const dateStr = formatVideoDate(b.start_time || b.end_time);
+                  // Date and time, as Image Gen's cards show it: cards are named
+                  // after the first prompt, so two runs of one prompt tell apart here.
+                  const dateStr = formatVideoStamp(b.start_time || b.end_time);
                   const videoCount = b.completed_videos ?? 0;
                   const rawName = b.display_name || `Batch ${b.batch_id.slice(0, 8)}`;
                   // Backend trims new names to ~40 chars; legacy batches may hold a
@@ -3292,10 +3552,10 @@ const VideoGeneratorPage = ({ embedded = false }) => {
                       </Box>
                       {/* Batch label */}
                       <Box sx={{ pt: 0.75, px: 0.5 }}>
-                        <Typography variant="caption" noWrap title={rawName} sx={{ fontWeight: 500, display: 'block' }}>
+                        <Typography variant="caption" noWrap title={dateStr ? `${rawName} · ${dateStr}` : rawName} sx={{ fontWeight: 500, display: 'block' }}>
                           {label}
                         </Typography>
-                        <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.65rem' }}>
+                        <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.65rem' }}>
                           {dateStr}
                         </Typography>
                       </Box>
@@ -3517,6 +3777,17 @@ const VideoGeneratorPage = ({ embedded = false }) => {
           }}
         />
       </React.Suspense>
+
+      <TextInputDialog
+        open={Boolean(renameDialog)}
+        title="Rename Video"
+        description="The extension stays the same."
+        label="File name"
+        initialValue={renameDialog?.current || ""}
+        submitLabel="Rename"
+        onSubmit={submitRenameVideo}
+        onClose={() => setRenameDialog(null)}
+      />
 
       {/* Inline Video Player Dialog */}
       <Dialog

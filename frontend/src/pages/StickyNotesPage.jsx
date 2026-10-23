@@ -58,10 +58,14 @@ import {
 import { useNavigate } from "react-router-dom";
 import PageLayout from "../components/layout/PageLayout";
 import ClosedNotesDrawer from "../components/notes/ClosedNotesDrawer";
+import TextInputDialog from "../components/common/TextInputDialog";
 import { pinnedToTop, pinnedFirst, isEditableTarget } from "../components/notes/notesBoard";
 import { useLayout, useDashboardWidth } from "../contexts/LayoutContext";
 import { ContextualLoader } from "../components/common/LoadingStates";
 import { opaqueMenuPaperSx } from "../components/common/opaqueMenuPaper";
+import { toHexColor } from "../utils/colorHex";
+import copyText from "../utils/copyText";
+import { guardHtmlMedia, unguardHtmlMedia } from "../utils/assetGuard";
 
 const LAYOUT_MODES = ["normal", "compact", "collapsed"];
 const LAYOUT_MODE_LABELS = {
@@ -162,7 +166,8 @@ const StickyNote = React.memo(
     useEffect(() => {
       const el = contentRef.current;
       if (!el) return;
-      const next = content || "";
+      // Remote images are shown as a placeholder: innerHTML would fetch them.
+      const next = guardHtmlMedia(content || "");
       // Skip while equal so typing does not reset the caret. Undo and reopen
       // change `content` from outside and must rewrite the editor.
       if (el.innerHTML !== next) el.innerHTML = next;
@@ -211,7 +216,7 @@ const StickyNote = React.memo(
     const publishContent = useCallback(() => {
       const el = contentRef.current;
       if (!el || !el.isConnected) return;
-      const html = el.innerHTML;
+      const html = unguardHtmlMedia(el.innerHTML);
       const stored = contentPropRef.current || "";
       const focused = document.activeElement === el;
       if (!html && stored && !focused) return;
@@ -380,7 +385,7 @@ const StickyNote = React.memo(
             <input
               ref={colorInputRef}
               type="color"
-              value={color.startsWith("rgba") ? "#1e1e1e" : color}
+              value={toHexColor(color)}
               onChange={(e) => onColorChange(e.target.value)}
               style={{
                 position: "absolute",
@@ -492,7 +497,7 @@ const StickyNote = React.memo(
                 contentRef.current = el;
                 if (noteRef) noteRef(el);
                 if (el && !el.innerHTML && contentPropRef.current) {
-                  el.innerHTML = contentPropRef.current;
+                  el.innerHTML = guardHtmlMedia(contentPropRef.current);
                 }
               }}
               className="note-content non-draggable"
@@ -575,6 +580,8 @@ const StickyNotesPage = () => {
   const draggingRef = useRef(false);
   const noteRefs = useRef({});
   const editRangeRef = useRef(null);
+  const [linkDialogOpen, setLinkDialogOpen] = useState(false);
+  const linkRangeRef = useRef(null); // the note selection the link dialog applies to
   const saveTimeoutRef = useRef(null);
 
   // Undo history (CTRL+Z)
@@ -856,7 +863,7 @@ const StickyNotesPage = () => {
     if (!note) return current;
     const el = noteRefs.current[noteId];
     if (!el || !el.isConnected) return current;
-    const html = el.innerHTML;
+    const html = unguardHtmlMedia(el.innerHTML);
     if (!html && note.content && document.activeElement !== el) return current;
     if ((note.content || "") === html) return current;
     const newNotes = { ...current, [noteId]: { ...note, content: html } };
@@ -1277,16 +1284,37 @@ const StickyNotesPage = () => {
     document.execCommand(command, false, null);
   }, []);
 
+  // The link dialog takes focus off the note, which drops the editor's selection
+  // (the old window.prompt kept it by blocking). The selection is cloned when the
+  // toolbar button is pressed and put back right before createLink runs. The
+  // note's DOM is never re-rendered by React, so the cloned range stays live.
   const handleInsertLink = useCallback(() => {
     const sel = window.getSelection();
-    const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
-    const url = window.prompt("Enter URL:");
-    if (url && range) {
+    linkRangeRef.current = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).cloneRange() : null;
+    setLinkDialogOpen(true);
+  }, []);
+
+  const closeLinkDialog = useCallback(() => {
+    setLinkDialogOpen(false);
+    linkRangeRef.current = null;
+  }, []);
+
+  const applyInsertLink = useCallback((url) => {
+    const range = linkRangeRef.current;
+    closeLinkDialog();
+    if (!url || !range) return;
+    // After the dialog has handed focus back, re-select the saved range and link it.
+    requestAnimationFrame(() => {
+      const start = range.startContainer;
+      const node = start.nodeType === Node.ELEMENT_NODE ? start : start.parentElement;
+      const editable = node?.closest?.(".note-content");
+      if (editable) editable.focus();
+      const sel = window.getSelection();
       sel.removeAllRanges();
       sel.addRange(range);
       document.execCommand("createLink", false, url);
-    }
-  }, []);
+    });
+  }, [closeLinkDialog]);
 
   const selectNoteContents = useCallback((el) => {
     const range = document.createRange();
@@ -1317,8 +1345,10 @@ const StickyNotesPage = () => {
     const copied = document.execCommand("copy");
     if (!copied) {
       const text = (hasSelection ? sel.toString() : el.innerText) || "";
-      navigator.clipboard.writeText(text).catch((err) => {
-        setLayoutError(`Could not copy: ${err?.message || "clipboard permission denied"}`);
+      // copyText never throws; it resolves false when neither the Clipboard API
+      // (secure contexts only) nor the execCommand fallback could copy.
+      copyText(text).then((ok) => {
+        if (!ok) setLayoutError("Could not copy: clipboard permission denied");
       });
     }
     setContextMenu(null);
@@ -1354,7 +1384,7 @@ const StickyNotesPage = () => {
         el.appendChild(document.createTextNode(text));
       }
     }
-    handleNoteContentChange(noteId, el.innerHTML);
+    handleNoteContentChange(noteId, unguardHtmlMedia(el.innerHTML));
   }, [handleNoteContentChange]);
 
   // ── Render ───────────────────────────────────────────────────────────────
@@ -1507,6 +1537,17 @@ const StickyNotesPage = () => {
             e.preventDefault();
             setDesktopMenu({ x: e.clientX, y: e.clientY });
           }
+        }}
+        onMouseDown={(e) => {
+          // A click on the empty board leaves the notes: without this the
+          // browser puts the caret back in the note that holds the text
+          // selection, and Ctrl+Z then undoes that note's text instead of the
+          // board change.
+          if (e.button !== 0 || e.target.closest('[data-card-id]')) return;
+          const active = document.activeElement;
+          if (isEditableTarget(active)) active.blur();
+          window.getSelection()?.removeAllRanges();
+          e.preventDefault();
         }}
       >
         {layoutError && (
@@ -1702,7 +1743,7 @@ const StickyNotesPage = () => {
                         onContentChange={(content) =>
                           handleNoteContentChange(noteId, content)
                         }
-                        onDeleteRequest={() => setDeleteConfirm(noteId)}
+                        onDeleteRequest={() => setDeleteConfirm({ noteId, source: "open" })}
                         onFormat={handleFormat}
                         onInsertLink={handleInsertLink}
                         theme={theme}
@@ -1814,9 +1855,11 @@ const StickyNotesPage = () => {
       </Menu>
 
       {/* ── Delete confirmation dialog ─────────────────────────────── */}
+      {/* handleDeleteNote pushes an undo snapshot, but the undo stack is a ref
+          on this page: it is gone once the page unmounts or reloads. */}
       <Dialog open={Boolean(deleteConfirm)} onClose={() => setDeleteConfirm(null)} maxWidth="xs">
         <DialogTitle sx={{ fontSize: "0.9rem" }}>
-          {`Delete "${deleteNoteTitle}"? This cannot be undone.`}
+          {`Delete "${deleteNoteTitle}"? Ctrl+Z brings it back until you leave or reload this page.`}
         </DialogTitle>
         <DialogActions>
           <Button onClick={() => setDeleteConfirm(null)} size="small">Cancel</Button>
@@ -1901,6 +1944,17 @@ const StickyNotesPage = () => {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <TextInputDialog
+        open={linkDialogOpen}
+        title="Insert Link"
+        label="URL"
+        placeholder="https://"
+        inputType="url"
+        submitLabel="Insert"
+        onSubmit={applyInsertLink}
+        onClose={closeLinkDialog}
+      />
 
       <ClosedNotesDrawer
         open={closedDrawerOpen}

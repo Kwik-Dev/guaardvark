@@ -98,6 +98,12 @@ services:
       # The name other containers on this network call the backend by
       # (http://backend:5000).
       VITE_ALLOWED_HOSTS: backend
+      # The quiet-library settings start.sh exports: no library telemetry, no
+      # pip version checks.
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      DO_NOT_TRACK: "1"
+      UNSLOTH_DISABLE_STATISTICS: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
       # Optional — set your Anthropic key for Uncle Claude:
       # ANTHROPIC_API_KEY: sk-ant-...
     ports:
@@ -105,6 +111,10 @@ services:
     volumes:
       - app_data:/app/data
       - app_logs:/app/logs
+      # The credential store (backend/utils/credential_store.py): Connections
+      # and WordPress site keys and the key that encrypts them. A volume of its
+      # own, so they outlive a rebuilt or recreated container.
+      - app_config:/root/.config/guaardvark
     depends_on:
       postgres:
         condition: service_healthy
@@ -112,12 +122,16 @@ services:
         condition: service_healthy
       ollama:
         condition: service_started
+    # The API plus the two Celery workers start_celery.sh runs natively, with the
+    # same queues. An autoresearch run's worker (queue research) is started in
+    # this container on demand by backend/services/research_worker.py.
     command: >
       sh -c "
         cd /app &&
         { flask db upgrade || echo 'flask db upgrade failed; the backend starts anyway' >&2; };
         python -m flask run --host 0.0.0.0 --port 5000 &
-        celery -A backend.celery_app.celery worker --loglevel=info --concurrency=2 &
+        CELERY_WORKER_MODE=true celery -A backend.celery_app.celery worker --hostname=main@%h --queues=health,default,indexing,generation,training_gpu --concurrency=1 --max-memory-per-child=4096000 --loglevel=info &
+        CELERY_WORKER_MODE=true celery -A backend.celery_app.celery worker --hostname=training@%h --queues=training --concurrency=1 --max-memory-per-child=4096000 --loglevel=info &
         wait
       "
 
@@ -137,3 +151,4 @@ volumes:
   ollama_models:
   app_data:
   app_logs:
+  app_config:

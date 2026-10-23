@@ -3,6 +3,11 @@
 Called from the unified task executor. Claims the record before any network
 call and refuses to re-post one that already has a remote id, so a redelivered
 Celery message cannot produce a duplicate post.
+
+A record whose time is still ahead is a hand-off to the platform's own
+scheduling (``provider.schedule``); it stays ``scheduled`` until the platform
+publishes it (``scheduler.settle``). If the platform's minimum lead has passed
+while the job waited, the record goes back to Guaardvark's timer instead.
 """
 
 from __future__ import annotations
@@ -16,7 +21,9 @@ from backend.services.connections import (
     gates,
     media as media_util,
     publish_service,
+    rate_limits,
     registry,
+    scheduling,
     service,
 )
 from backend.services.connections.base import PublishRequest
@@ -47,8 +54,8 @@ def run(task: Dict[str, Any], update_progress: Callable[[int, str], None]) -> Di
         logger.info("Publish record %s already posted; skipping.", record_id)
         return {"skipped": True, "remote_url": record.remote_url}
     # awaiting_approval: a job left over from before a hold must not send a
-    # publish that now waits on a person.
-    if record.status in ("cancelled", "rejected", "awaiting_approval"):
+    # publish that now waits on a person. scheduled: the timer owns it.
+    if record.status in ("cancelled", "rejected", "awaiting_approval", "scheduled", "deleted"):
         return {"skipped": True, "status": record.status}
 
     stopped = gates.posting_stop_reason()
@@ -59,20 +66,53 @@ def run(task: Dict[str, Any], update_progress: Callable[[int, str], None]) -> Di
     connection = Connection.query.get(record.connection_id)
     if connection is None:
         return _fail(record, "The target connection no longer exists.")
+    if not publish_service.approved(record, connection):
+        return {"skipped": True, "status": record.status, "reason": "not approved"}
 
-    allowed, reason = gates.check_can_publish(connection.provider)
-    if not allowed:
-        return _fail(record, reason or "Blocked by a safety gate.")
+    spec = registry.spec_for(connection.provider)
+    caps = spec.capabilities
+    now = datetime.now()
+    hand_off = record.scheduled_at is not None and record.scheduled_at > now
+    if hand_off and not (
+        scheduling.can_hand_off(caps, record.scheduled_at, now)
+        and registry.supports(connection.provider, "schedule")
+    ):
+        record.status = "scheduled"
+        db.session.commit()
+        return {"skipped": True, "status": "scheduled", "reason": "too close for the platform's own scheduling"}
+
+    if hand_off:
+        # Nothing goes public now, so the per-platform cadence is charged when
+        # the platform publishes it (scheduler.settle), not here.
+        if not gates.publish_enabled():
+            return _fail(record, "Publishing is disabled.")
+    else:
+        allowed, reason = gates.check_can_publish(connection.provider)
+        if not allowed:
+            return _fail(record, reason or "Blocked by a safety gate.")
+
+    verdict = rate_limits.check(
+        connection.id, caps.rate_limits, at=record.scheduled_at if hand_off else now,
+        now=now, exclude_record_id=record.id,
+    )
+    if not verdict.allowed:
+        return _fail(record, verdict.reason)
+
+    problems = publish_service.bot_label_problems(caps, connection)
+    problems += publish_service.visibility_problems(
+        connection, publish_service.visibility_for(caps, record.visibility)
+    )
+    if problems:
+        return _fail(record, problems[0])
 
     # Claim before any network call so a concurrent worker cannot double-post.
     record.status = "processing"
     record.attempt_count = (record.attempt_count or 0) + 1
     db.session.commit()
 
-    update_progress(10, f"Publishing to {connection.provider}…")
+    update_progress(10, f"{'Scheduling on' if hand_off else 'Publishing to'} {connection.provider}…")
 
     try:
-        spec = registry.spec_for(connection.provider)
         module = registry.get_provider(connection.provider)
         ctx = service.build_ctx(connection)
         request = PublishRequest(
@@ -82,11 +122,15 @@ def run(task: Dict[str, Any], update_progress: Callable[[int, str], None]) -> Di
             title=record.title,
             link_url=record.link_url,
             tags=_json_list(record.tags),
-            visibility=record.visibility or spec.capabilities.default_visibility,
+            visibility=publish_service.visibility_for(caps, record.visibility),
             media=media_util.media_from_refs(record.media_refs),
             config=ctx.config,
+            ai_disclosure=bool(record.ai_disclosure),
+            options=_json_dict(record.post_options),
+            publish_at=record.scheduled_at if hand_off else None,
         )
-        result = module.publish(ctx, request, update_progress)
+        send = module.schedule if hand_off else module.publish
+        result = send(ctx, request, update_progress)
     except Exception as e:  # noqa: BLE001 - any provider failure becomes a failed record
         logger.warning("Publish %s raised: %s", record_id, e, exc_info=True)
         return _fail(record, service.redact(str(e)))
@@ -94,12 +138,25 @@ def run(task: Dict[str, Any], update_progress: Callable[[int, str], None]) -> Di
     if not result.ok:
         return _fail(record, service.redact(result.message))
 
-    record.status = "posted"
     record.remote_id = result.remote_id
     record.remote_url = result.remote_url
     record.error_message = None
-    record.posted_at = datetime.now()
     connection.last_used_at = datetime.now()
+
+    if hand_off:
+        record.status = "scheduled"
+        record.scheduled_natively = True
+        db.session.commit()
+        update_progress(100, "Scheduled on the platform.")
+        return {
+            "scheduled": True,
+            "platform": connection.provider,
+            "remote_id": result.remote_id,
+            "scheduled_at": scheduling.to_utc_iso(record.scheduled_at),
+        }
+
+    record.status = "posted"
+    record.posted_at = datetime.now()
     db.session.commit()
 
     gates.record_publish(connection.provider)
@@ -119,6 +176,16 @@ def _fail(record, message: str) -> Dict[str, Any]:
     record.error_message = message
     db.session.commit()
     return {"error": message}
+
+
+def _json_dict(raw) -> dict:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
+    except (ValueError, TypeError):
+        return {}
 
 
 def _json_list(raw) -> list:

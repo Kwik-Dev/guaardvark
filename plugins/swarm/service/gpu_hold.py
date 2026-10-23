@@ -26,6 +26,8 @@ from typing import Any
 
 import requests
 
+from .backend_url import API_KEY_HEADER, backend_api_key
+
 logger = logging.getLogger("swarm.gpu_hold")
 
 _ENV_DISABLE = "SWARM_DISABLE_GPU_HOLD"
@@ -93,7 +95,13 @@ class GpuHoldClient:
 
     def _post(self, path: str, payload: dict[str, Any]) -> bool:
         try:
-            response = requests.post(f"{self._url}{path}", json=payload, timeout=self._timeout)
+            key = backend_api_key()
+            response = requests.post(
+                f"{self._url}{path}",
+                json=payload,
+                headers={API_KEY_HEADER: key} if key else None,
+                timeout=self._timeout,
+            )
         except requests.RequestException as e:
             logger.warning(f"GPU orchestrator {path} failed: {e}")
             return False

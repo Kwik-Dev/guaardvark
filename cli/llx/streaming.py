@@ -267,7 +267,7 @@ class LlxStreamer:
                         approved = bool(approval_handler(data))
                 except KeyboardInterrupt:
                     if self._session_id:
-                        self.send_approval_response(self._session_id, False)
+                        self.send_approval_response(self._session_id, False, data)
                         self.abort(self._session_id)
                     raise
                 except Exception as e:
@@ -276,7 +276,7 @@ class LlxStreamer:
                     sys.stderr.flush()
                     approved = False
             if self._session_id:
-                self.send_approval_response(self._session_id, approved)
+                self.send_approval_response(self._session_id, approved, data)
 
     def abort(self, session_id: str):
         """Send abort signal for current chat over Socket.IO."""
@@ -301,11 +301,16 @@ class LlxStreamer:
             except Exception:
                 pass
 
-    def send_approval_response(self, session_id: str, approved: bool):
-        """Send a tool approval response back to the server."""
+    def send_approval_response(self, session_id: str, approved: bool, request: dict | None = None):
+        """Answer a tool approval request. ``request`` is the
+        chat:tool_approval_request being answered; its ids bind the answer to it."""
         if self._connected:
+            payload = {"session_id": session_id, "approved": approved}
+            for key in ("approval_id", "request_id"):
+                if isinstance(request, dict) and request.get(key):
+                    payload[key] = request[key]
             try:
-                self.sio.emit("chat:tool_approval_response", {"session_id": session_id, "approved": approved})
+                self.sio.emit("chat:tool_approval_response", payload)
             except Exception:
                 pass
 

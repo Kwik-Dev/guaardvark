@@ -119,6 +119,51 @@ def ensure_path_is_safe(path: str) -> bool:
         return False
 
 
+# Characters no file or folder name may carry: the ones Windows refuses plus
+# the path separators and control characters. Checked per character; the old
+# string form '<>:"/\\|?*\x00-\x1f' made "-" and "x" invalid too, since a
+# string is a set of characters, not a range.
+_INVALID_NAME_CHARS = frozenset('<>:"/\\|?*')
+
+
+def has_invalid_name_chars(name: str) -> bool:
+    return any(ch in _INVALID_NAME_CHARS or ord(ch) < 32 for ch in name)
+
+
+# Device names Windows reserves whatever the extension (CON.txt is CON).
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def document_name_problem(name: str):
+    """Why a document may not take this name, or None when it may.
+
+    The name is stored and shown, and may be used as a filename by an export
+    or a sync to another machine, so it must be a valid filename on every
+    platform the product runs on.
+    """
+    if not name:
+        return "Invalid filename"
+    if name in (".", ".."):
+        return 'A filename cannot be "." or ".."'
+    if name.startswith("."):
+        return "A filename cannot start with a dot"
+    if any(ch in _INVALID_NAME_CHARS for ch in name):
+        return 'A filename cannot contain any of < > : " / \\ | ? *'
+    if any(ord(ch) < 32 or ord(ch) == 0x7F for ch in name):
+        return "A filename cannot contain control characters"
+    if name[-1] in ". ":
+        return "A filename cannot end with a dot or a space"
+    if name.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+        return f'"{name.split(".", 1)[0]}" is a reserved device name on Windows'
+    if len(name) > 255:
+        return "Filename too long (255 characters at most)"
+    return None
+
+
 def get_physical_path(relative_path: str) -> Path:
     """Convert relative path to absolute physical path"""
     base = get_upload_base_path()
@@ -443,9 +488,7 @@ def rename_folder(folder_id):
         if not new_name or new_name == folder.name:
             return success_response(folder.to_dict())
         
-        # Basic validation for dangerous characters
-        invalid_chars = '<>:"/\\|?*\x00-\x1f'
-        if any(char in invalid_chars for char in new_name):
+        if has_invalid_name_chars(new_name):
             return error_response("Folder name contains invalid characters", 400, "INVALID_FILENAME")
         
         if len(new_name) > 255:
@@ -787,7 +830,7 @@ def _delete_folder_recursive(folder: Folder, deleted_folders: list, deleted_docu
     documents = folder.documents.all()
     doc_ids_to_deindex = []
     for document in documents:
-        doc_ids_to_deindex.append(str(document.id))
+        doc_ids_to_deindex.append((document.id, getattr(document, "project_id", None)))
         doc_path = document.path
         physical_doc_path = get_physical_path(doc_path)
         if physical_doc_path.exists():
@@ -802,18 +845,20 @@ def _delete_folder_recursive(folder: Folder, deleted_folders: list, deleted_docu
     # Batch deindex from vector store
     index_instance = current_app.config.get("LLAMA_INDEX_INDEX")
     storage_dir = current_app.config.get("STORAGE_DIR")
-    if doc_ids_to_deindex and index_instance and storage_dir and hasattr(index_instance, "delete_ref_doc"):
+    if doc_ids_to_deindex:
         from backend.services.indexing_service import purge_document_vectors
         # Node ids are `doc_<id>_<hash>` per source fragment, so `delete_ref_doc`
         # matched on a bare document id never found anything -- it removed nothing
         # and logged success, leaving deleted documents answering questions.
-        # purge_document_vectors does the prefix match the ids actually need.
-        for ref_doc_id in doc_ids_to_deindex:
+        # purge_document_vectors does the prefix match the ids actually need. It
+        # needs no loaded index, and the project picks the table in per-project mode.
+        for ref_doc_id, ref_project_id in doc_ids_to_deindex:
             try:
-                _removed = purge_document_vectors(ref_doc_id)
+                _removed = purge_document_vectors(ref_doc_id, ref_project_id)
                 logger.info(f"Removed document {ref_doc_id} from vector index ({_removed} chunk(s))")
             except Exception:
                 logger.warning(f"Failed to remove doc {ref_doc_id} from index (continuing)")
+    if doc_ids_to_deindex and index_instance and storage_dir and hasattr(index_instance, "delete_ref_doc"):
         try:
             index_instance.storage_context.persist(persist_dir=storage_dir)
         except Exception as e:
@@ -1001,7 +1046,19 @@ def upload_file():
         # Validate folder_path if provided
         if folder_path and not ensure_path_is_safe(folder_path):
             return error_response("Invalid folder path", 400, "INVALID_PATH")
-        
+
+        # Bulk Import's browser uploads ask for the rules a server-folder
+        # import applies (no hidden folders or files, no credential files),
+        # checked on the names as sent. Other callers are unaffected.
+        if request.form.get("import_rules") == "bulk":
+            from backend.utils.path_safety import import_refusal
+
+            relative_path = request.form.get("relative_path", "")
+            refusal = import_refusal(file.filename) or (
+                import_refusal(relative_path) if relative_path else None)
+            if refusal:
+                return error_response(refusal, 400, "IMPORT_RULES_REFUSED")
+
         # Parse metadata
         try:
             metadata = json.loads(metadata_str) if metadata_str else {}
@@ -1055,16 +1112,23 @@ def rename_document(doc_id):
         if not data or "filename" not in data:
             return error_response("New filename required", 400, "MISSING_FILENAME")
         new_filename = data["filename"].strip()
-        if not new_filename:
-            return error_response("Invalid filename", 400, "INVALID_FILENAME")
-        
-        # Basic validation for dangerous characters but preserve file extensions
-        invalid_chars = '<>:"/\\|?*\x00-\x1f'
-        if any(char in invalid_chars for char in new_filename):
-            return error_response("Filename contains invalid characters", 400, "INVALID_FILENAME")
-        
-        if len(new_filename) > 255:
-            return error_response("Filename too long", 400, "INVALID_FILENAME")
+        problem = document_name_problem(new_filename)
+        if problem:
+            return error_response(problem, 400, "INVALID_FILENAME")
+        if new_filename == document.filename:
+            return success_response(document.to_dict())
+        sibling = DBDocument.query.filter(
+            DBDocument.id != doc_id,
+            DBDocument.folder_id == document.folder_id,
+            DBDocument.filename == new_filename,
+        ).first()
+        if sibling:
+            return error_response("A file with this name already exists here", 409, "DOCUMENT_EXISTS")
+
+        # The shown name only. The file on disk and document.path keep their
+        # name: chunk metadata (citations), batch thumbnails and
+        # batch_metadata.json, and files registered from outside the uploads
+        # folder are all keyed by that path.
         document.filename = new_filename
         document.updated_at = datetime.datetime.now()
         db.session.commit()
@@ -1241,23 +1305,24 @@ def delete_document(doc_id):
         # Remove from vector index if it was indexed
         index_instance = current_app.config.get("LLAMA_INDEX_INDEX")
         storage_dir = current_app.config.get("STORAGE_DIR")
+        try:
+            from backend.services.indexing_service import purge_document_vectors
+            # Node ids are `doc_<id>_<hash>` per source fragment, so `delete_ref_doc`
+            # matched on a bare document id never found anything -- it removed nothing
+            # and logged success, leaving deleted documents answering questions.
+            # purge_document_vectors does the prefix match the ids actually need, and
+            # needs no loaded index.
+            _removed = purge_document_vectors(
+                document.id, getattr(document, "project_id", None))
+            logger.info(f"Removed document {doc_id} from vector index ({_removed} chunk(s))")
+        except Exception as index_err:
+            logger.warning(f"Failed to remove doc {doc_id} from index (continuing): {index_err}")
         if (index_instance and storage_dir and
                 hasattr(index_instance, "delete_ref_doc")):
             try:
-                from backend.services.indexing_service import purge_document_vectors
-                # Node ids are `doc_<id>_<hash>` per source fragment, so `delete_ref_doc`
-                # matched on a bare document id never found anything -- it removed nothing
-                # and logged success, leaving deleted documents answering questions.
-                # purge_document_vectors does the prefix match the ids actually need.
-                _removed = purge_document_vectors(
-                    document.id, getattr(document, "project_id", None))
-                logger.info(f"Removed document {doc_id} from vector index ({_removed} chunk(s))")
-                try:
-                    index_instance.storage_context.persist(persist_dir=storage_dir)
-                except Exception as persist_err:
-                    logger.warning(f"Failed to persist index after deletion: {persist_err}")
-            except Exception as index_err:
-                logger.warning(f"Failed to remove doc {doc_id} from index (continuing): {index_err}")
+                index_instance.storage_context.persist(persist_dir=storage_dir)
+            except Exception as persist_err:
+                logger.warning(f"Failed to persist index after deletion: {persist_err}")
         db.session.delete(document)
         db.session.commit()
         logger.info(f"Deleted document {doc_id}: {doc_filename}")
@@ -1319,7 +1384,7 @@ def bulk_delete():
                     if not document:
                         errors.append({"type": "document", "id": iid, "error": "not found"})
                         continue
-                    doc_ids_to_deindex.append(str(document.id))
+                    doc_ids_to_deindex.append((document.id, getattr(document, "project_id", None)))
                     doc_path = document.path
                     physical_path = get_physical_path(doc_path)
                     if physical_path.exists():
@@ -1342,16 +1407,18 @@ def bulk_delete():
         # Best-effort deindex collected (in addition to any done inside folder recursive)
         index_instance = current_app.config.get("LLAMA_INDEX_INDEX")
         storage_dir = current_app.config.get("STORAGE_DIR")
-        if doc_ids_to_deindex and index_instance and storage_dir and hasattr(index_instance, "delete_ref_doc"):
+        if doc_ids_to_deindex:
             from backend.services.indexing_service import purge_document_vectors
             # Same id mismatch as the other delete paths: node ids are
-            # `doc_<id>_<hash>`, so a bare document id matched nothing.
-            for ref_doc_id in doc_ids_to_deindex:
+            # `doc_<id>_<hash>`, so a bare document id matched nothing. No loaded
+            # index is needed to purge.
+            for ref_doc_id, ref_project_id in doc_ids_to_deindex:
                 try:
-                    _removed = purge_document_vectors(ref_doc_id)
+                    _removed = purge_document_vectors(ref_doc_id, ref_project_id)
                     logger.info(f"Bulk: removed document {ref_doc_id} from vector index ({_removed} chunk(s))")
                 except Exception:
                     logger.warning(f"Bulk: failed to remove doc {ref_doc_id} from index (continuing)")
+        if doc_ids_to_deindex and index_instance and storage_dir and hasattr(index_instance, "delete_ref_doc"):
             try:
                 index_instance.storage_context.persist(persist_dir=storage_dir)
             except Exception as pe:
@@ -1481,6 +1548,21 @@ def download_document(doc_id):
         return error_response("Failed to download document", 500, "DOWNLOAD_ERROR")
 
 
+def _thumbnail_dirs(physical: Path) -> list[Path]:
+    """Directories that may hold a cached thumbnail for ``physical``, nearest first.
+
+    Uploads, copies (``_copy_document_into``) and the ffmpeg fallback below keep
+    ``thumbnails/`` beside the file. The batch image and video generators lay a
+    batch out as ``<batch>/images/<file>`` (``<item>/videos/<file>``) with
+    ``<batch>/thumbnails/<stem>.jpg`` one level up, so a file in an ``images/``
+    or ``videos/`` directory is also looked up there.
+    """
+    dirs = [physical.parent / "thumbnails"]
+    if physical.parent.name in ("images", "videos"):
+        dirs.append(physical.parent.parent / "thumbnails")
+    return dirs
+
+
 @files_bp.route("/thumbnail", methods=["GET"])
 def get_thumbnail():
     """GET /api/files/thumbnail - Get thumbnail for a document.
@@ -1494,7 +1576,8 @@ def get_thumbnail():
                                 are reachable too.
 
     Looks for a cached thumbnail in a thumbnails/ subdirectory next to
-    the source. Generates one on the fly for video files via ffmpeg.
+    the source, then in the batch's thumbnails/ one level up (see
+    _thumbnail_dirs). Generates one on the fly for video files via ffmpeg.
     Falls back to serving the original file when nothing else hits.
     """
     doc_id_arg = request.args.get("document_id", "").strip()
@@ -1527,19 +1610,17 @@ def get_thumbnail():
     else:
         return error_response("path or document_id parameter required", 400, "NO_TARGET")
 
-    # Look for thumbnail in thumbnails/ subdirectory
+    # Look for a cached thumbnail, nearest location first.
     parent_dir = doc_physical.parent
     thumb_dir = parent_dir / "thumbnails"
     thumb_name = doc_physical.stem + ".jpg"
     thumb_path = thumb_dir / thumb_name
 
-    if thumb_path.exists():
-        return send_file(str(thumb_path), mimetype="image/jpeg")
-
-    # Try .png thumbnail as fallback
-    thumb_png = thumb_dir / (doc_physical.stem + ".png")
-    if thumb_png.exists():
-        return send_file(str(thumb_png), mimetype="image/png")
+    for candidate_dir in _thumbnail_dirs(doc_physical):
+        for ext, mimetype in ((".jpg", "image/jpeg"), (".png", "image/png")):
+            candidate = candidate_dir / (doc_physical.stem + ext)
+            if candidate.exists():
+                return send_file(str(candidate), mimetype=mimetype)
 
     # For video files, try to generate a thumbnail on the fly via ffmpeg
     video_exts = {'.mp4', '.webm', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.m4v'}
@@ -1663,18 +1744,30 @@ def edit_image():
             bg.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
             img = bg
 
-        # Determine save path
+        # Determine save path. A name is taken when a file or a row has it; a
+        # sibling is never written over.
+        def _name_taken(path: Path, doc_path: str) -> bool:
+            return path.exists() or DBDocument.query.filter_by(path=doc_path).first() is not None
+
+        old_path = None
+        previous = (document.filename, document.path, document.type, document.size)
         if save_mode == "overwrite":
             out_path = physical_path.with_suffix(target_ext)
             out_doc = document
             if out_path != physical_path:
-                # Format changed — update document record
+                # Format changed: the row moves to the new name and the original
+                # file goes once the row is committed.
+                new_doc_path = str(Path(document.path).with_suffix(target_ext))
+                if _name_taken(out_path, new_doc_path):
+                    return error_response(
+                        f"{out_path.name} already exists in this folder. "
+                        "Save as a copy instead, or rename that file first.",
+                        409, "NAME_TAKEN",
+                    )
                 out_doc.filename = physical_path.stem + target_ext
-                out_doc.path = str(Path(document.path).with_suffix(target_ext))
-                # Remove old file after save
+                out_doc.path = new_doc_path
+                out_doc.type = target_ext
                 old_path = physical_path
-            else:
-                old_path = None
         else:
             # Save as copy with _edited suffix
             stem = physical_path.stem
@@ -1682,45 +1775,58 @@ def edit_image():
             while True:
                 new_name = f"{stem}_edited{f'_{counter}' if counter > 1 else ''}{target_ext}"
                 out_path = physical_path.parent / new_name
-                if not out_path.exists():
+                new_doc_path = str(Path(document.path).parent / new_name)
+                if not _name_taken(out_path, new_doc_path):
                     break
                 counter += 1
 
-            # Create new document record
-            new_doc_path = str(Path(document.path).parent / new_name)
+            # Create new document record; size is set once the file is written.
             out_doc = DBDocument(
                 filename=new_name,
                 path=new_doc_path,
                 folder_id=document.folder_id,
-                file_size=0,
-                file_type=f"image/{target_format}",
+                type=target_ext,
+                index_status="NOT_INDEXED",
                 uploaded_at=utcnow(),
             )
             db.session.add(out_doc)
 
-        # Save
+        # Write beside the target, commit the row, then move the file into
+        # place and drop the original, so a failure at any step leaves the
+        # original file and row as they were.
         save_kwargs = {}
         if target_format in ("jpeg", "webp"):
             save_kwargs["quality"] = quality
         if target_format == "png":
             save_kwargs["optimize"] = True
-        img.save(str(out_path), format=target_format.upper(), **save_kwargs)
-
-        # Update file size
-        out_doc.file_size = out_path.stat().st_size
-
-        # Remove old file if format changed on overwrite
-        if save_mode == "overwrite" and old_path and old_path != out_path and old_path.exists():
+        tmp_path = out_path.with_name(f".{out_path.name}.{os.getpid()}.tmp")
+        try:
+            img.save(str(tmp_path), format=target_format.upper(), **save_kwargs)
+            out_doc.size = tmp_path.stat().st_size
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            tmp_path.unlink(missing_ok=True)
+            raise
+        try:
+            os.replace(tmp_path, out_path)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            if save_mode == "overwrite":
+                out_doc.filename, out_doc.path, out_doc.type, out_doc.size = previous
+            else:
+                db.session.delete(out_doc)
+            db.session.commit()
+            raise
+        if old_path is not None and old_path != out_path and old_path.exists():
             old_path.unlink()
-
-        db.session.commit()
 
         logger.info(f"Image edited: doc={doc_id}, mode={save_mode}, format={target_format}, path={out_path}")
         return success_response({
             "document_id": out_doc.id,
             "filename": out_doc.filename,
             "path": out_doc.path,
-            "file_size": out_doc.file_size,
+            "file_size": out_doc.size,
             "width": img.width,
             "height": img.height,
         }, "Image saved successfully")
@@ -1757,7 +1863,7 @@ def get_image_info(doc_id):
             "height": height,
             "mode": mode,
             "format": fmt,
-            "file_size": document.file_size,
+            "file_size": document.size,
         })
     except Exception as e:
         logger.error(f"Error getting image info: {e}", exc_info=True)
@@ -1860,9 +1966,40 @@ def start_bulk_import():
         if not source_path:
             return error_response("source_path cannot be empty", 400, "INVALID_SOURCE_PATH")
 
+        # The same folders the picker may browse; the task then walks the
+        # resolved path, not the one the request named.
+        source_path, refusal = resolve_import_directory(source_path)
+        if refusal:
+            return error_response(refusal, 403, "PATH_NOT_ALLOWED")
+        if not os.path.isdir(source_path):
+            return error_response("source_path is not a directory", 400, "INVALID_SOURCE_PATH")
+
         # Generate a job ID
         import uuid
         job_id = str(uuid.uuid4())
+
+        # Extract parameters. A folder id names one exact folder at any depth;
+        # a bare name is found or created at the top level, as before. A name
+        # with a slash is a path and must name an existing folder: matched by
+        # name it used to create a stray top-level folder called "A/B".
+        target_folder_id = data.get("target_folder_id")
+        target_folder = (data.get("target_folder") or "").strip() or "Imports"
+        if target_folder_id not in (None, ""):
+            try:
+                target = db.session.get(Folder, int(target_folder_id))
+            except (TypeError, ValueError):
+                target = None
+            if not target:
+                return error_response("The folder to import into was not found", 404, "TARGET_NOT_FOUND")
+            target_folder_id, target_folder = target.id, target.path
+        elif "/" in target_folder:
+            stored = target_folder.strip("/")
+            target = Folder.query.filter(Folder.path.in_([stored, f"/{stored}"])).first()
+            if not target:
+                return error_response(f"There is no folder at {target_folder}", 404, "TARGET_NOT_FOUND")
+            target_folder_id, target_folder = target.id, target.path
+        else:
+            target_folder_id = None
 
         # Store job info
         job_data = {
@@ -1874,18 +2011,12 @@ def start_bulk_import():
             "created_at": datetime.datetime.now().isoformat(),
         }
         set_job_status(job_id, job_data)
-
-        # Extract parameters
-        target_folder = data.get("target_folder") or ""
-        if target_folder:
-            target_folder = target_folder.strip() or "Imports"
-        else:
-            target_folder = "Imports"
         project_id = data.get("project_id")
         client_id = data.get("client_id")
         website_id = data.get("website_id")
         reindex_missing = data.get("reindex_missing", True)
-        force_copy = data.get("force_copy", False)
+        # Copy unless the caller asks to move; a move empties the source folder.
+        force_copy = data.get("force_copy", True)
         dry_run = data.get("dry_run", False)
 
         # Submit to background task via Celery
@@ -1898,7 +2029,11 @@ def start_bulk_import():
             job_data["message"] = "Starting bulk import..."
             set_job_status(job_id, job_data)
 
-            # Submit task
+            # The folder id goes only when set, so a request naming the folder
+            # by name still runs on a worker that predates the keyword.
+            options = {"queue": "indexing"}
+            if target_folder_id:
+                options["kwargs"] = {"target_folder_id": target_folder_id}
             task = bulk_import_documents_task.apply_async(
                 args=(
                     job_id,
@@ -1911,7 +2046,7 @@ def start_bulk_import():
                     force_copy,
                     dry_run,
                 ),
-                queue="indexing"
+                **options,
             )
 
             job_data["celery_task_id"] = task.id
@@ -1968,48 +2103,189 @@ def get_bulk_import_status_endpoint(job_id):
         return jsonify({"error": "Failed to get job status"}), 500
 
 
+BULK_IMPORT_ROOTS_ENV = "GUAARDVARK_ALLOWED_PATHS"
+# Where Linux and macOS mount removable and extra drives; each is a root only
+# while it exists on this machine.
+DRIVE_MOUNT_ROOTS = ("/media", "/run/media", "/mnt", "/Volumes")
+# Under WSL, /mnt holds the Windows drives (/mnt/c is all of C:), so it is not
+# a root there; GUAARDVARK_ALLOWED_PATHS adds a Windows folder by name.
+WSL_SKIPPED_MOUNT_ROOTS = ("/mnt",)
+
+
+def _on_wsl() -> bool:
+    """True under WSL1 or WSL2, by the marker scripts/platform/detect.sh reads."""
+    try:
+        with open("/proc/version", encoding="utf-8", errors="replace") as fh:
+            return bool(re.search(r"microsoft|wsl", fh.read(), re.IGNORECASE))
+    except OSError:
+        return False
+
+
+def bulk_import_roots() -> list:
+    """Directories Bulk Import may browse and import from, the home folder first.
+
+    The user's home folder, Guaardvark's uploads folder, the drive mount
+    points present on this machine (/media, /run/media, /Volumes, and /mnt
+    except under WSL) and the folders in GUAARDVARK_ALLOWED_PATHS
+    (colon-separated, the same variable the automation tools honour). The rest
+    of the data folder is refused even where the home folder holds it (see
+    :func:`_inside_data_folder`). Everything else on the disk, /etc and /
+    included, is refused: the route serves every LAN browser once network
+    access is on.
+    """
+    from backend import config
+
+    skipped = WSL_SKIPPED_MOUNT_ROOTS if _on_wsl() else ()
+    candidates = [os.path.expanduser("~"), getattr(config, "UPLOAD_DIR", "")]
+    candidates += [mount for mount in DRIVE_MOUNT_ROOTS
+                   if mount not in skipped and os.path.isdir(mount)]
+    candidates += (os.environ.get(BULK_IMPORT_ROOTS_ENV) or "").split(":")
+    roots = []
+    for candidate in candidates:
+        candidate = os.path.expanduser(str(candidate or "").strip())
+        if candidate and candidate not in roots:
+            roots.append(candidate)
+    return roots
+
+
+def browse_purpose_roots(purpose: str) -> list:
+    """Folders a picker may also browse, never import from, for one purpose.
+    "training" adds the training datasets folder: the dataset picker opens
+    there, and a stock install keeps it inside the data folder."""
+    if purpose != "training":
+        return []
+    try:
+        from backend.api.training.routes import training_datasets_dir
+    except ImportError:
+        return []
+    return [str(training_datasets_dir())]
+
+
+def _with_extra_roots(extra_roots) -> list:
+    roots = bulk_import_roots()
+    roots += [root for root in extra_roots if root not in roots]
+    return roots
+
+
+def _hidden_below_root(path: str, root: str) -> bool:
+    """True when a component of ``path`` below ``root`` starts with a dot
+    (~/.ssh, ~/.gnupg, ~/.config, .git)."""
+    rel = os.path.relpath(path, root)
+    return any(part.startswith(".") for part in rel.split(os.sep) if part not in ("", "."))
+
+
+def _containing_root(target: str, roots) -> str:
+    """The deepest resolved root that contains ``target``, or None. The
+    deepest one decides the hidden check, so a root configured under a hidden
+    folder (GUAARDVARK_UPLOAD_DIR=~/.local/share/...) works while ~/.local
+    itself stays refused."""
+    from backend.utils.path_safety import is_within, resolve
+
+    deepest = None
+    for root in roots:
+        root_real = resolve(root)
+        if is_within(target, [root_real]) and (deepest is None or len(root_real) > len(deepest)):
+            deepest = root_real
+    return deepest
+
+
+def _inside_data_folder(target: str, root: str) -> bool:
+    """True when ``target`` is in Guaardvark's data or backup folder but the
+    root that admitted it is not. A stock install keeps both under the home
+    folder; importing data/'s docstore.json, index files or config/ would break
+    the install, and backups/ holds full copies of it. The uploads folder, and
+    a GUAARDVARK_ALLOWED_PATHS folder inside either, are roots of their own and
+    stay usable."""
+    from backend import config
+    from backend.utils.path_safety import is_within, resolve
+
+    for folder in (getattr(config, "STORAGE_DIR", ""), getattr(config, "BACKUP_DIR", "")):
+        if not folder:
+            continue
+        folder_real = resolve(folder)
+        if is_within(target, [folder_real]) and not is_within(root, [folder_real]):
+            return True
+    return False
+
+
+def display_path(path: str, home: str) -> str:
+    """``path`` with the home folder written as ~, for text a person reads."""
+    base = home.rstrip("/")
+    if path == base:
+        return "~"
+    return "~" + path[len(base):] if path.startswith(base + "/") else path
+
+
+def resolve_import_directory(requested: str, extra_roots=()):
+    """``(resolved_path, None)`` when ``requested`` is a directory Bulk Import
+    may use, else ``(None, reason)``. Symlinks are resolved first, on the path
+    and on the roots, so a link inside the home folder cannot point out of it.
+    ``extra_roots`` (from :func:`browse_purpose_roots`) widens browsing only;
+    the import route never passes it."""
+    from backend.utils.path_safety import resolve
+
+    roots = _with_extra_roots(extra_roots)
+    home = roots[0]
+    target = resolve(requested or home, base=home)
+    root = _containing_root(target, roots)
+    if root is None:
+        named = ["your home folder"] + [display_path(r, home) for r in roots[1:]]
+        return None, (
+            "Bulk Import can only use folders in " + ", ".join(named)
+            + f" ({BULK_IMPORT_ROOTS_ENV} adds more)."
+        )
+    if _hidden_below_root(target, root):
+        return None, "Hidden folders (names starting with a dot) are not imported."
+    if _inside_data_folder(target, root):
+        return None, "Guaardvark's own data and backup folders are not imported; its uploads folder can be."
+    return target, None
+
+
 @files_bp.route("/browse-server", methods=["GET"])
 def browse_server_directory():
-    """GET /api/files/browse-server?path=/some/path&include_files=true - Browse server directories for bulk import"""
+    """GET /api/files/browse-server?path=/some/path&include_files=true
+
+    Lists a folder for the Bulk Import page's folder picker. No ``path`` lists
+    the home folder. Only folders under :func:`bulk_import_roots` are listed,
+    never hidden entries, and never credential files (path_safety.is_sensitive).
+    """
     logger.info("API: Browse server directory")
     try:
-        requested_path = request.args.get("path", "/")
+        from backend.utils.path_safety import is_sensitive
+
         include_files = request.args.get("include_files", "false").lower() == "true"
-        show_hidden = request.args.get("show_hidden", "false").lower() == "true"
+        extra = browse_purpose_roots(request.args.get("purpose", ""))
+        requested_path, refusal = resolve_import_directory(request.args.get("path", ""), extra)
+        roots = _with_extra_roots(extra)
+        if refusal:
+            # The roots travel with the refusal so the picker can offer them;
+            # ``home`` lets it write the home folder as ~ on screen.
+            return jsonify({"error": refusal, "code": "PATH_NOT_ALLOWED",
+                            "roots": roots, "home": roots[0]}), 403
 
-        # Security: Prevent directory traversal attacks
-        # Only allow absolute paths and validate they exist
-        import os
-
-        if not os.path.isabs(requested_path):
-            # If relative, assume it's relative to user's home or a safe base
-            requested_path = os.path.abspath(os.path.expanduser(requested_path))
-
-        # Resolve the path to prevent .. tricks
-        requested_path = os.path.realpath(requested_path)
-
-        # Check if path exists and is a directory
         if not os.path.exists(requested_path):
             return jsonify({"error": "Path does not exist"}), 404
 
         if not os.path.isdir(requested_path):
             return jsonify({"error": "Path is not a directory"}), 400
 
-        # List contents of the directory
         try:
             entries = os.listdir(requested_path)
             directories = []
             files = []
 
             for entry in sorted(entries):
-                # Skip hidden entries unless show_hidden is true
-                if entry.startswith('.') and not show_hidden:
+                if entry.startswith('.'):
                     continue
 
                 entry_path = os.path.join(requested_path, entry)
                 try:
                     stat_info = os.stat(entry_path)
                     if os.path.isdir(entry_path):
+                        # A symlink to a folder outside the roots is not
+                        # offered; opening it would only be refused.
+                        if resolve_import_directory(entry_path, extra)[1]:
+                            continue
                         # Count items in directory for preview
                         try:
                             item_count = len([e for e in os.listdir(entry_path) if not e.startswith('.')])
@@ -2021,7 +2297,7 @@ def browse_server_directory():
                             "item_count": item_count,
                             "modified": stat_info.st_mtime
                         })
-                    elif include_files:
+                    elif include_files and not is_sensitive(entry):
                         # Get file extension for type identification
                         _, ext = os.path.splitext(entry)
                         files.append({
@@ -2034,10 +2310,16 @@ def browse_server_directory():
                     # Skip entries we can't access
                     continue
 
+            # The parent is offered only while it is still an allowed folder,
+            # so the picker's Up button stops at a root instead of erroring.
+            parent = os.path.dirname(requested_path)
+            parent_allowed, _ = resolve_import_directory(parent, extra)
             response_data = {
                 "path": requested_path,
                 "directories": directories,
-                "parent_path": os.path.dirname(requested_path) if requested_path != "/" else None
+                "parent_path": parent if parent != requested_path and parent_allowed else None,
+                "roots": roots,
+                "home": roots[0],
             }
 
             if include_files:

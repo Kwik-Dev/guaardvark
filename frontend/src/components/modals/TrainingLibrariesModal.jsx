@@ -5,7 +5,8 @@
 // progress and result, and removes them again. On a machine the hardware
 // policy calls not practical, the only install button is "Install anyway".
 // Below them, the declared base models a fine-tune starts from, each
-// downloaded or removed only on its own button.
+// downloaded or removed only on its own button, and the GGUF converter Export
+// to Ollama runs, fetched from GitHub only on its Install click.
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
@@ -33,9 +34,12 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import { ActionButton, ConfirmActionDialog } from "../settings/ui";
 import {
   getBaseModels,
+  getGgufConverter,
   getTrainingLibraries,
+  installGgufConverter,
   installTrainingBaseModel,
   installTrainingLibraries,
+  removeGgufConverter,
   removeTrainingBaseModel,
   removeTrainingLibraries,
 } from "../../api/trainingService";
@@ -49,6 +53,8 @@ const sizeLabel = (mb) => {
   if (n >= 1000) return `${(n / 1000).toFixed(1)} GB`;
   return `${n < 10 ? n.toFixed(1) : Math.round(n)} MB`;
 };
+
+const bytesLabel = (bytes) => sizeLabel((Number(bytes) || 0) / 1e6);
 
 const stateChip = (lib) => {
   if (lib.state === "installed") {
@@ -76,8 +82,18 @@ const stateChip = (lib) => {
  * @param {function} [showMessage]  snackbar: (message, severity)
  * @param {function} [onChanged]    called with the new status when an install or remove ends
  * @param {function} [onBaseModelsChanged]  called with the base-model status after a download or remove
+ * @param {function} [onConverterChanged]  called with the GGUF converter status after an install or remove
+ * @param {string}   [focus]  "gguf-converter" scrolls to that section once it has loaded
  */
-const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged, onBaseModelsChanged }) => {
+const TrainingLibrariesModal = ({
+  open,
+  onClose,
+  showMessage,
+  onChanged,
+  onBaseModelsChanged,
+  onConverterChanged,
+  focus,
+}) => {
   const [info, setInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -93,16 +109,47 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged, onBaseM
   const [confirmRemoveModel, setConfirmRemoveModel] = useState(null);
   const lastDownloadState = useRef(null);
 
+  const [converter, setConverter] = useState(null);
+  const [converterError, setConverterError] = useState(null);
+  const [converterBusy, setConverterBusy] = useState(false);
+  // "install" or "remove" while that confirmation is open.
+  const [confirmConverter, setConfirmConverter] = useState(null);
+  const lastConverterState = useRef(null);
+  const converterSection = useRef(null);
+
   // The parent passes a fresh showMessage/onChanged on every render; keep them
   // in refs so the fetch callbacks stay stable and polling does not restart.
   const showMessageRef = useRef(showMessage);
   const onChangedRef = useRef(onChanged);
   const onBaseModelsChangedRef = useRef(onBaseModelsChanged);
+  const onConverterChangedRef = useRef(onConverterChanged);
   useEffect(() => {
     showMessageRef.current = showMessage;
     onChangedRef.current = onChanged;
     onBaseModelsChangedRef.current = onBaseModelsChanged;
-  }, [showMessage, onChanged, onBaseModelsChanged]);
+    onConverterChangedRef.current = onConverterChanged;
+  }, [showMessage, onChanged, onBaseModelsChanged, onConverterChanged]);
+
+  const fetchConverter = useCallback(async () => {
+    try {
+      const data = await getGgufConverter();
+      if (!data) return;
+      setConverter(data);
+      setConverterError(null);
+      const run = data.run || {};
+      if (lastConverterState.current === "running" && run.state !== "running") {
+        if (run.state === "completed") {
+          showMessageRef.current?.("GGUF converter installed.", "success");
+        } else if (run.state === "failed") {
+          showMessageRef.current?.(`GGUF converter install failed: ${run.error}`, "error");
+        }
+        onConverterChangedRef.current?.(data);
+      }
+      lastConverterState.current = run.state;
+    } catch (err) {
+      setConverterError(err.message || "Could not read the GGUF converter.");
+    }
+  }, []);
 
   const fetchBaseModels = useCallback(async () => {
     try {
@@ -158,8 +205,10 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged, onBaseM
       setLoading(true);
       lastRunState.current = null;
       lastDownloadState.current = null;
+      lastConverterState.current = null;
       fetchStatus();
       fetchBaseModels();
+      fetchConverter();
     } else {
       setInfo(null);
       setError(null);
@@ -168,11 +217,15 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged, onBaseM
       setBaseInfo(null);
       setBaseError(null);
       setConfirmRemoveModel(null);
+      setConverter(null);
+      setConverterError(null);
+      setConfirmConverter(null);
     }
-  }, [open, fetchStatus, fetchBaseModels]);
+  }, [open, fetchStatus, fetchBaseModels, fetchConverter]);
 
   const running = info?.run?.state === "running";
   const downloading = baseInfo?.download?.state === "running";
+  const converterRunning = converter?.run?.state === "running";
 
   useEffect(() => {
     if (!open || !running) return undefined;
@@ -185,6 +238,46 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged, onBaseM
     const interval = setInterval(fetchBaseModels, 1000);
     return () => clearInterval(interval);
   }, [open, downloading, fetchBaseModels]);
+
+  useEffect(() => {
+    if (!open || !converterRunning) return undefined;
+    const interval = setInterval(fetchConverter, 1000);
+    return () => clearInterval(interval);
+  }, [open, converterRunning, fetchConverter]);
+
+  const converterLoaded = Boolean(converter);
+  useEffect(() => {
+    if (open && focus === "gguf-converter" && converterLoaded) {
+      converterSection.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    }
+  }, [open, focus, converterLoaded]);
+
+  // Like the other buttons: each click asks for its own plan token first.
+  const runConverterAction = async (action) => {
+    setConverterBusy(true);
+    setConverterError(null);
+    try {
+      const plan = await getGgufConverter({ plan: true });
+      const data =
+        action === "install"
+          ? await installGgufConverter(plan.plan_token)
+          : await removeGgufConverter(plan.plan_token);
+      lastConverterState.current = data?.run?.state || null;
+      setConverter(data);
+      if (action === "remove") {
+        showMessageRef.current?.("GGUF converter removed.", "success");
+        onConverterChangedRef.current?.(data);
+      }
+    } catch (err) {
+      const message = err.message || `Could not ${action} the GGUF converter.`;
+      showMessageRef.current?.(message, "error");
+      setConverterError(message);
+      fetchConverter();
+    } finally {
+      setConverterBusy(false);
+      setConfirmConverter(null);
+    }
+  };
 
   // Like the library buttons: each click asks for its own plan token first.
   const runBaseAction = async (action, model) => {
@@ -270,7 +363,7 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged, onBaseM
   };
 
   return (
-    <Dialog open={open} onClose={() => !running && !busy && onClose()} maxWidth="sm" fullWidth>
+    <Dialog open={open} onClose={() => !running && !busy && !converterBusy && onClose()} maxWidth="sm" fullWidth>
       <DialogTitle>Training libraries</DialogTitle>
       <DialogContent dividers>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
@@ -476,6 +569,11 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged, onBaseM
                     secondary={
                       <>
                         {model.description}
+                        {model.trainable === false && (
+                          <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                            Not offered for training yet: its GPU memory has not been measured.
+                          </Typography>
+                        )}
                         {!model.fits && (
                           <Typography variant="caption" color="warning.main" sx={{ display: "block" }}>
                             Does not fit: {model.fit_reason}
@@ -526,6 +624,126 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged, onBaseM
             })}
           </List>
         )}
+
+        <Divider sx={{ my: 2 }} />
+        <Box ref={converterSection}>
+          <Typography variant="subtitle1" fontWeight={500}>
+            GGUF converter
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+            Export to Ollama converts a trained model to one GGUF file with llama.cpp&apos;s converter
+            (MIT license). Nothing downloads until you click Install; then the converter&apos;s files
+            come from GitHub at a pinned release, each checked against the sha256 Guaardvark pins.
+            No Python packages are installed: it runs on the ones Guaardvark already has.
+          </Typography>
+          {converterError && (
+            <Alert severity="error" sx={{ mb: 1 }}>
+              {converterError}
+            </Alert>
+          )}
+          {converter?.run?.state === "failed" && (
+            <Alert severity="error" sx={{ mb: 1 }}>
+              {converter.run.error}
+            </Alert>
+          )}
+          {converter && converter.problem && !converterRunning && (
+            <Alert severity="warning" sx={{ mb: 1 }}>
+              The installed converter cannot be used: {converter.problem}. Install it again.
+            </Alert>
+          )}
+          {!converter && !converterError ? (
+            <Box display="flex" justifyContent="center" p={2}>
+              <CircularProgress size={24} />
+            </Box>
+          ) : converter ? (
+            <List disablePadding>
+              <ListItem divider sx={{ py: 1.5, alignItems: "flex-start" }}>
+                <ListItemText
+                  primary={
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                      <Typography variant="body1" fontWeight={500}>
+                        {converter.project} converter
+                      </Typography>
+                      <Chip
+                        label={converter.tag}
+                        size="small"
+                        variant="outlined"
+                        title={converter.pinned_because || ""}
+                        sx={{ height: 20, fontSize: "0.65rem" }}
+                      />
+                      {converter.state !== "installed" && (
+                        <Chip
+                          label={bytesLabel(converter.download_bytes)}
+                          size="small"
+                          variant="outlined"
+                          title={`${converter.files} files`}
+                        />
+                      )}
+                      <Chip label={converter.license} size="small" variant="outlined" />
+                    </Box>
+                  }
+                  secondaryTypographyProps={{ component: "div" }}
+                  secondary={
+                    <>
+                      {converter.role}
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                        Checked with: {(converter.architectures || []).join(", ") || "none yet"} models.
+                        Export levels: {(converter.levels || []).map((l) => l.label).join(", ")}.
+                      </Typography>
+                      {converterRunning && (
+                        <Box sx={{ mt: 1 }}>
+                          <LinearProgress
+                            variant={converter.run.progress > 1 ? "determinate" : "indeterminate"}
+                            value={converter.run.progress || 0}
+                          />
+                          <Typography variant="caption">
+                            {bytesLabel(converter.run.fetched_bytes) || "0 MB"} of{" "}
+                            {bytesLabel(converter.download_bytes)}
+                          </Typography>
+                        </Box>
+                      )}
+                    </>
+                  }
+                />
+                <Box sx={{ ml: 2, minWidth: 130, textAlign: "right" }}>
+                  {converter.state === "installed" ? (
+                    <Stack spacing={1} alignItems="flex-end">
+                      <Chip icon={<CheckCircleIcon />} label="Installed" color="success" size="small" variant="outlined" />
+                      <ActionButton
+                        kind="destructive"
+                        onClick={() => setConfirmConverter("remove")}
+                        disabled={converterBusy || converterRunning}
+                      >
+                        Remove
+                      </ActionButton>
+                    </Stack>
+                  ) : (
+                    <Stack spacing={1} alignItems="flex-end">
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        startIcon={<CloudDownloadIcon />}
+                        onClick={() => setConfirmConverter("install")}
+                        disabled={converterBusy || converterRunning}
+                      >
+                        {converterRunning ? "Installing..." : converter.state === "missing" ? "Install" : "Install again"}
+                      </Button>
+                      {converter.state !== "missing" && !converterRunning && (
+                        <ActionButton
+                          kind="destructive"
+                          onClick={() => setConfirmConverter("remove")}
+                          disabled={converterBusy}
+                        >
+                          Remove
+                        </ActionButton>
+                      )}
+                    </Stack>
+                  )}
+                </Box>
+              </ListItem>
+            </List>
+          ) : null}
+        </Box>
       </DialogContent>
       <DialogActions>
         {removal.remove?.length > 0 && (
@@ -581,6 +799,45 @@ const TrainingLibrariesModal = ({ open, onClose, showMessage, onChanged, onBaseM
         busy={baseBusy}
         onConfirm={() => runBaseAction("remove", confirmRemoveModel)}
         onClose={() => !baseBusy && setConfirmRemoveModel(null)}
+      />
+      <ConfirmActionDialog
+        open={confirmConverter === "install"}
+        reversible
+        title="Install the GGUF converter?"
+        description={
+          "Downloads llama.cpp's Hugging Face to GGUF converter, MIT-licensed code by the ggml " +
+          "authors. Each file is checked against the sha256 Guaardvark pins before it is kept; " +
+          "if any differs, nothing is installed. Remove deletes it again."
+        }
+        facts={
+          converter
+            ? [
+                { label: "Downloads", value: `${converter.files} files, ${bytesLabel(converter.download_bytes)}` },
+                {
+                  label: "From",
+                  value: `${converter.download_host}, ${converter.repo} release ${converter.tag} (commit ${converter.commit})`,
+                },
+                { label: "License", value: `${converter.license} (llama.cpp)` },
+                { label: "Python packages", value: converter.python_packages },
+                { label: "Installs into", value: converter.location },
+              ]
+            : []
+        }
+        confirmLabel="Install"
+        busy={converterBusy}
+        onConfirm={() => runConverterAction("install")}
+        onClose={() => !converterBusy && setConfirmConverter(null)}
+      />
+      <ConfirmActionDialog
+        open={confirmConverter === "remove"}
+        title="Remove the GGUF converter?"
+        description="Deletes it from this machine. Export to Ollama waits until it is installed again."
+        facts={[{ label: "Deletes", value: converter?.location || "-" }]}
+        keeps="trained adapters, exported GGUF files and the models already in Ollama"
+        confirmLabel="Remove"
+        busy={converterBusy}
+        onConfirm={() => runConverterAction("remove")}
+        onClose={() => !converterBusy && setConfirmConverter(null)}
       />
     </Dialog>
   );

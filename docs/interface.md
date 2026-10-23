@@ -23,8 +23,8 @@ shortcuts. For what each feature does, see [CAPABILITIES.md](../CAPABILITIES.md)
 There are two ways to list the pages. Switch between them in **Settings → General →
 Navigation**; the choice is saved in this browser.
 
-- **Sidebar** (the default) lists every page down the left, grouped under Main, Studio,
-  Management and Configuration. The button at the bottom expands it to show names or
+- **Sidebar** (the default) lists every page down the left, grouped under Main, Code,
+  Studio, Management and Configuration. The button at the bottom expands it to show names or
   collapses it to icons; hover an icon to see its name. On a narrow window it collapses
   by itself. The bottom of the sidebar also holds System Metrics, Agent Screen and the
   microphone.
@@ -34,6 +34,13 @@ Navigation**; the choice is saved in this browser.
   Training, Upload, Bulk Import, WordPress Sites, WordPress Pages and System Dashboard.
   The right end of the bar holds System Metrics, Agent Screen, Settings, the microphone
   and a button for the floating chat.
+
+The **Code** group, and the Code workspace's second row, hold the pages that work on code:
+Code Editor, Swarm, System Map and Self-improvement. **Self-improvement** is where
+Guaardvark checks its own code: its switches (Self-improvement, Codebase locked), Run
+self-check, the pending fixes waiting for your review, the log of past runs, and the code
+keeps Autoresearch stages. Its icon shows how many fixes are waiting. Settings → Agents
+keeps a link to it, and the Uncle Claude settings stay in Settings.
 
 The product profile you picked on first start can leave some pages out of either list
 (Creator does). They are still installed and open from their address; see

@@ -11,8 +11,9 @@ services. Each tool maps to a verb the user might say in chat:
   outreach_run_pass       — "run a Reddit outreach pass" / "scout for candidates"
 
 These call the same module functions the HTTP API does, so behavior matches
-the OutreachPage button-for-button. Cadence + kill-switch + supervised mode
-gates still apply downstream — none of these tools bypass them.
+the OutreachPage button-for-button. Every draft waits for a person's approval,
+and cadence and the kill switch apply downstream — none of these tools bypass
+them, and none of them starts a post.
 """
 
 from __future__ import annotations
@@ -23,28 +24,36 @@ import re
 from typing import Any, Dict, List, Optional
 
 from backend.services.agent_tools import BaseTool, ToolParameter, ToolResult
-from backend.services.social_outreach import audit, kill_switch, persona, transitions
+from backend.services.social_outreach import (
+    audit,
+    kill_switch,
+    persona,
+    platforms,
+    profile,
+    transitions,
+)
 from backend.utils.backend_http import BackendError, is_mcp_transport, request_json
 
 logger = logging.getLogger(__name__)
 
 
-# Shared platform vocabulary so the LLM doesn't invent values like "x.com"
-_KNOWN_PLATFORMS = ("reddit", "discord", "facebook", "twitter", "youtube")
+# Shared platform vocabulary so the LLM doesn't invent values like "x.com".
+# X and LinkedIn are not here: outreach never posts to them (platforms.REFUSED).
+_KNOWN_PLATFORMS = ("reddit", "discord", "facebook", "youtube")
 _KNOWN_RUN_PLATFORMS = (
     "reddit", "self_share", "recon", "draft", "youtube", "youtube_recon",
 )
-# Statuses outreach_list_queue lists oldest first: the posting tick takes
-# approved rows in created_at order, so "what posts next" is the oldest.
+# Statuses outreach_list_queue lists oldest first: approved rows wait in
+# created_at order, so the oldest has waited longest.
 _OLDEST_FIRST_STATUSES = ("approved",)
 # What outreach_draft_post can draft. The mode decides both the persona prompt
 # and the queued row's action, so anything else ("reply", "comments") is
 # refused rather than drafted as one thing and queued as another.
 _DRAFT_MODES = ("comment", "share")
-# Platforms a mode='share' draft can be posted to. The posting tick's share
-# branch (tick_process_approved_drafts) submits a link post to the subreddit
-# named in the row's target_url and knows no other destination, so a share
-# draft for any other platform would be approved and then aborted.
+# Platforms a mode='share' draft can be posted to. The watched poster's share
+# branch (watched_post._post) submits a link post to the subreddit named in
+# the row's target_url and knows no other destination, so a share draft for
+# any other platform would be approved and then aborted.
 _SHARE_PLATFORMS = ("reddit",)
 
 # A share_target is "r/SideProject", "/r/SideProject", "SideProject", or a
@@ -64,10 +73,10 @@ def _subreddit_name(share_target: str) -> Optional[str]:
 
 
 def _share_title(draft_text: str) -> str:
-    """The title the posting tick will submit for a share row's draft_text.
+    """The title the watched poster will submit for a share row's draft_text.
 
-    Mirrors the share branch of tick_process_approved_drafts: a JSON draft
-    carries "title"; anything else is used whole.
+    Mirrors the share branch of watched_post._post: a JSON draft carries
+    "title"; anything else is used whole.
     """
     try:
         payload = json.loads(draft_text or "{}")
@@ -140,7 +149,7 @@ class OutreachStatusTool(BaseTool):
                 success=False,
                 error=(
                     "The backend could not read the outreach settings from its database, so "
-                    "whether outreach is enabled or supervised is unknown. Nothing posts "
+                    "whether outreach is enabled is unknown. Nothing posts "
                     "while the settings are unreadable."
                 ),
                 metadata=payload,
@@ -164,7 +173,8 @@ class OutreachListQueueTool(BaseTool):
             name="status", type="string", required=False,
             description=(
                 "candidate (found, not drafted yet), drafted (waiting for review), approved "
-                "(queued to post), processing (a poster has picked it up), submitting (being "
+                "(waiting for the person to start the post, or for the Discord bot), "
+                "processing (a poster has picked it up), submitting (being "
                 "published now), posted, rejected, aborted (posting failed), unsupported "
                 "(nothing here posts that action on that platform)"
             ),
@@ -246,21 +256,23 @@ class OutreachDraftPostTool(BaseTool):
     destructive = False
     description = (
         "Draft a social outreach comment or share post (does NOT post). "
-        "Platforms: reddit, discord, facebook, twitter, youtube. "
+        "Platforms: reddit, discord, facebook, youtube. X and LinkedIn are not "
+        "offered for outreach. "
         "For mode='comment' you must supply either thread_context (the OP/comment/video "
         "description) or target_url (we'll scout it — for YouTube URLs, scrapes the video "
         "title + description). mode='share' drafts a Reddit link post: platform must be "
         "reddit, share_target is the subreddit (e.g. 'r/SideProject') and share_link is "
-        "optional (defaults to guaardvark.com). "
+        "optional (defaults to the site URL in the outreach profile). "
         "The draft lands in the queue at status='drafted' for human approval — nothing "
         "posts until the user approves it on the Approvals page (Outreach tab). For a post "
-        "to the user's own connected accounts (Discord webhook, Bluesky, Mastodon, Telegram) "
-        "use request_publish."
+        "to the user's own connected accounts (Discord webhook, Bluesky, Mastodon, Telegram, "
+        "LinkedIn) use request_publish."
     )
     parameters = {
         "platform": ToolParameter(
             name="platform", type="string", required=True,
             description=f"One of: {', '.join(_KNOWN_PLATFORMS)}",
+            enum=list(_KNOWN_PLATFORMS),
         ),
         "mode": ToolParameter(
             name="mode", type="string", required=False,
@@ -284,11 +296,12 @@ class OutreachDraftPostTool(BaseTool):
         ),
         "share_link": ToolParameter(
             name="share_link", type="string", required=False,
-            description="Link to share; defaults to https://guaardvark.com",
+            description="Link to share; defaults to the site URL in the outreach profile",
         ),
         "tone": ToolParameter(
             name="tone", type="string", required=False,
-            description="Optional tone preset: default, engaging, technical, casual, formal, humorous",
+            description=f"Optional tone preset: {', '.join(persona.TONE_GUIDES)}",
+            enum=list(persona.TONE_GUIDES),
         ),
         "feature_hint": ToolParameter(
             name="feature_hint", type="string", required=False,
@@ -303,8 +316,8 @@ class OutreachDraftPostTool(BaseTool):
         "include_link": ToolParameter(
             name="include_link", type="bool", required=False,
             description=(
-                "Comment mode only. When true, the draft carries a link: the "
-                "GitHub repo for YouTube, guaardvark.com for other platforms. "
+                "Comment mode only. When true, the draft carries a link from the "
+                "outreach profile: the repo for YouTube, the site for other platforms. "
                 "The persona is asked to work it in; if it leaves it out, the "
                 "link is appended on its own line. The persona is told to grade "
                 "below 0.7 when the link cannot be made to feel natural; the "
@@ -316,6 +329,9 @@ class OutreachDraftPostTool(BaseTool):
 
     def execute(self, **kwargs) -> ToolResult:
         platform = (kwargs.get("platform") or "").strip().lower()
+        refusal = platforms.refusal_for(platform) or platforms.refusal_for_url(kwargs.get("target_url"))
+        if refusal:
+            return ToolResult(success=False, error=refusal)
         if platform not in _KNOWN_PLATFORMS:
             return ToolResult(
                 success=False,
@@ -363,7 +379,7 @@ class OutreachDraftPostTool(BaseTool):
             target_url = f"{REDDIT_BASE}/r/{subreddit}"
             context = {
                 "target": f"r/{subreddit}",
-                "link_url": (kwargs.get("share_link") or persona.SITE_URL),
+                "link_url": (kwargs.get("share_link") or profile.site_url()),
             }
         else:
             thread_context = (kwargs.get("thread_context") or "").strip()
@@ -376,6 +392,13 @@ class OutreachDraftPostTool(BaseTool):
             # server-side), which is enough context for the persona to draft a
             # comment that engages with the actual video topic.
             if not thread_context and target_url:
+                from backend.utils.settings_utils import web_access_block_reason
+                blocked = web_access_block_reason("read the thread at that link")
+                if blocked:
+                    return ToolResult(
+                        success=False,
+                        error=f"{blocked} Or pass the thread's text as thread_context.",
+                    )
                 try:
                     from backend.api.social_outreach_api import (
                         _scout_reddit_url, _scout_generic_url,
@@ -480,9 +503,8 @@ class OutreachDraftPostTool(BaseTool):
 
     @staticmethod
     def _queue_via_backend(platform, mode, target_url, target_thread_id, draft_text, grade, reason) -> ToolResult:
-        # POST /drafts always lands at status='drafted'; /draft-comment would
-        # approve for posting when outreach is unsupervised, which this tool
-        # promises never to do.
+        # POST /drafts queues the text this tool already drafted, at
+        # status='drafted'; /draft-comment would draft it a second time.
         draft = {
             "platform": platform,
             "mode": mode,
@@ -514,13 +536,15 @@ class OutreachDraftPostTool(BaseTool):
 
 
 class OutreachApproveDraftTool(BaseTool):
-    """Approve a queued draft so the next outreach pass posts it."""
+    """Approve a queued draft. Approving does not post it."""
 
     name = "outreach_approve_draft"
     description = (
         "Approve an outreach draft by id. Optionally pass draft_text to overwrite "
         "the text before approving (handy when the user asks to tweak it). "
-        "Approved drafts post on the next Celery tick, subject to cadence + kill switch."
+        "Approving does not post: a Reddit, YouTube or Facebook draft posts only when "
+        "the user presses Post now on the Approvals page with the Agent Screen open, "
+        "and the Discord bot sends a Discord draft. X and LinkedIn outreach drafts are refused."
     )
     requires_approval = True  # surfaces a confirmation card in the chat UI
     parameters = {
@@ -548,14 +572,11 @@ class OutreachApproveDraftTool(BaseTool):
                 status = transitions.current_status(event_id)
                 if status is None:
                     return ToolResult(success=False, error=f"draft {event_id} not found")
-                return ToolResult(
-                    success=False,
-                    error=f"cannot approve from status '{status}' (only from drafted)",
-                )
+                return ToolResult(success=False, error=transitions.approval_refusal(event_id))
             row = SocialOutreachLog.query.get(event_id)
             return ToolResult(
                 success=True,
-                output=_row_summary(row),
+                output={**_row_summary(row), "next": platforms.after_approval(row.platform)},
                 metadata={"id": row.id, "status": row.status},
             )
         except Exception as e:
@@ -652,7 +673,7 @@ class OutreachRunPassTool(BaseTool):
         "like 'comment on YouTube videos about Offline AI', prefer "
         "outreach_execute_intent instead. Cadence + kill switch still apply; "
         "a YouTube scout also needs web access on in Settings (off by default). "
-        "Never auto-posts while supervised."
+        "Never posts."
     )
     requires_approval = True
     parameters = {
@@ -741,7 +762,7 @@ class OutreachExecuteIntentTool(BaseTool):
         "scout→draft job with real topics. Never invent YouTube scout jobs for status "
         "questions or off-topic chat. Examples that scout: 'comment on youtube videos "
         "regarding Offline AI or ComfyUI'. Examples that do NOT scout: 'what's the "
-        "status of youtube outreach?', jokes. Does NOT post while supervised. "
+        "status of youtube outreach?', jokes. Never posts. "
         "Prefer structured platform+topics when you already know them."
     )
     requires_approval = True

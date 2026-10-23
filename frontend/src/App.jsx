@@ -62,12 +62,15 @@ const StickyNotesPage = lazyWithReload(() => import("./pages/StickyNotesPage"));
 const DevToolsPage = lazyWithReload(() => import("./pages/DevToolsPage"));
 const PluginsPage = lazyWithReload(() => import("./pages/PluginsPage"));
 const ConnectionsPage = lazyWithReload(() => import("./pages/ConnectionsPage"));
+const SocialAccountsPage = lazyWithReload(() => import("./pages/SocialAccountsPage"));
+const SocialPostsPage = lazyWithReload(() => import("./pages/SocialPostsPage"));
 const ApprovalsPage = lazyWithReload(() => import("./pages/ApprovalsPage"));
 const SwarmPage = lazyWithReload(() => import("./pages/SwarmPage"));
 const AutoresearchPage = lazyWithReload(() => import("./pages/AutoresearchPage"));
 const OutreachPage = lazyWithReload(() => import("./pages/OutreachPage"));
 const VoiceChatPage = lazyWithReload(() => import("./pages/VoiceChatPage"));
 const SystemMapPage = lazyWithReload(() => import("./pages/SystemMapPage"));
+const SelfImprovementPage = lazyWithReload(() => import("./pages/SelfImprovementPage"));
 const FilmCrewPage = lazyWithReload(() => import("./pages/FilmCrewPage"));
 const MusicVideoPage = lazyWithReload(() => import("./pages/MusicVideoPage"));
 const CastStudioPage = lazyWithReload(() => import("./pages/CastStudioPage"));
@@ -566,6 +569,26 @@ const AppContainer = () => {
                         }
                       />
                       <Route
+                        path="/social/accounts"
+                        element={
+                          <AppLayout>
+                            <ErrorBoundary>
+                              <SocialAccountsPage />
+                            </ErrorBoundary>
+                          </AppLayout>
+                        }
+                      />
+                      <Route
+                        path="/social/posts"
+                        element={
+                          <AppLayout>
+                            <ErrorBoundary>
+                              <SocialPostsPage />
+                            </ErrorBoundary>
+                          </AppLayout>
+                        }
+                      />
+                      <Route
                         path="/approvals"
                         element={
                           <AppLayout>
@@ -703,6 +726,16 @@ const AppContainer = () => {
                           <AppLayout>
                             <ErrorBoundary>
                               <SystemMapPage />
+                            </ErrorBoundary>
+                          </AppLayout>
+                        }
+                      />
+                      <Route
+                        path="/self-improvement"
+                        element={
+                          <AppLayout>
+                            <ErrorBoundary>
+                              <SelfImprovementPage />
                             </ErrorBoundary>
                           </AppLayout>
                         }

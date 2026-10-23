@@ -94,6 +94,122 @@ def is_model_installed(model_id: str) -> bool:
     return entry_files_present(VIDEO_MODEL_REGISTRY.get(model_id))
 
 
+def install_plan(model_id: str) -> list:
+    """model_id plus every entry its `requires` chain names, order-preserving.
+
+    A UNET is dead weight without its encoder and VAE; one Install of the plan
+    yields a render-ready set. Ids outside the registry are skipped.
+    """
+    plan: list = []
+
+    def _add(mid: str):
+        if mid in plan or mid not in VIDEO_MODEL_REGISTRY:
+            return
+        plan.append(mid)
+        for dep in VIDEO_MODEL_REGISTRY[mid].get("requires", []):
+            _add(dep)
+
+    _add(model_id)
+    return plan
+
+
+def missing_plan_files(model_id: str) -> list:
+    """``"<entry>:<file>"`` for every file of the plan that is absent on disk."""
+    from backend.services.local_weights import is_cached
+
+    missing: list = []
+    for eid in install_plan(model_id):
+        info = VIDEO_MODEL_REGISTRY.get(eid, {})
+        if info.get("dest") == "hf_cache":
+            for f in info.get("files", []):
+                if not is_cached(info["hf_repo"], f["src"]):
+                    missing.append(f"{eid}:{f['src']}")
+            continue
+        base = resolve_entry_dir(info)
+        for cf in info.get("check_files", []):
+            fp = base / cf
+            if not fp.exists() or fp.stat().st_size == 0:
+                missing.append(f"{eid}:{cf}")
+    return missing
+
+
+def is_plan_installed(model_id: str) -> bool:
+    """True when the model and every companion it requires are on disk."""
+    return model_id in VIDEO_MODEL_REGISTRY and all(
+        is_model_installed(eid) for eid in install_plan(model_id)
+    )
+
+
+def download_entry_files(entry: dict, local_dir: Path, *, check=None) -> None:
+    """Fetch one registry entry's files into ``local_dir`` at their ``dst`` names.
+
+    ``check`` is called before each file and may raise to stop the pull (a stall
+    monitor or a newer download taking over). Files already present are kept.
+    """
+    import shutil
+    from huggingface_hub import hf_hub_download, snapshot_download
+
+    def _check():
+        if check is not None:
+            check()
+
+    _check()
+    if entry.get("dest") == "hf_cache":
+        # The loader that reads this file calls hf_hub_download itself, so the
+        # file has to sit in the Hugging Face cache under its own repo.
+        for spec in entry.get("files", []):
+            _check()
+            hf_hub_download(repo_id=entry["hf_repo"], filename=spec["src"])
+    elif "direct_urls" in entry:
+        import urllib.request
+        for spec in entry["direct_urls"]:
+            _check()
+            dst = local_dir / spec["dst"]
+            if dst.exists() and dst.stat().st_size > 0:
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(spec["url"], str(dst))
+    elif "files" in entry:
+        for spec in entry["files"]:
+            _check()
+            dst = local_dir / spec["dst"]
+            if not (dst.exists() and dst.stat().st_size > 0):
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                got = Path(hf_hub_download(
+                    repo_id=entry["hf_repo"],
+                    filename=spec["src"],
+                    local_dir=str(local_dir),
+                ))
+                if got.resolve() != dst.resolve():
+                    shutil.move(str(got), str(dst))
+            # Some ComfyUI loaders enumerate a different directory than where
+            # the file canonically lives (LTXVAudioVAELoader reads checkpoints/,
+            # audio VAEs live in vae/); also_link hardlinks the file there.
+            extra = spec.get("also_link")
+            if extra and dst.exists():
+                link_dst = comfyui_models_dir() / extra / dst.name
+                if not link_dst.exists():
+                    link_dst.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        os.link(str(dst), str(link_dst))
+                    except OSError:
+                        shutil.copy2(str(dst), str(link_dst))
+    elif "hf_filename" in entry:
+        hf_hub_download(
+            repo_id=entry["hf_repo"],
+            filename=entry["hf_filename"],
+            local_dir=str(local_dir),
+        )
+        if entry["check_files"][0] != entry["hf_filename"]:
+            src = local_dir / entry["hf_filename"]
+            dst = local_dir / entry["check_files"][0]
+            if src.exists() and not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dst))
+    else:
+        snapshot_download(repo_id=entry["hf_repo"], local_dir=str(local_dir))
+
+
 # ── MiniMax H3 shared capability data ────────────────────────────────────
 # Every H3 generation entry carries the same contract; the variants differ
 # only in precision, size and the VRAM tier they are meant for. Declared once
@@ -285,7 +401,7 @@ VIDEO_MODEL_REGISTRY = {
     },
     "cogvideox-5b-i2v": {
         "name": "CogVideoX 1.5 5B I2V (BF16)",
-        "description": "Image-to-video, 6s clips. Full precision, best quality. Needs ~16GB VRAM. "
+        "description": "Image-to-video, 5 s clips at 1360x768, 16 fps. Full precision. Needs ~16GB VRAM. "
                        "Pulls the CogVideoX VAE + T5 encoder.",
         "hf_repo": "Kijai/CogVideoX-comfy",
         # The wrapper's single-file loader (CogVideoXModelLoader) enumerates
@@ -317,8 +433,31 @@ VIDEO_MODEL_REGISTRY = {
         "live_preview": False,
         "type": "cogvideox",
         "dimension_alignment": 16,
-        "native_fps": 8,
-        "max_frames": 49,
+        # This is CogVideoX 1.5, not the 1.0 the text-to-video entry above runs.
+        # Its card (THUDM/CogVideoX1.5-5B-I2V) sets min(W, H) = 768 and
+        # 768 <= max(W, H) <= 1360, 16 fps, 5 or 10 s clips, 50 steps, cfg 6.
+        # At 1.0's 720x480 and 8 fps a test clip's face broke into speckle and
+        # melted within four seconds (2026-10-17).
+        "short_side": 768,
+        "max_long_side": 1360,
+        # 21:9 is left out: at a 768 short side its long side would exceed 1360.
+        "aspect_ratios": ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2"],
+        "max_pixel_area": 1360 * 768,
+        # BF16 weights take ~10.5 GB and guidance doubles the batch, so on a 16 GB
+        # card every size the card allows ran out of memory at the first step
+        # without offload (1360x768, 1024x768 and 768x768 at 81 frames; 1360x768 at
+        # 49; FP8 weights at 1360x768), measured 2026-10-17 on 16376 MB. With the
+        # wrapper's sequential CPU offload 1360x768x81 fits at a 14.3 GB peak,
+        # 50.4 s/step. Cards above 16 GB are unmeasured and offload too.
+        "sequential_cpu_offload": True,
+        "native_fps": 16,
+        # The card's lengths are 81 and 161 frames; only 81 (5 s) is offered until
+        # 161 has been measured on a 16 GB card.
+        "frame_rule": "80n+1",
+        "frame_snap": "down",
+        "min_frames": 81,
+        "frames_when_unset": 81,
+        "max_frames": 81,
         "min_steps": 50,
         "default_steps": 50,
     },
@@ -420,6 +559,10 @@ VIDEO_MODEL_REGISTRY = {
         "native_fps": 16,
         "max_frames": 81,
         "speed_profiles": WAN14B_SPEED_PROFILES["i2v"],
+        # flf2v: the same experts conditioned on a start and an end frame through
+        # ComfyUI's WanFirstLastFrameToVideo, so a clip can be made to arrive at a
+        # given picture.
+        "modes": ["i2v", "flf2v"],
         # ComfyUI's ck (Comfy Kitchen INT8) attention put NaN patch tokens into these
         # experts' latents, decoded as black rectangles: 6 of 9 Lightning renders at
         # 960x544, seed 1984, 16 GB card (2026-09-12). The same graphs with PyTorch
@@ -531,9 +674,33 @@ VIDEO_MODEL_REGISTRY = {
                 "dst": "codeformer.pth",
             }
         ],
+        "requires": ["facerestore-facedetection"],
         "size_gb": 0.35,
         "vram_mb": 0,
         "type": "facerestore",
+    },
+    # facerestore_cf finds faces with these before CodeFormer restores them, and
+    # downloads them on first use when they are missing from models/facedetection.
+    # Same files from the same release URLs the node itself would fetch (the
+    # face detection model the video workflow names, retinaface_resnet50).
+    "facerestore-facedetection": {
+        "name": "Face detector and parser (CodeFormer)",
+        "description": "RetinaFace ResNet50 detector and ParseNet parser the CodeFormer face "
+                       "restore node finds faces with. Lands in models/facedetection.",
+        "local_subdir": "facedetection",
+        "direct_urls": [
+            {
+                "url": "https://github.com/xinntao/facexlib/releases/download/v0.1.0/detection_Resnet50_Final.pth",
+                "dst": "detection_Resnet50_Final.pth",
+            },
+            {
+                "url": "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/parsing_parsenet.pth",
+                "dst": "parsing_parsenet.pth",
+            },
+        ],
+        "size_gb": 0.19,
+        "vram_mb": 0,
+        "type": "encoder",
     },
     "realesrgan-x2": {
         "name": "Real-ESRGAN 2x Upscaler",
@@ -711,6 +878,71 @@ VIDEO_MODEL_REGISTRY = {
         "min_steps": 20,
         "type": "qwen-edit",
     },
+    # ── Qwen-Image 2.1 — text-to-image through ComfyUI ───────────────────────
+    # Official Comfy-Org split files. The graph needs the TextEncodeQwenImage21
+    # and QwenImage21Cache nodes (ComfyUI 0.37+); `comfy_nodes` is checked
+    # against the running server's /object_info before a render is queued.
+    # Licence: Qwen Research License, non-commercial research and evaluation
+    # only (huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE).
+    "qwen-image-21-vae": {
+        "name": "Qwen-Image 2.1 VAE (bf16)",
+        "description": "VAE for Qwen-Image 2.1 (Wan 2.2 layout, 16x, RGBA). Not the Qwen-Image 1.0 "
+                       "or Qwen-Image-Edit VAE. Qwen Research License (non-commercial).",
+        "hf_repo": "Comfy-Org/Qwen-Image-2.1",
+        "local_subdir": "vae",
+        "files": [
+            {"src": "vae/qwen_image_2.1_vae_bf16.safetensors", "dst": "qwen_image_2.1_vae_bf16.safetensors"},
+        ],
+        "size_gb": 0.68,
+        "vram_mb": 0,
+        "type": "vae",
+    },
+    "qwen-image-21-clip": {
+        "name": "Qwen3-VL 8B text encoder (int8 convrot)",
+        "description": "CLIPLoader type=qwen_image for Qwen-Image 2.1; the file the official "
+                       "Comfy template loads. Qwen Research License (non-commercial).",
+        "hf_repo": "Comfy-Org/Qwen-Image-2.1",
+        "local_subdir": "text_encoders",
+        "files": [
+            {
+                "src": "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+                "dst": "qwen3vl_8b_int8_convrot.safetensors",
+            },
+        ],
+        "size_gb": 9.35,
+        "vram_mb": 0,
+        "type": "encoder",
+    },
+    "qwen-image-21": {
+        "name": "Qwen-Image 2.1 (int8 convrot)",
+        "description": "Text-to-image with a Qwen3-VL prose encoder, native 2K output, optional "
+                       "transparent (RGBA) renders. Qwen Research License: non-commercial "
+                       "research and evaluation only. Needs ComfyUI 0.37 or newer.",
+        "hf_repo": "Comfy-Org/Qwen-Image-2.1",
+        "local_subdir": "diffusion_models",
+        "files": [
+            {
+                "src": "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+                "dst": "qwen_image_2.1_int8_convrot.safetensors",
+            },
+        ],
+        "requires": ["qwen-image-21-clip", "qwen-image-21-vae"],
+        "size_gb": 7.26,
+        # Sampling defaults are the official Comfy-Org template's
+        # (image_qwen_image_2_1_t2i: 25 steps, cfg 1.0, euler/simple, 1024x1024).
+        # No step count below 25 has been compared, so there is no min_steps.
+        "default_steps": 25,
+        "default_cfg": 1.0,
+        # Measured 2026-10-11 on a 16 GB card, ComfyUI 0.39 at the stock flags
+        # (--reserve-vram 1.0, PyTorch attention): the Qwen3-VL encoder loads whole
+        # (8.9 GB), then the transformer (6.8 GB), one at a time. Peak 11.3 GB used
+        # on the card with 1.8 GB of other processes' contexts; 1024x1024 25 steps
+        # in 22 s, 2048x2048 in 108 s. With --reserve-vram 8 ComfyUI streams the
+        # transformer instead and peaks at 8.0 GB at the same 1024x1024 speed.
+        "vram_mb": 9500,
+        "comfy_nodes": ["TextEncodeQwenImage21", "QwenImage21Cache"],
+        "type": "qwen-image",
+    },
     # ── PuLID-FLUX — one face photo → new prompt on flux-dev (no LoRA train) ──
     "pulid-antelopev2": {
         "name": "InsightFace AntelopeV2 (PuLID)",
@@ -776,9 +1008,10 @@ VIDEO_MODEL_REGISTRY = {
         "type": "encoder",
     },
     "facexlib-face": {
-        "name": "facexlib face detector and parser (PuLID)",
+        "name": "facexlib face detector and parser (PuLID, face restoration)",
         "description": "RetinaFace ResNet50 detector and ParseNet parser PuLID crops the "
-                       "face with. Lands in facexlib's weights folder.",
+                       "face with, also used by image face restoration (GFPGAN). Lands in "
+                       "facexlib's weights folder.",
         "dest": "facexlib",
         "local_subdir": "facedetection",
         "direct_urls": [
@@ -1368,15 +1601,36 @@ VIDEO_MODEL_REGISTRY = {
         ],
         "size_gb": 19.53,
         # Same architecture and size class as the fl2va build; carries its
-        # measured budget, unmeasured itself.
+        # measured budget.
         "vram_mb": 11000,
         "min_vram_gb": 16,
         **_H3_COMMON,
         "modes": ["ref2v"],
+        # Reference video rides through every sampling step beside the clip
+        # being rendered, and ComfyUI sizes its partial load from the render
+        # alone, so a board with clips needs more of the card free than the
+        # family's reserve leaves; boards of pictures keep the family's 5.0.
+        # Measured 2026-10-09 on a 16 GB RTX 40-series
+        # card, 864x480, Standard 20 steps, one picture and one voice track,
+        # clips read at the render's size, Comfy Kitchen int8 ops on its eager
+        # backend (PyTorch cu124):
+        #   reserve 5: pictures only, 5 s: 13.1 GB peak, 510 s. 5 s + 2 s clip:
+        #     15.2 GB, 640 s. 3 s + 3 s clip: out of memory (ComfyUI kept
+        #     6.5 GB of weights for the shorter render). 5 s + 5 s clip: OOM.
+        #   reserve 8: 3 s + 3 s clip: 13.0 GB, 610 s (27.5 s/step).
+        #     5 s + 3 s clip: 12.9 GB, 760 s (33.8 s/step). 5 s + 5 s clip: OOM
+        #     (15.9 GB).
+        "comfyui_reserve_vram_gb_with_clips": 8.0,
         "ref_limits": _H3_REF_LIMITS,
         "speed_profiles": H3_REF2VA_SPEED_PROFILES,
+        # ref_token_budget: the largest board measured to render on the class,
+        # in tokens: latent frames of the render, of every clip and one per
+        # picture, times (width/16)*(height/16). 16 GB: 5 s + 3 s clip + one
+        # picture at 864x480 = (37 + 22 + 1) * 1620. Other sizes scale by token
+        # count (unmeasured). The 24 GB class declares none: unmeasured.
         "tier_defaults": {
-            "16": {"width": 864, "height": 480, "speed_profile": "standard", "frames": 124},
+            "16": {"width": 864, "height": 480, "speed_profile": "standard", "frames": 124,
+                   "ref_token_budget": 60 * 1620},
             "24": {"width": 1344, "height": 768, "speed_profile": "standard", "frames": 124},
         },
     },
@@ -1627,10 +1881,14 @@ def live_preview_for_model(model_id: str) -> bool:
     return entry.get("live_preview", True) is not False
 
 
-def comfyui_reserve_vram_gb_for_model(model_id: str) -> Optional[float]:
-    """The --reserve-vram a model's entry declares, or None when it has no opinion."""
+def comfyui_reserve_vram_gb_for_model(model_id: str, with_clips: bool = False) -> Optional[float]:
+    """The --reserve-vram a model's entry declares, or None when it has no opinion.
+    ``with_clips`` asks for the reserve a reference board with clips needs,
+    where the entry declares one apart."""
     entry = VIDEO_MODEL_REGISTRY.get(model_id or "") or {}
     value = entry.get("comfyui_reserve_vram_gb")
+    if with_clips and entry.get("comfyui_reserve_vram_gb_with_clips") is not None:
+        value = entry["comfyui_reserve_vram_gb_with_clips"]
     if value is None:
         return None
     try:
@@ -1664,6 +1922,25 @@ def _comfyui_reachable() -> bool:
 COMFYUI_AUTOSTART_WAIT_S = 90
 
 
+# How the ComfyUI requirements in preflight_video_model end ("Start the ComfyUI
+# plugin, then retry.", "Start ComfyUI, then retry.").
+_START_COMFYUI_TAIL = re.compile(r"\s*Start (?:the )?ComfyUI(?: plugin)?, then retry\.\s*$")
+
+
+def comfyui_down_failure(err, context: Optional[str] = "video", why: str = ""):
+    """A COMFYUI_DOWN preflight error with the sentence every tool gives for a
+    stopped service (plugin_bridge.service_down_message for ``context``) in
+    place of its own "Start the ComfyUI plugin, then retry.". Any other error,
+    or one that already has the sentence, is returned unchanged."""
+    from backend.services.job_types import failure_kind
+    if failure_kind(err) != RenderErrorKind.COMFYUI_DOWN or "/api/plugins/comfyui/start" in str(err):
+        return err
+    from backend.services.plugin_bridge import service_down_message
+    requirement = _START_COMFYUI_TAIL.sub("", str(err)).rstrip()
+    return RenderFailure(RenderErrorKind.COMFYUI_DOWN, (
+        f"{requirement} {service_down_message('comfyui', context=context, why=why)}").strip())
+
+
 def prepare_video_model(model_id: str) -> tuple[bool, str]:
     """preflight_video_model, starting ComfyUI first when that is all that is missing.
 
@@ -1671,7 +1948,8 @@ def prepare_video_model(model_id: str) -> tuple[bool, str]:
     generate_video tool). The start goes through plugin_bridge's stage path
     (no persisted preference, an explicit user-disable still wins, GPU
     conflicts resolved there); GUAARDVARK_PLUGIN_AUTO_ORCHESTRATOR=0 turns it
-    off and the original "Start the ComfyUI plugin" error is returned.
+    off and the error names the model's requirement and how to start ComfyUI
+    (comfyui_down_failure).
     """
     ready, err = preflight_video_model(model_id)
     if ready or "ComfyUI" not in (err or ""):
@@ -1681,7 +1959,7 @@ def prepare_video_model(model_id: str) -> tuple[bool, str]:
     except Exception:
         return ready, err
     if not plugin_bridge.auto_orchestrator_enabled():
-        return ready, err
+        return ready, comfyui_down_failure(err, "video")
 
     logger.info("Video model %s needs ComfyUI; starting it", model_id)
     try:
@@ -2079,6 +2357,8 @@ def model_capabilities(model_id: str) -> dict:
         "cfg": bool(entry.get("cfg", True)),
         "aspect_ratios": list(entry.get("aspect_ratios") or []),
         "dimension_alignment": entry.get("dimension_alignment"),
+        "short_side": entry.get("short_side"),
+        "max_long_side": entry.get("max_long_side"),
         "max_pixel_area": entry.get("max_pixel_area"),
         "native_fps": entry.get("native_fps"),
         "frame_rule": entry.get("frame_rule"),
@@ -2135,6 +2415,8 @@ def _role_ok(model_id: str, role: str) -> bool:
     if role == "scene":
         modes = caps.get("modes") or []
         return bool(caps.get("audio_out") and (caps.get("supports_i2v") or "ref2v" in modes))
+    if role == "ref2v":
+        return "ref2v" in (caps.get("modes") or [])
     return False
 
 
@@ -2189,7 +2471,7 @@ def _hardware_candidates(role: str, total_vram_mb) -> list:
     first. Registry order only breaks ties.
     """
     preferred = DEFAULT_I2V_MODEL if role == "i2v" else DEFAULT_T2V_MODEL
-    if role == "scene":
+    if role in ("scene", "ref2v"):
         preferred = None
     candidates = []
     for mid, entry in VIDEO_MODEL_REGISTRY.items():
@@ -2211,6 +2493,7 @@ _ROLE_TEXT = {
     "t2v": "video from text alone",
     "i2v": "video from a start image",
     "scene": "a clip with its own soundtrack",
+    "ref2v": "video from reference images, clips and audio",
 }
 
 
@@ -2218,8 +2501,8 @@ def _same_family_for_role(model_id: str, role: str) -> str | None:
     """A model of ``model_id``'s family that serves ``role``, or None.
 
     The model itself when it can; for i2v and scene its first-frame sibling
-    (i2v_model_for); for t2v a text-to-video model of the same type, an
-    installed one first, then the one sharing the most companions.
+    (i2v_model_for); for t2v and ref2v a model of the same type serving the
+    role, an installed one first, then the one sharing the most companions.
     """
     if _role_ok(model_id, role):
         return model_id
@@ -2233,7 +2516,7 @@ def _same_family_for_role(model_id: str, role: str) -> str | None:
     siblings = [
         (bool(is_model_installed(cid)), len(shared & set(e.get("requires", []))), cid)
         for cid, e in VIDEO_MODEL_REGISTRY.items()
-        if cid != model_id and e.get("type") == entry.get("type") and _role_ok(cid, "t2v")
+        if cid != model_id and e.get("type") == entry.get("type") and _role_ok(cid, role)
     ]
     return max(siblings)[2] if siblings else None
 
@@ -2258,7 +2541,7 @@ def resolve_active_video_model(
     ComfyUI: for callers that run prepare_video_model next, and for
     displays of the chosen model.
     """
-    if role not in ("t2v", "i2v", "scene"):
+    if role not in ("t2v", "i2v", "scene", "ref2v"):
         return None, f"Unknown video role '{role}'."
     explicit = (explicit or "").strip() or None
     if explicit:
@@ -2333,13 +2616,34 @@ def snap_frames(model_id: str, frames: int, *, up: bool = False) -> int:
     return offset + k * step
 
 
+def declared_canvas(model_id: str, width: int, height: int) -> Optional[tuple]:
+    """(width, height) on the canvas an entry fixes with ``short_side`` and
+    ``max_long_side``: the short side at its declared length, the long side
+    following the request's aspect up to the cap, orientation kept. None for
+    an entry that declares no short side."""
+    entry = VIDEO_MODEL_REGISTRY.get(model_id or "") or {}
+    short = int(entry.get("short_side") or 0)
+    if not short or width <= 0 or height <= 0:
+        return None
+    align = int(entry.get("dimension_alignment") or 16) or 16
+    cap = int(entry.get("max_long_side") or 0)
+    long_side = short * max(width, height) / min(width, height)
+    if cap:
+        long_side = min(long_side, cap)
+    long_side = max(short, int(round(long_side / align)) * align)
+    if cap and long_side > cap:
+        long_side = (cap // align) * align
+    return (long_side, short) if width >= height else (short, long_side)
+
+
 def clip_defaults_for(model_id: str, total_vram_mb=None) -> dict:
     """Native fps/frames/steps/canvas for a model when the caller omitted them."""
     caps = model_capabilities(model_id)
     tiers = tier_defaults_for(model_id, total_vram_mb)
+    entry = VIDEO_MODEL_REGISTRY.get(model_id or "") or {}
     fps = int(caps.get("native_fps") or 24)
     max_frames = int(caps.get("max_frames") or 121)
-    frames = int(tiers.get("frames") or min(49, max_frames))
+    frames = int(tiers.get("frames") or entry.get("frames_when_unset") or min(49, max_frames))
     frames = max(1, min(frames, max_frames))
     steps = int(tiers.get("steps") or caps.get("default_steps") or 20)
     floor = int(caps.get("min_steps") or 0)
@@ -2347,6 +2651,8 @@ def clip_defaults_for(model_id: str, total_vram_mb=None) -> dict:
         steps = max(steps, floor)
     width = tiers.get("width")
     height = tiers.get("height")
+    if (not width or not height) and declared_canvas(model_id, 16, 9):
+        width, height = declared_canvas(model_id, 16, 9)
     if not width or not height:
         area = int(caps.get("max_pixel_area") or 512 * 512)
         align = int(caps.get("dimension_alignment") or 16) or 16

@@ -143,7 +143,9 @@ const WebsitesPage = () => {
         apiService.getWebsites(), // No filter here, filter removed from UI
         // Only fetch projects if not already loaded in store
         projects.length === 0 ? apiService.getProjects() : Promise.resolve(projects), // For mapping project names
-        wordpressService.getWordPressSites(), // Fetch WordPress sites
+        // WordPress routes need this machine or the API key; a refusal hides
+        // the WordPress links and leaves the website list.
+        wordpressService.getWordPressSites().catch(() => null),
       ]);
 
       if (websitesData && websitesData.error)
@@ -489,7 +491,7 @@ const WebsitesPage = () => {
                           )}
                           <Typography
                             variant="caption"
-                            color="text.disabled"
+                            color="text.secondary"
                             display="block"
                             sx={{ mt: 1 }}
                           >

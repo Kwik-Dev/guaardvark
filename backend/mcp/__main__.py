@@ -20,6 +20,17 @@ from contextlib import contextmanager
 # (e.g. BatchVideoGenerator must not resume on-disk batches here).
 os.environ.setdefault("GUAARDVARK_MCP_PROCESS", "1")
 
+# The MCP client starts this process, not start.sh, so it sets start.sh's
+# quiet-library settings itself, before anything imports huggingface_hub
+# (which reads them once, at import).
+for _key, _value in (
+    ("HF_HUB_DISABLE_TELEMETRY", "1"),
+    ("DO_NOT_TRACK", "1"),
+    ("UNSLOTH_DISABLE_STATISTICS", "1"),
+    ("PIP_DISABLE_PIP_VERSION_CHECK", "1"),
+):
+    os.environ.setdefault(_key, _value)
+
 
 def _configure_stderr_logging(level: int = logging.INFO) -> None:
     # Log to STDERR only — stdout is the JSON-RPC pipe.

@@ -21,6 +21,27 @@ logger = logging.getLogger(__name__)
 DESKTOP_AUTOMATION_ENABLED = os.getenv("GUAARDVARK_DESKTOP_AUTOMATION", "false").lower() == "true"
 GUI_AUTOMATION_ENABLED = os.getenv("GUAARDVARK_GUI_AUTOMATION", "false").lower() == "true"
 
+
+def _wayland_bridge():
+    """The Wayland desktop bridge client on a Wayland session, else None. There the
+    X11 tools capture a black screen and reach only XWayland windows."""
+    from backend.services import wayland_desktop
+    return wayland_desktop if wayland_desktop.is_wayland_session() else None
+
+
+def _wayland_screenshot(bridge, region=None):
+    """The current desktop as a PIL image, through the bridge."""
+    import tempfile
+    from PIL import Image
+    fd, path = tempfile.mkstemp(suffix=".png", prefix="gv_wayland_")
+    os.close(fd)
+    try:
+        bridge.call("screenshot", path=path, **({"region": list(region)} if region else {}))
+        with Image.open(path) as im:
+            return im.copy()
+    finally:
+        os.unlink(path)
+
 GUAARDVARK_ROOT = os.environ.get("GUAARDVARK_ROOT", str(Path(__file__).resolve().parents[2]))
 
 ALLOWED_PATHS = [
@@ -534,6 +555,15 @@ class DesktopAutomationService:
         if not self._check_rate_limit(is_gui=True):
             return {"success": False, "error": "GUI rate limit exceeded"}
         
+        bridge = _wayland_bridge()
+        if bridge:
+            try:
+                bridge.call("click", x=x, y=y, button=button, clicks=clicks)
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+            self._state.total_gui_operations += 1
+            self._audit("gui_click", {"x": x, "y": y, "button": button, "via": "wayland"}, True)
+            return {"success": True, "x": x, "y": y, "button": button, "clicks": clicks}
         try:
             pyautogui = self._load_pyautogui()
             pyautogui.click(x=x, y=y, button=button, clicks=clicks)
@@ -559,6 +589,15 @@ class DesktopAutomationService:
         if not self._check_rate_limit(is_gui=True):
             return {"success": False, "error": "GUI rate limit exceeded"}
         
+        bridge = _wayland_bridge()
+        if bridge:
+            try:
+                bridge.call("type", text=text, interval=interval, timeout=60 + len(text) * interval)
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+            self._state.total_gui_operations += 1
+            self._audit("gui_type", {"length": len(text), "via": "wayland"}, True)
+            return {"success": True, "text_length": len(text)}
         try:
             pyautogui = self._load_pyautogui()
             pyautogui.write(text, interval=interval)
@@ -581,6 +620,15 @@ class DesktopAutomationService:
         if not self._check_rate_limit(is_gui=True):
             return {"success": False, "error": "GUI rate limit exceeded"}
         
+        bridge = _wayland_bridge()
+        if bridge:
+            try:
+                bridge.call("hotkey", keys=list(keys))
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+            self._state.total_gui_operations += 1
+            self._audit("gui_hotkey", {"keys": list(keys), "via": "wayland"}, True)
+            return {"success": True, "keys": list(keys)}
         try:
             pyautogui = self._load_pyautogui()
             pyautogui.hotkey(*keys)
@@ -608,12 +656,15 @@ class DesktopAutomationService:
             return {"success": False, "error": "GUI rate limit exceeded"}
         
         try:
-            pyautogui = self._load_pyautogui()
-            
-            if region:
-                screenshot = pyautogui.screenshot(region=region)
+            bridge = _wayland_bridge()
+            if bridge:
+                screenshot = _wayland_screenshot(bridge, region)
             else:
-                screenshot = pyautogui.screenshot()
+                pyautogui = self._load_pyautogui()
+                if region:
+                    screenshot = pyautogui.screenshot(region=region)
+                else:
+                    screenshot = pyautogui.screenshot()
             
             buffer = io.BytesIO()
             screenshot.save(buffer, format=format.upper())
@@ -647,14 +698,21 @@ class DesktopAutomationService:
             return {"success": False, "error": "GUI rate limit exceeded"}
         
         try:
-            pyautogui = self._load_pyautogui()
-            
-            location = pyautogui.locateOnScreen(image_path, confidence=confidence)
-            
+            bridge = _wayland_bridge()
+            if bridge:
+                import pyscreeze
+                origin = bridge.call("status")["bounds"][:2]
+                found = pyscreeze.locate(image_path, _wayland_screenshot(bridge), confidence=confidence)
+                # Screenshot pixels start at the desktop's top-left, which may not be (0, 0).
+                location = found and pyscreeze.Box(found.left + origin[0], found.top + origin[1],
+                                                   found.width, found.height)
+                center = location and pyscreeze.center(location)
+            else:
+                pyautogui = self._load_pyautogui()
+                location = pyautogui.locateOnScreen(image_path, confidence=confidence)
+                center = location and pyautogui.center(location)
             self._state.total_gui_operations += 1
-            
             if location:
-                center = pyautogui.center(location)
                 return {
                     "success": True,
                     "found": True,

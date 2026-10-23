@@ -241,17 +241,44 @@ def oauth_complete(cid):
 
 
 # --- publishing --------------------------------------------------------------
+def _disclosure_choice(payload):
+    """The composer's AI disclosure switch; absent means the default (off)."""
+    value = payload.get("ai_disclosure")
+    return None if value is None else bool(value)
+
+
+def _post_options(payload):
+    """Per-post field values ({name: value}); each target keeps the ones it declares."""
+    value = payload.get("post_options")
+    return value if isinstance(value, dict) else None
+
+
+def _visibilities(payload):
+    """Per-target visibilities ({connection id: value}); ``visibility``, when
+    given, applies to the targets left out."""
+    value = payload.get("visibilities")
+    return value if isinstance(value, dict) else None
+
+
 @connections_bp.route("/publish/preflight", methods=["POST"])
 def publish_preflight():
-    from backend.services.connections import publish_service
+    from backend.services.connections import publish_service, scheduling
 
     payload = request.get_json(silent=True) or {}
+    try:
+        scheduled_at = scheduling.parse_when(payload.get("scheduled_at"))
+    except ValueError as e:
+        return jsonify({"ok": False, "per_connection": {}, "violations": [str(e)]}), 200
     result = publish_service.preflight(
         payload.get("connection_ids") or [],
         payload.get("document_ids") or [],
         body=payload.get("body") or "",
         title=payload.get("title"),
         visibility=payload.get("visibility"),
+        visibilities=_visibilities(payload),
+        scheduled_at=scheduled_at,
+        ai_disclosure=_disclosure_choice(payload),
+        post_options=_post_options(payload),
     )
     return jsonify(result), 200
 
@@ -263,6 +290,7 @@ def publish_route():
         gates,
         media as media_util,
         publish_service,
+        scheduling,
     )
 
     payload = request.get_json(silent=True) or {}
@@ -275,7 +303,11 @@ def publish_route():
             link_url=payload.get("link_url"),
             tags=payload.get("tags") or [],
             visibility=payload.get("visibility"),
+            visibilities=_visibilities(payload),
             requested_by=gates.normalize_source(payload.get("requested_by")),
+            scheduled_at=scheduling.parse_when(payload.get("scheduled_at")),
+            ai_disclosure=_disclosure_choice(payload),
+            post_options=_post_options(payload),
         )
     except (ValueError, media_util.MediaResolveError) as e:
         return _error(str(e), 400)
@@ -295,12 +327,17 @@ def list_publishes():
     platform = request.args.get("platform")
     status = request.args.get("status")
     document_id = request.args.get("document_id", type=int)
+    connection_id = request.args.get("connection_id", type=int)
     if platform:
         query = query.filter_by(platform=platform)
     if status:
-        query = query.filter_by(status=status)
+        # One status, or several separated by commas.
+        statuses = [s.strip() for s in status.split(",") if s.strip()]
+        query = query.filter(PublishRecord.status.in_(statuses))
     if document_id:
         query = query.filter_by(document_id=document_id)
+    if connection_id:
+        query = query.filter_by(connection_id=connection_id)
 
     limit = min(request.args.get("limit", default=50, type=int), 200)
     rows = query.order_by(PublishRecord.created_at.desc()).limit(limit).all()
@@ -315,15 +352,73 @@ def get_publish(pid):
     return jsonify(record.to_dict()), 200
 
 
-@connections_bp.route("/publishes/<int:pid>/approve", methods=["POST"])
-def approve_publish(pid):
+@connections_bp.route("/publishes/<int:pid>", methods=["PATCH"])
+def edit_publish(pid):
+    """Change a publish that waits for approval; it keeps waiting.
+
+    Body: any of body, title, link_url, tags, visibility, post_options,
+    ai_disclosure, scheduled_at (null clears the time), plus ``revision`` (the
+    one the editor started from) and ``edited_by`` (a source, as requested_by).
+    """
+    from backend.models import db
+    from backend.services.connections import gates, publish_service
+
+    record, err = _get_record(pid)
+    if err:
+        return err
+    payload = request.get_json(silent=True)
+    payload = payload if isinstance(payload, dict) else {}
+    try:
+        result = publish_service.edit(
+            record,
+            publish_service.edit_changes(payload),
+            revision=payload.get("revision"),
+            edited_by=gates.normalize_source(payload.get("edited_by")),
+        )
+    except publish_service.PublishChanged as e:
+        db.session.rollback()
+        return _error(str(e), 409, code=e.code, publish=record.to_dict())
+    except ValueError as e:
+        return _error(str(e), 400)
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        return _error("Database error", 500, details=str(e))
+    return jsonify(result), 200
+
+
+@connections_bp.route("/publishes/<int:pid>/preflight", methods=["POST"])
+def edit_publish_preflight(pid):
+    """Validate an edit to a held publish without saving it (same body as PATCH)."""
     from backend.services.connections import publish_service
 
     record, err = _get_record(pid)
     if err:
         return err
+    payload = request.get_json(silent=True)
     try:
-        result = publish_service.approve(record)
+        changes = publish_service.edit_changes(payload if isinstance(payload, dict) else {})
+    except ValueError as e:
+        return jsonify({"ok": False, "per_connection": {}, "violations": [str(e)], "changed": []}), 200
+    return jsonify(publish_service.edit_preflight(record, changes)), 200
+
+
+@connections_bp.route("/publishes/<int:pid>/approve", methods=["POST"])
+def approve_publish(pid):
+    """Body: ``revision``, the one the person was shown; omitted means as queued."""
+    from backend.models import db
+    from backend.services.connections import publish_service
+
+    record, err = _get_record(pid)
+    if err:
+        return err
+    payload = request.get_json(silent=True)
+    try:
+        result = publish_service.approve(
+            record, revision=payload.get("revision") if isinstance(payload, dict) else None
+        )
+    except publish_service.PublishChanged as e:
+        db.session.rollback()
+        return _error(str(e), 409, code=e.code, publish=record.to_dict())
     except ValueError as e:
         return _error(str(e), 400)
     except RuntimeError as e:
@@ -359,16 +454,83 @@ def cancel_publish(pid):
     return jsonify(record.to_dict()), 200
 
 
+@connections_bp.route("/publishes/<int:pid>/delete-remote", methods=["POST"])
+def delete_publish_remote(pid):
+    """Delete on platform: remove a posted (or platform-scheduled) post."""
+    from backend.services.connections import publish_service
+
+    record, err = _get_record(pid)
+    if err:
+        return err
+    try:
+        message = publish_service.delete_remote(record)
+    except ValueError as e:
+        return _error(str(e), 400)
+    except RuntimeError as e:
+        return _error(str(e), 502)
+    return jsonify({"message": message, "publish": record.to_dict()}), 200
+
+
+@connections_bp.route("/usage", methods=["GET"])
+def connection_usage():
+    """Per connection: posts so far, last post, what is scheduled, and each
+    declared rate limit with the posts that count against it now."""
+    from sqlalchemy import func
+
+    from backend.models import Connection, PublishRecord, db
+    from backend.services.connections import rate_limits, registry
+
+    family = request.args.get("family") or "social"
+    try:
+        rows = Connection.query.filter_by(family=family).all()
+        counts = dict(
+            db.session.query(PublishRecord.connection_id, func.count(PublishRecord.id))
+            .filter(PublishRecord.status.in_(rate_limits.WENT_OUT_STATUSES))
+            .group_by(PublishRecord.connection_id)
+            .all()
+        )
+        last = dict(
+            db.session.query(PublishRecord.connection_id, func.max(PublishRecord.posted_at))
+            .group_by(PublishRecord.connection_id)
+            .all()
+        )
+        scheduled = dict(
+            db.session.query(PublishRecord.connection_id, func.count(PublishRecord.id))
+            .filter(PublishRecord.status == "scheduled")
+            .group_by(PublishRecord.connection_id)
+            .all()
+        )
+        usage = {}
+        for connection in rows:
+            try:
+                limits = registry.spec_for(connection.provider).capabilities.rate_limits
+            except KeyError:
+                limits = ()
+            last_posted = last.get(connection.id)
+            usage[str(connection.id)] = {
+                "posts": counts.get(connection.id, 0),
+                "last_posted_at": last_posted.isoformat() if last_posted else None,
+                "scheduled": scheduled.get(connection.id, 0),
+                "rate_limits": rate_limits.usage(connection.id, limits),
+            }
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        logger.error("Connection usage failed: %s", e)
+        return _error("Database error", 500, details=str(e))
+    return jsonify({"usage": usage}), 200
+
+
 # --- settings ----------------------------------------------------------------
 def _publish_settings() -> dict:
-    """The publish switches, plus the stop on all public posting. The stop is
-    reported here but switched from the Outreach page (/api/social-outreach)."""
+    """The publish switch, plus the stop on all public posting. The stop is
+    reported here but switched from the Outreach page (/api/social-outreach).
+    Approval has no global switch: each publish waits for it, except on a
+    connection set to post without it (PUT /<id> post_without_approval)."""
     from backend.services.connections import gates
 
     stop_reason = gates.posting_stop_reason()
     return {
         "publish_enabled": gates.publish_enabled(),
-        "publish_supervised": gates.publish_supervised(),
         "posting_stopped": stop_reason is not None,
         "posting_stop_reason": stop_reason,
     }
@@ -384,8 +546,12 @@ def set_publish_settings():
     from backend.services.connections import gates
 
     payload = request.get_json(silent=True) or {}
+    if "publish_supervised" in payload:
+        return _error(
+            "Approval can no longer be switched off for all publishing. A Discord "
+            "webhook connection can be set to post without approval on its own card.",
+            400,
+        )
     if "publish_enabled" in payload:
         gates.set_publish_enabled(bool(payload["publish_enabled"]))
-    if "publish_supervised" in payload:
-        gates.set_publish_supervised(bool(payload["publish_supervised"]))
     return jsonify(_publish_settings()), 200

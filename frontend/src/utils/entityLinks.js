@@ -14,7 +14,7 @@ export const TASK_PARAMS = {
 };
 
 /** The ProjectDetailPage tab names, in tab order. */
-export const PROJECT_TABS = ["tasks", "documents", "websites", "rules"];
+export const PROJECT_TABS = ["tasks", "documents", "websites", "rules", "videos"];
 
 /** Query parameters the Files page reads to list one client's or website's documents. */
 export const FILES_PARAMS = { client: "client_id", website: "website_id" };

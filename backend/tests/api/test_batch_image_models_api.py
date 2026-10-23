@@ -276,6 +276,113 @@ def test_list_includes_undownloaded_user_flux(client, monkeypatch):
     assert "user-flux-fp8" not in [m["id"] for m in payload["data"]["unavailable_models"]]
 
 
+def test_list_carries_missing_files_for_comfy_rows(client, monkeypatch):
+    # A ComfyUI model that lacks its companions says which files Install still
+    # fetches, in the editing packs' "<entry>:<file>" shape; offline rows say [].
+    from backend.services import user_image_models as uim
+
+    gen = api.get_batch_image_generator().image_generator
+    base = {"downloaded": False, "availability": "downloadable", "selectable": True,
+            "description": "", "recommended": False, "kind": "comfy_files", "order": 1}
+    gen.get_available_models = lambda probe_remote=True: {
+        "qwen-image-21": {**base, "id": "comfy:qwen-image-21", "label": "Qwen-Image 2.1", "family": "qwen-image-21",
+                          "user": False, "missing_files": ["qwen-image-21-clip:qwen3vl_8b_int8_convrot.safetensors"]},
+        "user-qwen-image-21-ft": {**base, "id": "user:user-qwen-image-21-ft", "label": "FT", "family": "qwen-image-21",
+                                  "user": True, "missing_files": ["user-qwen-image-21-ft:qwen-image-2.1-FT-fp8.safetensors",
+                                                                  "qwen-image-21-vae:qwen_image_2.1_vae_bf16.safetensors"]},
+        "zimage-turbo": {**base, "id": "Tongyi-MAI/Z-Image-Turbo", "label": "Z", "family": "zimage", "user": False},
+    }
+    monkeypatch.setattr(uim, "catalog_rows", lambda _g: [])
+    monkeypatch.setattr(uim, "family_choices", lambda: [])
+    payload = client.get("/api/batch-image/models").get_json()
+    assert payload["success"], payload
+    rows = {m["id"]: m for m in payload["data"]["models"]}
+    assert rows["qwen-image-21"]["missing_files"] == ["qwen-image-21-clip:qwen3vl_8b_int8_convrot.safetensors"]
+    assert rows["user-qwen-image-21-ft"]["missing_files"][0].startswith("user-qwen-image-21-ft:")
+    assert rows["zimage-turbo"]["missing_files"] == []
+    assert rows["qwen-image-21"]["prompt_style"] == "natural"
+
+
+def test_generator_missing_files_reads_the_registry_plan(monkeypatch, tmp_path):
+    from backend.services import video_model_registry as vmr
+    from backend.services.offline_image_generator import OfflineImageGenerator as G
+
+    monkeypatch.setattr(vmr, "comfyui_models_dir", lambda: tmp_path / "models")
+    gen = G.__new__(G)
+    gen.available_models = {"qwen-image-21": "comfy:qwen-image-21", "flux-dev": "comfy:flux-dev",
+                            "zimage-turbo": "Tongyi-MAI/Z-Image-Turbo"}
+    gen.comfy_only_models = {"flux-dev", "qwen-image-21", "comfyui"}
+    gen.user_entries, gen.user_files, gen.family_overrides = {}, {}, {}
+    assert gen.missing_files_for("qwen-image-21") == [
+        "qwen-image-21:qwen_image_2.1_int8_convrot.safetensors",
+        "qwen-image-21-clip:qwen3vl_8b_int8_convrot.safetensors",
+        "qwen-image-21-vae:qwen_image_2.1_vae_bf16.safetensors",
+    ]
+    assert gen.missing_files_for("zimage-turbo") == []
+    assert gen._is_model_downloaded("comfy:qwen-image-21") is False
+    for eid in vmr.install_plan("qwen-image-21"):
+        entry = vmr.VIDEO_MODEL_REGISTRY[eid]
+        p = vmr.resolve_entry_dir(entry) / entry["check_files"][0]
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    assert gen._is_model_downloaded("comfy:qwen-image-21") is True
+    assert gen.missing_files_for("qwen-image-21") == []
+
+
+def test_list_reports_prompt_style_per_model_and_for_auto(client, monkeypatch):
+    # The page hides the content-type and anatomy controls for models that
+    # read prompts as prose; the list says which ones those are.
+    from backend.services import user_image_models as uim
+
+    gen = api.get_batch_image_generator().image_generator
+    base = {
+        "downloaded": True, "availability": "installed", "selectable": True,
+        "description": "", "recommended": False, "user": False, "kind": "diffusers",
+    }
+    gen.get_available_models = lambda probe_remote=True: {
+        "zimage-turbo": {**base, "id": "Tongyi-MAI/Z-Image-Turbo", "label": "Z-Image", "family": "zimage", "order": 1},
+        "sd-xl": {**base, "id": "stabilityai/sdxl", "label": "SDXL", "family": "sdxl", "order": 2},
+        "user-krea-thing": {**base, "id": "user:krea", "label": "Krea", "family": None, "order": 3},
+    }
+    monkeypatch.setattr(uim, "catalog_rows", lambda _g: [])
+    monkeypatch.setattr(uim, "family_choices", lambda: [])
+    payload = client.get("/api/batch-image/models").get_json()
+    assert payload["success"], payload
+    styles = {m["id"]: m["prompt_style"] for m in payload["data"]["models"]}
+    assert styles["zimage-turbo"] == "natural"
+    assert styles["sd-xl"] == "tags"
+    # No family on the row: the id decides (Krea 2 is a tags family until A/B'd).
+    assert styles["user-krea-thing"] == "tags"
+    assert payload["data"]["auto_prompt_style"] in ("natural", "tags")
+
+
+def test_list_auto_prompt_style_follows_what_auto_renders_with(client, monkeypatch):
+    # Not the Settings model's family: the model the router would pick for a
+    # neutral prompt on this box (Krea 2 on a roomy card, SDXL when Z-Image is
+    # not installed), or the Settings default when the generator can honour it.
+    from backend.services import user_image_models as uim
+
+    gen = api.get_batch_image_generator().image_generator
+    gen.get_available_models = lambda probe_remote=True: {}
+    monkeypatch.setattr(uim, "catalog_rows", lambda _g: [])
+    monkeypatch.setattr(uim, "family_choices", lambda: [])
+
+    gen._auto_select_model = lambda prompt="", style="realistic": "sd-xl"
+    data = client.get("/api/batch-image/models").get_json()["data"]
+    assert (data["auto_model"], data["auto_prompt_style"]) == ("sd-xl", "tags")
+
+    gen.configured_default_for_auto = lambda: "zimage-turbo"
+    data = client.get("/api/batch-image/models").get_json()["data"]
+    assert (data["auto_model"], data["auto_prompt_style"]) == ("zimage-turbo", "natural")
+
+    # Nothing on disk: the router answers None and the family default stands in.
+    gen.configured_default_for_auto = lambda: None
+    gen._auto_select_model = lambda prompt="", style="realistic": None
+    data = client.get("/api/batch-image/models").get_json()["data"]
+    assert data["auto_model"] is None
+    assert data["auto_prompt_style"] in ("natural", "tags")
+
+
 def test_dir_bytes_counts_dest_including_incomplete(tmp_path):
     dest = tmp_path / "unet"
     dest.mkdir()

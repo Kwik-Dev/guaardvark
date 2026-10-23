@@ -83,10 +83,11 @@ class LoopDetector:
 
 @dataclass
 class NodeTarget:
+    """Where to send a forwarded request. The request is signed as this
+    machine (backend/utils/node_auth.py); the target needs no secret of ours."""
     node_id: str
     host: str
     port: int
-    api_key: str = ""  # InterconnectorNode has no api_key column yet; v1 sends node_id
 
     @property
     def base_url(self) -> str:
@@ -141,8 +142,7 @@ class ProxyTargetResolver:
                 if not fm.is_online(node_id):
                     return None
                 host, port = addr
-                return NodeTarget(node_id=node_id, host=host, port=port,
-                                  api_key=node_id)
+                return NodeTarget(node_id=node_id, host=host, port=port)
         except Exception:
             pass
         # DB fallback (e.g. address not yet cached in FleetMap).
@@ -153,10 +153,7 @@ class ProxyTargetResolver:
             return None
         if node is None or not node.online:
             return None
-        # api_key column doesn't exist yet — fall back to node_id for handshake
-        api_key = getattr(node, "api_key", None) or node.node_id
-        return NodeTarget(node_id=node.node_id, host=node.host,
-                          port=node.port, api_key=api_key)
+        return NodeTarget(node_id=node.node_id, host=node.host, port=node.port)
 
 
 # ---- HTTP forwarder ------------------------------------------------
@@ -185,9 +182,9 @@ class HttpProxyForwarder:
         response back. Raises requests.ConnectionError / Timeout on failure
         so the middleware can iterate to the next fallback.
         """
-        import os
         import requests as _rq
         from flask import Response
+        from backend.utils.node_auth import request_auth
 
         headers = self._sanitize_headers(dict(request.headers), target, request)
         timeout = self.TIMEOUT_PROFILES.get(workload, (1, 30))
@@ -203,6 +200,8 @@ class HttpProxyForwarder:
             stream=True,
             timeout=timeout,
             allow_redirects=False,
+            # Signed as this machine, as sent (final URL and body).
+            auth=request_auth(),
         )
 
         resp_headers = {k: v for k, v in upstream.headers.items()
@@ -214,9 +213,10 @@ class HttpProxyForwarder:
         )
 
     def _sanitize_headers(self, incoming: dict, target, request) -> dict:
-        import os
+        from backend.utils.node_identity import local_node_id
         # X-API-Key and the browser's sign-in cookie belong to this install;
-        # another node has its own key and gets target.api_key below.
+        # another node has its own key, and forward() signs the request as
+        # this machine instead. Incoming X-GX-* headers are another sender's.
         # Origin and Sec-Fetch-* say how the browser reached this install,
         # which already checked them (backend/utils/cross_site_guard.py); the
         # next node gets a call between machines, which carries neither.
@@ -226,6 +226,8 @@ class HttpProxyForwarder:
         for k, v in incoming.items():
             name = k.lower()
             if name in HOP_BY_HOP_HEADERS or name == "x-api-key":
+                continue
+            if name.startswith("x-gx-"):
                 continue
             if name == "origin" or name.startswith("sec-fetch-"):
                 continue
@@ -241,6 +243,5 @@ class HttpProxyForwarder:
             prev_hops = 0
         out["X-Guaardvark-Proxy"] = "1"
         out["X-Guaardvark-Hops"] = str(prev_hops + 1)
-        out["X-Guaardvark-Source-Node"] = os.environ.get("CLUSTER_NODE_ID", "unknown")
-        out["X-Guaardvark-API-Key"] = target.api_key
+        out["X-Guaardvark-Source-Node"] = local_node_id()
         return out

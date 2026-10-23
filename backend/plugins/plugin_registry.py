@@ -7,6 +7,8 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+from backend.utils.display_paths import display_path
+
 from .plugin_base import PluginMetadata, PluginStatus, PluginType
 from .plugin_config_store import PluginConfigStore
 
@@ -127,6 +129,12 @@ class PluginRegistry:
     def get_plugin_dir(self, plugin_id: str) -> Optional[Path]:
         """Get plugin directory path by ID"""
         return self._plugin_dirs.get(plugin_id)
+
+    def display_plugin_dir(self, plugin_id: str) -> str:
+        """The plugin folder as it is safe to show: ``plugins/ollama`` inside
+        the checkout, ``~/...`` under the home directory, '' when unknown."""
+        plugin_dir = self._plugin_dirs.get(plugin_id)
+        return display_path(plugin_dir) if plugin_dir else ''
     
     def get_all_plugins(self) -> Dict[str, PluginMetadata]:
         """Get all registered plugins"""
@@ -134,13 +142,21 @@ class PluginRegistry:
     
     def list_plugins(self) -> List[Dict[str, Any]]:
         """
-        List all plugins with their basic info.
-        
+        List all plugins with their basic info, in display-name order.
+
+        Discovery order is the directory listing's, which differs between
+        file systems and changed every time a plugin was added; the Plugins
+        page draws the cards in this order.
+
         Returns:
             List of plugin info dictionaries
         """
         result = []
-        for plugin_id, metadata in self._plugins.items():
+        ordered = sorted(
+            self._plugins.items(),
+            key=lambda item: ((item[1].name or item[0]).casefold(), item[0]),
+        )
+        for plugin_id, metadata in ordered:
             result.append({
                 'id': plugin_id,
                 'name': metadata.name,
@@ -152,7 +168,10 @@ class PluginRegistry:
                 'port': metadata.port,
                 'vram_estimate_mb': metadata.vram_estimate_mb,
                 'excludes': list(metadata.excludes or []),
-                'plugin_dir': str(self._plugin_dirs.get(plugin_id, '')),
+                # Shown on the card and pushed to every browser in each
+                # snapshot, so never the absolute path: it names the home
+                # folder and the login (demo recordings, screenshots).
+                'plugin_dir': self.display_plugin_dir(plugin_id),
                 'config': metadata.config.to_dict(),
             })
         return result

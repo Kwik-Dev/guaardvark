@@ -1,5 +1,6 @@
 """Register production-pipeline outputs in the Documents/Folders hierarchy
-so they surface in DocumentsPage and ImagesPage automatically.
+so they surface in DocumentsPage. The Media Library lists the finished films
+through GET /api/production/films.
 
 Folder layout: project_<id>/productions/<prod_id>/<category>/
 
@@ -36,6 +37,21 @@ def _ensure_folder(name: str, parent_id: int | None, path: str) -> Folder:
     return f
 
 
+def _root_name(production: Production) -> str:
+    if production.project_id is not None:
+        return f"project_{production.project_id}"
+    return "orphan"
+
+
+def production_outputs(production: Production, category: str) -> list[Document]:
+    """The documents registered for one category of a production, newest first."""
+    path = f"{_root_name(production)}/productions/{production.id}/{category}"
+    leaf = Folder.query.filter_by(path=path).first()
+    if leaf is None:
+        return []
+    return Document.query.filter_by(folder_id=leaf.id).order_by(Document.id.desc()).all()
+
+
 def register_production_output(
     *, production: Production, file_path: str, category: str,
 ) -> Document:
@@ -48,11 +64,7 @@ def register_production_output(
         )
 
     # Build the path: project_<n>/productions/<prod_id>/<category>
-    if production.project_id is not None:
-        root_name = f"project_{production.project_id}"
-    else:
-        root_name = "orphan"
-
+    root_name = _root_name(production)
     root = _ensure_folder(root_name, parent_id=None, path=root_name)
     productions = _ensure_folder(
         "productions", parent_id=root.id, path=f"{root.path}/productions"
@@ -88,11 +100,14 @@ def register_production_output(
 
     size = dest.stat().st_size if dest.exists() else 0
 
+    # Registration only: nothing queues indexing for a render, so the row
+    # must not say INDEXING.
     doc = Document(
         filename=dest.name,
         path=str(dest.relative_to(upload_base)),
         folder_id=leaf.id,
         size=size,
+        index_status="NOT_INDEXED",
     )
     db.session.add(doc)
     db.session.commit()

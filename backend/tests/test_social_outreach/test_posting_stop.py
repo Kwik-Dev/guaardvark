@@ -28,9 +28,9 @@ def _setting(key, value):
     db.session.commit()
 
 
-def _row(status, abort_reason=None):
+def _row(status, abort_reason=None, platform="reddit"):
     row = SocialOutreachLog(
-        platform="reddit", action="comment", status=status, draft_text="hello",
+        platform=platform, action="comment", status=status, draft_text="hello",
         target_url="https://www.reddit.com/r/x/comments/abc/t/", target_thread_id="abc",
         abort_reason=abort_reason,
     )
@@ -86,14 +86,14 @@ def test_the_posting_tick_skips_while_stopped(app, monkeypatch):
 
     result = social_outreach_tasks.tick_process_approved_drafts.run()
 
-    assert result == {"processed": 0, "reason": "kill_switch_off"}
+    assert result == {"unsupported": 0, "reason": "kill_switch_off"}
     assert _status(row_id).status == "approved"
 
 
 def test_claim_route_names_the_stop(app, client):
     app.register_blueprint(social_outreach_api.social_outreach_bp)
     _setting(kill_switch.POSTING_STOP_KEY, "true")
-    row_id = _row("approved")
+    row_id = _row("approved", platform="discord")
 
     resp = client.post(f"/api/social-outreach/claim/{row_id}")
 

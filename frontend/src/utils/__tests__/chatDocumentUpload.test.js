@@ -47,6 +47,19 @@ describe("the notice a chat upload sends", () => {
     const result = await pending;
     expect(result.indexing).toBe("indexed");
     expect(result.message).toContain("**Status:** Uploaded and indexed");
+    expect(result.request).toBe(false);
+  });
+
+  it("reports the codegen request for a readable code file as a request, not a notice", async () => {
+    docStatus({ index_status: "INDEXED" });
+    const script = new File(["print(1)"], "script.py", { type: "text/x-python" });
+    const result = await uploadChatDocument(script, { sessionId: "s1", codeGenMode: true });
+    expect(result.request).toBe(true);
+    expect(result.message.startsWith("/codegen")).toBe(true);
+
+    const plain = await uploadChatDocument(script, { sessionId: "s1" });
+    expect(plain.request).toBe(false);
+    expect(plain.message).toContain("**Code File Uploaded Successfully**");
   });
 
   it("says indexing is queued for a stored text file, not that it was indexed", async () => {
